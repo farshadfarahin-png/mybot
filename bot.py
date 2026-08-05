@@ -3,8 +3,8 @@ import requests
 import json
 import base58
 from threading import Thread
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ==========================================
 # تنظیمات اصلی شما (اطلاعات خود را اینجا جایگزین کنید)
@@ -50,6 +50,19 @@ def check_token_security(token_address):
         return False, "Invalid account"
     except Exception:
         return False, "RPC Error"
+
+# تابع ارسال پیام به تلگرام به صورت امن
+def send_telegram_message(text):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "disable_web_page_preview": True
+        }
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print("Error sending telegram message:", e)
 
 # موتور پردازش و اسکن بازار در پس‌زمینه
 def auto_trader_loop(app):
@@ -101,3 +114,39 @@ def auto_trader_loop(app):
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس: {token_addr}\n\n"
                         f"💵 قیمت ورود: ${price:.8f}\n"
+                        f"📈 حد سود: ${target_tp:.8f}\n"
+                        f"📉 حد ضرر: ${target_sl:.8f}\n\n"
+                        f"🔗 لینک دکس‌اسکرینر:\n{dex_link}\n\n"
+                        f"🔗 لینک فوتون:\n{photon_link}"
+                    )
+                    
+                    send_telegram_message(msg)
+
+        except Exception as e:
+            print("Loop error:", e)
+            time.sleep(5)
+
+# دستورات ربات تلگرام
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_config["is_running"] = True
+    await update.message.reply_text("🤖 ربات اسکنر سولانا روشن شد و در حال جستجوی سیگنال است!")
+
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_config["is_running"] = False
+    await update.message.reply_text("🛑 ربات متوقف شد.")
+
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stop", stop))
+
+    # شروع ترد پس‌زمینه برای اسکن بازار
+    t = Thread(target=auto_trader_loop, args=(app,), daemon=True)
+    t.start()
+
+    print("Bot is running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
