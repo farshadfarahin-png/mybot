@@ -1,4 +1,4 @@
-iImport time
+import time
 import requests
 import json
 import base58
