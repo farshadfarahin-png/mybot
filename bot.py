@@ -2,7 +2,9 @@ import time
 import requests
 import json
 import base58
+import os
 from threading import Thread
+from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
@@ -11,11 +13,11 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8604836306:AAGxFStZhLvYzUOJ_StFwt0yQ14DZEn1Ly4"
 TELEGRAM_CHAT_ID = "601441430"
-PRIVATE_KEY_BASE58 ="5E3ff6vpUSDnpno8WvQcwHsiEgwXdV1yMWx5NjyqGguXAyWS9vrjcs3tQeQajxQuAbJdQnPybTbrWGiTeYfaworh"
+PRIVATE_KEY_BASE58 = "5E3ff6vpUSDnpno8WvQcwHsiEgwXdV1yMWx5NjyqGguXAyWS9vrjcs3tQeQajxQuAbJdQnPybTbrWGiTeYfaworh"
 
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 
-# متغیرهای تنظیمات ربات
+# تنظیمات پیش‌فرض ربات
 IS_RUNNING = False
 BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
@@ -52,7 +54,7 @@ def check_token_security(token_address):
     except Exception:
         return False, "RPC Error"
 
-# موتور پردازش، خرید، مانیتورینگ و فروش خودکار در پس‌زمینه
+# موتور پردازش، تحلیل و ارسال اعلان‌های دقیق مطابق عکس
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
@@ -62,7 +64,7 @@ def auto_trader_loop(app):
             continue
 
         try:
-            # ۱. بررسی موقعیت‌های باز برای حد سود و حد ضرر
+            # ۱. بررسی موقعیت‌های باز برای حد سود (TP) و حد ضرر (SL)
             tokens_to_close = []
             for token_addr, pos in list(active_positions.items()):
                 pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=5).json()
@@ -79,6 +81,7 @@ def auto_trader_loop(app):
                         reason = "حد سود فعال شد" if pnl_percent >= 0 else "حد ضرر فعال شد"
                         symbol = pos['symbol']
                         
+                        # قالب دقیق پیام فروش مطابق عکس شما
                         exit_msg = (
                             f"🛑 فروش خودکار ({reason})\n\n"
                             f"🪙 توکن: {symbol}\n"
@@ -92,7 +95,7 @@ def auto_trader_loop(app):
             for t_addr in tokens_to_close:
                 active_positions.pop(t_addr, None)
 
-            # ۲. اسکن توکن‌های ترند و مطمئن جدید
+            # ۲. اسکن توکن‌های ترند و برتر بازار سولانا
             url_trending = "https://api.dexscreener.com/token-boosts/top/v1"
             res = requests.get(url_trending, timeout=8).json()
             
@@ -119,7 +122,7 @@ def auto_trader_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                # فیلترهای نقدینگی و حجم برای اطمینان از کیفیت توکن
+                # فیلترهای نقدینگی و حجم
                 if liquidity >= MIN_LIQUIDITY and volume_5m >= MIN_VOLUME_5M:
                     is_safe, _ = check_token_security(token_addr)
                     if not is_safe:
@@ -140,6 +143,7 @@ def auto_trader_loop(app):
                     dex_link = f"https://dexscreener.com/solana/{token_addr}"
                     photon_link = f"https://photon-sol.tinyastro.io/en/lp/{token_addr}"
 
+                    # قالب دقیق پیام خرید مطابق عکس شما (بدون کم و زیاد)
                     msg = (
                         f"🚨 سیگنال جدید شناسایی شد\n"
                         f"✅ وضعیت خرید: انجام شد (موفق)\n\n"
@@ -164,6 +168,17 @@ def auto_trader_loop(app):
 
         time.sleep(5)
 
+# وب‌سرور فلاسگ برای روشن ماندن ۲۴ ساعته روی رندر
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def home():
+    return "Bot is running perfectly!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
+
 # منوی کنترل ربات
 def get_main_keyboard():
     return InlineKeyboardMarkup([
@@ -178,19 +193,31 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_VOLUME
     AWAITING_VOLUME = False
-    await update.message.reply_text("🤖 اتاق کنترل ربات سولانا (روی سرور)", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    await update.message.reply_text("🤖 اتاق کنترل ربات سولانا", reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, AWAITING_VOLUME
     query = update.callback_query
-    await query.answer()
+    
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     if query.data == "start_bot":
         IS_RUNNING = True
-        await query.edit_message_text("🟢 اسکن خودکار و خرید و فروش فعال شد.", reply_markup=get_main_keyboard())
+        try:
+            await query.edit_message_text("🟢 اسکن خودکار و خرید و فروش فعال شد.", reply_markup=get_main_keyboard())
+        except Exception:
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="🟢 اسکن خودکار و خرید و فروش فعال شد.", reply_markup=get_main_keyboard())
+            
     elif query.data == "stop_bot":
         IS_RUNNING = False
-        await query.edit_message_text("🔴 ربات متوقف شد.", reply_markup=get_main_keyboard())
+        try:
+            await query.edit_message_text("🔴 ربات متوقف شد.", reply_markup=get_main_keyboard())
+        except Exception:
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="🔴 ربات متوقف شد.", reply_markup=get_main_keyboard())
+            
     elif query.data == "status":
         state = "🟢 روشن" if IS_RUNNING else "🔴 خاموش"
         pub_display = f"{WALLET_PUBKEY[:6]}..." if WALLET_PUBKEY else "تنظیم نشده"
@@ -201,14 +228,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🛑 حد ضرر: {STOP_LOSS}%\n"
             f"🔑 ولٹ: {pub_display}"
         )
-        await query.edit_message_text(status_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        try:
+            await query.edit_message_text(status_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        except Exception:
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=status_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+            
     elif query.data == "menu_volume":
         AWAITING_VOLUME = True
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
-        await query.edit_message_text("⚙️ لطفاً مقدار حجم خرید جدید را به صورت عدد (مثلاً `0.02`) تایپ کنید و بفرستید:", reply_markup=cancel_kb, parse_mode="Markdown")
+        try:
+            await query.edit_message_text("⚙️ لطفاً مقدار حجم خرید جدید را به صورت عدد (مثلاً `0.02`) تایپ کنید و بفرستید:", reply_markup=cancel_kb, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="⚙️ لطفاً مقدار حجم خرید جدید را به صورت عدد (مثلاً `0.02`) تایپ کنید و بفرستید:", reply_markup=cancel_kb, parse_mode="Markdown")
+            
     elif query.data == "cancel_input":
         AWAITING_VOLUME = False
-        await query.edit_message_text("🤖 عملیات لغو شد. اتاق کنترل ربات:", reply_markup=get_main_keyboard())
+        try:
+            await query.edit_message_text("🤖 عملیات لغو شد. اتاق کنترل ربات:", reply_markup=get_main_keyboard())
+        except Exception:
+            await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="🤖 عملیات لغو شد. اتاق کنترل ربات:", reply_markup=get_main_keyboard())
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BUY_AMOUNT_SOL, AWAITING_VOLUME
@@ -227,6 +265,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ خطا! لطفاً فقط یک عدد معتبر انگلیسی وارد کنید (مثلاً `0.01`). مجدداً تایپ کنید:", parse_mode="Markdown")
 
 if __name__ == "__main__":
+    web_thread = Thread(target=run_web)
+    web_thread.daemon = True
+    web_thread.start()
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
