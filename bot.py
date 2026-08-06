@@ -8,7 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ==========================================
-# تنظیمات اصلی شما (اطلاعات خود را اینجا جایگزین کنید)
+# تنظیمات اصلی شما
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8604836306:AAGxFStZhLvYzUOJ_StFwt0yQ14DZEn1Ly4"
 TELEGRAM_CHAT_ID = "601441430"
@@ -26,6 +26,7 @@ bot_config = {
 }
 
 processed_tokens = set()
+active_positions = {}
 
 def get_pubkey_from_privkey(privkey_b58):
     try:
@@ -52,7 +53,7 @@ def check_token_security(token_address):
     except Exception:
         return False, "RPC Error"
 
-# موتور پردازش و اسکن بازار در پس‌زمینه
+# موتور پردازش، خرید، مانیتورینگ و فروش خودکار در پس‌زمینه
 def auto_trader_loop(app):
     while True:
         if not bot_config["is_running"]:
@@ -60,6 +61,38 @@ def auto_trader_loop(app):
             continue
 
         try:
+            # ۱. بررسی موقعیت‌های باز برای حد سود و حد ضرر
+            tokens_to_close = []
+            for token_addr, pos in list(active_positions.items()):
+                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=5).json()
+                if not pair_res.get('pairs'):
+                    continue
+                pair = pair_res['pairs'][0]
+                current_price = float(pair.get('priceUsd', 0))
+                entry_price = pos['entry_price']
+                
+                if entry_price > 0:
+                    pnl_percent = ((current_price - entry_price) / entry_price) * 100
+
+                    # بررسی فعال شدن حد سود یا حد ضرر
+                    if pnl_percent >= bot_config["take_profit"] or pnl_percent <= bot_config["stop_loss"]:
+                        reason = "حد سود فعال شد" if pnl_percent >= 0 else "حد ضرر فعال شد"
+                        symbol = pos['symbol']
+                        
+                        exit_msg = (
+                            f"🛑 فروش خودکار ({reason})\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📉 قیمت خروج: ${current_price:.8f}\n"
+                            f"⚠️ سود/زیان نهایی: {pnl_percent:.2f}%\n\n"
+                            f"🔗 [مشاهده نمودار](https://dexscreener.com/solana/{token_addr})"
+                        )
+                        app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=exit_msg, parse_mode="Markdown")
+                        tokens_to_close.append(token_addr)
+
+            for t_addr in tokens_to_close:
+                active_positions.pop(t_addr, None)
+
+            # ۲. اسکن توکن‌های جدید برای خرید
             url_trending = "https://api.dexscreener.com/token-boosts/top/v1"
             res = requests.get(url_trending, timeout=8).json()
             solana_tokens = [item for item in res if item.get('chainId') == 'solana']
@@ -69,7 +102,7 @@ def auto_trader_loop(app):
                     break
 
                 token_addr = t.get('tokenAddress')
-                if not token_addr or token_addr in processed_tokens:
+                if not token_addr or token_addr in processed_tokens or token_addr in active_positions:
                     continue
 
                 pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=5).json()
@@ -83,13 +116,17 @@ def auto_trader_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                # اعمال فیلترهای تحلیلی
                 if liquidity >= bot_config["min_liquidity"] and volume_5m >= bot_config["min_volume_5m"]:
                     is_safe, _ = check_token_security(token_addr)
                     if not is_safe:
                         continue
 
                     processed_tokens.add(token_addr)
+                    active_positions[token_addr] = {
+                        "entry_price": price,
+                        "symbol": symbol
+                    }
+
                     target_tp = price * (1 + (bot_config["take_profit"] / 100))
                     target_sl = price * (1 + (bot_config["stop_loss"] / 100))
 
@@ -130,7 +167,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🟢 روشن کردن اسکنر", callback_data="start_bot"),
          InlineKeyboardButton("🔴 خاموش کردن اسکنر", callback_data="stop_bot")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-         InlineKeyboardButton("⚙️ حجم (0.01 SOL)", callback_data="set_001")],
+         InlineKeyboardButton("⚙️ تنظیم حجم خرید", callback_data="menu_volume")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🤖 اتاق کنترل ربات سولانا (روی سرور)", reply_markup=reply_markup, parse_mode="Markdown")
@@ -156,9 +193,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔑 ولٹ: {pub_display}"
         )
         await query.edit_message_text(status_text, parse_mode="Markdown")
-    elif query.data == "set_001":
-        bot_config["buy_amount_sol"] = 0.01
-        await query.edit_message_text("⚙️ حجم خرید به 0.01 SOL تغییر کرد.")
+    elif query.data == "menu_volume":
+        vol_keyboard = [
+            [InlineKeyboardButton("0.001 SOL", callback_data="set_0.001"),
+             InlineKeyboardButton("0.005 SOL", callback_data="set_0.005")],
+            [InlineKeyboardButton("0.01 SOL", callback_data="set_0.01"),
+             InlineKeyboardButton("0.05 SOL", callback_data="set_0.05")],
+            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back_to_main")]
+        ]
+        await query.edit_message_text("⚙️ لطفاً مقدار حجم خرید مورد نظر خود را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(vol_keyboard))
+    elif query.data.startswith("set_"):
+        val = float(query.data.split("_")[1])
+        bot_config["buy_amount_sol"] = val
+        await query.edit_message_text(f"✅ حجم خرید با موفقیت به {val} SOL تغییر کرد.")
+    elif query.data == "back_to_main":
+        keyboard = [
+            [InlineKeyboardButton("🟢 روشن کردن اسکنر", callback_data="start_bot"),
+             InlineKeyboardButton("🔴 خاموش کردن اسکنر", callback_data="stop_bot")],
+            [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
+             InlineKeyboardButton("⚙️ تنظیم حجم خرید", callback_data="menu_volume")],
+        ]
+        await query.edit_message_text("🤖 اتاق کنترل ربات سولانا (روی سرور)", reply_markup=InlineKeyboardMarkup(keyboard))
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
