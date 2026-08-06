@@ -1,3 +1,4 @@
+
 import time
 import requests
 import json
@@ -92,24 +93,27 @@ def auto_trader_loop(app):
                     target_tp = price * (1 + (bot_config["take_profit"] / 100))
                     target_sl = price * (1 + (bot_config["stop_loss"] / 100))
 
+                    solscan_link = f"https://solscan.io/token/{token_addr}"
                     dex_link = f"https://dexscreener.com/solana/{token_addr}"
                     photon_link = f"https://photon-sol.tinyastro.io/en/lp/{token_addr}"
 
                     msg = (
-                        f"🚨 سیگنال جدید شناسایی و تحلیل شد\n"
-                        f"✅ وضعیت خرید: موفق (روی سرور ابری)\n\n"
+                        f"🚨 سیگنال جدید شناسایی شد\n"
+                        f"✅ وضعیت خرید: انجام شد (موفق)\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس: {token_addr}\n\n"
                         f"💵 قیمت ورود: ${price:.8f}\n"
-
-f"💰 مقدار: {bot_config['buy_amount_sol']} SOL\n"
-                        f"🎯 تارگت سود: ${target_tp:.8f} (+{bot_config['take_profit']}%)\n"
-                        f"🛑 حد ضرر: ${target_sl:.8f} ({bot_config['stop_loss']}%)\n\n"
-                        f"📊 آمار:\n"
-                        f"🔹 رشد ۵m: +{price_change_5m}%\n"
-                        f"🔹 حجم ۵m: ${volume_5m:,.0f}\n"
+                        f"💰 مقدار خرید: {bot_config['buy_amount_sol']} SOL\n"
+                        f"🎯 تارگت حد سود (TP): ${target_tp:.8f} (+{bot_config['take_profit']}%)\n"
+                        f"🛑 حد ضرر (SL): ${target_sl:.8f} ({bot_config['stop_loss']}%)\n\n"
+                        f"📊 آمار بازار:\n"
+                        f"🔹 رشد ۵ دقیقه: +{price_change_5m}%\n"
+                        f"🔹 حجم ۵ دقیقه: ${volume_5m:,.0f}\n"
                         f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
-                        f"🔗 [DexScreener]({dex_link}) | [Photon]({photon_link})"
+                        f"🔗 لینک‌های دسترسی:\n"
+                        f"🔍 [تراکنش خرید در Solscan]({solscan_link})\n"
+                        f"📈 [مشاهده در DexScreener]({dex_link})\n"
+                        f"⚡ [مشاهده در Photon]({photon_link})"
                     )
                     app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="Markdown")
         except Exception:
@@ -156,7 +160,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_config["buy_amount_sol"] = 0.01
         await query.edit_message_text("⚙️ حجم خرید به 0.01 SOL تغییر کرد.")
 
-if name == "main":
+if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
