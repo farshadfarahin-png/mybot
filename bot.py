@@ -122,6 +122,7 @@ def auto_trader_loop(app):
                         continue
 
                     processed_tokens.add(token_addr)
+                    current_buy_amount = bot_config['buy_amount_sol']
                     active_positions[token_addr] = {
                         "entry_price": price,
                         "symbol": symbol
@@ -140,7 +141,7 @@ def auto_trader_loop(app):
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس: {token_addr}\n\n"
                         f"💵 قیمت ورود: ${price:.8f}\n"
-                        f"💰 مقدار خرید: {bot_config['buy_amount_sol']} SOL\n"
+                        f"💰 مقدار خرید: {current_buy_amount} SOL\n"
                         f"🎯 تارگت حد سود (TP): ${target_tp:.8f} (+{bot_config['take_profit']}%)\n"
                         f"🛑 حد ضرر (SL): ${target_sl:.8f} ({bot_config['stop_loss']}%)\n\n"
                         f"📊 آمار بازار:\n"
@@ -153,8 +154,8 @@ def auto_trader_loop(app):
                         f"⚡ [مشاهده در Photon]({photon_link})"
                     )
                     app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="Markdown")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error in loop: {e}")
 
         time.sleep(5)
 
