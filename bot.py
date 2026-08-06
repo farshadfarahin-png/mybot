@@ -181,7 +181,7 @@ def auto_trader_loop(app):
             
             solana_tokens = []
             if isinstance(res, list):
-                solana_tokens = [item for item in res if item.get('chainId'] == 'solana']
+                solana_tokens = [item for item in res if item.get('chainId') == 'solana']
 
             for t in solana_tokens[:6]:
                 if not IS_RUNNING:
