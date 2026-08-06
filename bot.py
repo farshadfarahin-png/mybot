@@ -9,6 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
+from curl_cffi import requests as c_requests
 
 # ==========================================
 # تنظیمات اصلی شما
@@ -17,7 +18,6 @@ TELEGRAM_BOT_TOKEN = "8604836306:AAGxFStZhLvYzUOJ_StFwt0yQ14DZEn1Ly4"
 TELEGRAM_CHAT_ID = "601441430"
 PRIVATE_KEY_BASE58 = "5E3ff6vpUSDnpno8WvQcwHsiEgwXdV1yMWx5NjyqGguXAyWS9vrjcs3tQeQajxQuAbJdQnPybTbrWGiTeYfaworh"
 
-# استفاده از RPC اختصاصی هلیوس برای دور زدن اختلالات و پایداری شبکه
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 
 # تنظیمات پیش‌فرض ربات
@@ -32,7 +32,6 @@ AWAITING_VOLUME = False
 processed_tokens = set()
 active_positions = {}
 
-# تابع ارسال پیام امن به تلگرام بدون پیش‌نمایش لینک (برای حفظ زیبایی و تمیزی اعلان‌ها)
 def send_telegram_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -45,7 +44,6 @@ def send_telegram_msg(text):
     except Exception as e:
         print(f"❌ خطای ارسال پیام به تلگرام: {e}")
 
-# لود کردن امن ولت با کلید خصوصی Base58
 try:
     decoded_key = base58.b58decode(PRIVATE_KEY_BASE58)
     sender_keypair = Keypair.from_bytes(decoded_key)
@@ -57,7 +55,7 @@ except Exception as e:
     send_telegram_msg(err_txt)
     WALLET_PUBKEY = None
 
-# تابع خرید واقعی، دقیق و ضد اختلال از طریق صرافی Jupiter با هدر شبیه‌ساز مرورگر
+# تابع خرید واقعی با استفاده از curl_cffi برای دور زدن کامل بلاک کلاودفلر صرافی ژپیتر
 def execute_real_buy(token_mint, amount_sol):
     try:
         if not WALLET_PUBKEY:
@@ -66,16 +64,12 @@ def execute_real_buy(token_mint, amount_sol):
         lamports = int(amount_sol * 1_000_000_000)
         sol_mint = "So11111111111111111111111111111111111111112"
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        }
-
         quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=150"
         
         try:
-            quote_res = requests.get(quote_url, headers=headers, timeout=12).json()
+            quote_res = c_requests.get(quote_url, impersonate="chrome", timeout=12).json()
         except Exception:
-            return False, "خطای اتصال به صرافی Jupiter (اختلال شبکه یا فیلتر)"
+            return False, "خطای اتصال به صرافی Jupiter (بلاک کلاودفلر یا اختلال)"
         
         if "error" in quote_res:
             return False, f"خطای صرافی: {quote_res['error']}"
@@ -87,7 +81,7 @@ def execute_real_buy(token_mint, amount_sol):
         }
         
         try:
-            swap_res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=12).json()
+            swap_res = c_requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, impersonate="chrome", timeout=12).json()
         except Exception:
             return False, "خطا در ساخت تراکنش سواپ"
         
@@ -120,7 +114,6 @@ def execute_real_buy(token_mint, amount_sol):
     except Exception as e:
         return False, f"خطای ناشناخته خرید: {str(e)}"
 
-# حلقه هوشمند و دائمی اسکنر، تریدر و مانیتورینگ سود و ضرر
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
@@ -132,7 +125,6 @@ def auto_trader_loop(app):
             continue
 
         try:
-            # ۱. رصد مداوم پوزیشن‌های باز برای حد سود (TP) و حد ضرر (SL) واقعی
             tokens_to_close = []
             for token_addr, pos in list(active_positions.items()):
                 try:
@@ -168,7 +160,6 @@ def auto_trader_loop(app):
             for t_addr in tokens_to_close:
                 active_positions.pop(t_addr, None)
 
-            # ۲. رصد جامع کل DEXها و توکن‌های ترند بازار سولانا
             url_trending = "https://api.dexscreener.com/token-boosts/top/v1"
             res = requests.get(url_trending, timeout=8).json()
             
@@ -195,7 +186,6 @@ def auto_trader_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                # اعمال فیلترهای استراتژیک بازار
                 if liquidity >= MIN_LIQUIDITY and volume_5m >= MIN_VOLUME_5M and price > 0:
                     processed_tokens.add(token_addr)
                     
@@ -207,7 +197,6 @@ def auto_trader_loop(app):
                     target_tp = price * (1 + (TAKE_PROFIT / 100))
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
-                    # ساخت اعلان کامل، دقیق، همراه با تحلیل و لینک‌های مختص همان توکن
                     msg = (
                         f"🚨 سیگنال جدید شناسایی و پردازش شد\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
@@ -239,7 +228,6 @@ def auto_trader_loop(app):
 
         time.sleep(8)
 
-# وب‌سرور Flask برای زنده نگه داشتن دائمی ربات روی رندر (Render)
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -250,7 +238,6 @@ def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
 
-# کیبورد شیشه‌ای پیشرفته و کنترل پنل تلگرام
 def get_main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🟢 روشن کردن اسکنر", callback_data="start_bot"),
@@ -319,7 +306,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             send_telegram_msg("🤖 عملیات تنظیم حجم لغو شد.")
 
-# رفع قطعی و مشکل ثبت حجم خرید با مدیریت دقیق متن‌های ورودی چت
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BUY_AMOUNT_SOL, AWAITING_VOLUME
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
@@ -338,22 +324,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ خطا! لطفاً فقط یک عدد معتبر (مثلاً 0.005) وارد کنید:")
 
 if __name__ == "__main__":
-    # استارت وب‌سرور فلاسگ در ترد جداگانه برای روشن ماندن ۲۴ ساعته
     web_thread = Thread(target=run_web)
     web_thread.daemon = True
     web_thread.start()
 
-    # راه‌اندازی ربات تلگرام
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # استارت موتور اصلی تریدر و مانیتورینگ در ترد جداگانه
     trader_thread = Thread(target=auto_trader_loop, args=(app,))
     trader_thread.daemon = True
     trader_thread.start()
 
     print("🚀 ربات نهایی با موفقیت استارت شد و آماده به‌کار است.")
     app.run_polling()
+
