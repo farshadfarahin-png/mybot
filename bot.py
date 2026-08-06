@@ -82,14 +82,13 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(2)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای عدم پاسخگویی صرافی (بلاک ابری رندر)"
+        return False, "خطای عدم پاسخگویی صرافی"
 
+    # پاکسازی و تنظیمات دقیق بدنه درخواست سواپ بدون کارامترهای دارای اشکال کاراکتری
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
-        "wrapAndUnwrapSol": True,
-        "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": "auto"
+        "wrapAndUnwrapSol": True
     }
     
     swap_res = None
@@ -256,7 +255,6 @@ def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
 
-# کیبورد شیشه‌ای که حجم فعلی را روی دکمه دستی نشان می‌دهد
 def get_main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🟢 روشن کردن اسکنر", callback_data="start_bot"),
