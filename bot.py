@@ -23,10 +23,10 @@ BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
 
-# 🎯 فیلترهای بسیار سخت‌گیرانه برای انتخاب فقط توکن‌های داغ و پرشتاب
-MIN_LIQUIDITY = 15000      # حداقل نقدینگی استخر (15 هزار دلار برای جلوگیری از راگ‌پول)
-MIN_VOLUME_5M = 8000       # حداقل حجم معاملات ۵ دقیقه گذشته (برای اطمینان از خریداران واقعی)
-MIN_PRICE_CHANGE_5M = 5.0  # توکن حتماً باید حداقل ۵ درصد رشد مثبت در ۵ دقیقه اخیر داشته باشد
+# فیلترهای سخت‌گیرانه برای توکن‌های پرشتاب و داغ
+MIN_LIQUIDITY = 15000      
+MIN_VOLUME_5M = 8000       
+MIN_PRICE_CHANGE_5M = 5.0  
 
 AWAITING_VOLUME = False
 processed_tokens = set()
@@ -313,7 +313,6 @@ def auto_trader_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                # 🔒 اعمال فیلترهای فوق‌العاده سخت‌گیرانه (فقط توکن‌های به شدت داغ و در حال رشد)
                 if (liquidity >= MIN_LIQUIDITY and 
                     volume_5m >= MIN_VOLUME_5M and 
                     price_change_5m >= MIN_PRICE_CHANGE_5M and 
@@ -330,7 +329,7 @@ def auto_trader_loop(app):
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
                     msg = (
-                        f"🚨 سیگنال جدید پرشتاب شناسایی و پردازش شد\n"
+                        f"🚨 سیگنال جدید شناسایی و پردازش شد\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -426,8 +425,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg(status_text)
             
     elif query.data == "menu_volume":
-        AWAITING_VOLUME = Data = True # Wait, keep syntax clean
-        # Let's fix AWAITING_VOLUME assignment in menu_volume
         global AWAITING_VOLUME
         AWAITING_VOLUME = True
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
