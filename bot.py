@@ -3,8 +3,8 @@ import requests
 import json
 import base58
 from threading import Thread
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ==========================================
 # تنظیمات اصلی شما (اطلاعات خود را اینجا جایگزین کنید)
@@ -50,19 +50,6 @@ def check_token_security(token_address):
         return False, "Invalid account"
     except Exception:
         return False, "RPC Error"
-
-# تابع ارسال پیام به تلگرام به صورت امن
-def send_telegram_message(text):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "disable_web_page_preview": True
-        }
-        requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        print("Error sending telegram message:", e)
 
 # موتور پردازش و اسکن بازار در پس‌زمینه
 def auto_trader_loop(app):
@@ -114,39 +101,68 @@ def auto_trader_loop(app):
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس: {token_addr}\n\n"
                         f"💵 قیمت ورود: ${price:.8f}\n"
-                        f"📈 حد سود: ${target_tp:.8f}\n"
-                        f"📉 حد ضرر: ${target_sl:.8f}\n\n"
-                        f"🔗 لینک دکس‌اسکرینر:\n{dex_link}\n\n"
-                        f"🔗 لینک فوتون:\n{photon_link}"
+
+f"💰 مقدار: {bot_config['buy_amount_sol']} SOL\n"
+                        f"🎯 تارگت سود: ${target_tp:.8f} (+{bot_config['take_profit']}%)\n"
+                        f"🛑 حد ضرر: ${target_sl:.8f} ({bot_config['stop_loss']}%)\n\n"
+                        f"📊 آمار:\n"
+                        f"🔹 رشد ۵m: +{price_change_5m}%\n"
+                        f"🔹 حجم ۵m: ${volume_5m:,.0f}\n"
+                        f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
+                        f"🔗 [DexScreener]({dex_link}) | [Photon]({photon_link})"
                     )
-                    
-                    send_telegram_message(msg)
+                    app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="Markdown")
+        except Exception:
+            pass
 
-        except Exception as e:
-            print("Loop error:", e)
-            time.sleep(5)
+        time.sleep(5)
 
-# دستورات ربات تلگرام
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bot_config["is_running"] = True
-    await update.message.reply_text("🤖 ربات اسکنر سولانا روشن شد و در حال جستجوی سیگنال است!")
+# منوی دستورات تلگرام
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
+        return
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bot_config["is_running"] = False
-    await update.message.reply_text("🛑 ربات متوقف شد.")
+    keyboard = [
+        [InlineKeyboardButton("🟢 روشن کردن اسکنر", callback_data="start_bot"),
+         InlineKeyboardButton("🔴 خاموش کردن اسکنر", callback_data="stop_bot")],
+        [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
+         InlineKeyboardButton("⚙️ حجم (0.01 SOL)", callback_data="set_001")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("🤖 اتاق کنترل ربات سولانا (روی سرور)", reply_markup=reply_markup, parse_mode="Markdown")
 
-def main():
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "start_bot":
+        bot_config["is_running"] = True
+        await query.edit_message_text("🟢 اسکن خودکار و تحلیل بازار فعال شد.")
+    elif query.data == "stop_bot":
+        bot_config["is_running"] = False
+        await query.edit_message_text("🔴 ربات متوقف شد.")
+    elif query.data == "status":
+        state = "🟢 روشن" if bot_config["is_running"] else "🔴 خاموش"
+        pub_display = f"{WALLET_PUBKEY[:6]}..." if WALLET_PUBKEY else "تنظیم نشده"
+        status_text = (
+            f"📊 وضعیت: {state}\n"
+            f"💰 حجم معامله: {bot_config['buy_amount_sol']} SOL\n"
+            f"🎯 تارگت سود: {bot_config['take_profit']}%\n"
+            f"🛑 حد ضرر: {bot_config['stop_loss']}%\n"
+            f"🔑 ولٹ: {pub_display}"
+        )
+        await query.edit_message_text(status_text, parse_mode="Markdown")
+    elif query.data == "set_001":
+        bot_config["buy_amount_sol"] = 0.01
+        await query.edit_message_text("⚙️ حجم خرید به 0.01 SOL تغییر کرد.")
+
+if name == "main":
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop))
+    trader_thread = Thread(target=auto_trader_loop, args=(app,))
+    trader_thread.daemon = True
+    trader_thread.start()
 
-    # شروع ترد پس‌زمینه برای اسکن بازار
-    t = Thread(target=auto_trader_loop, args=(app,), daemon=True)
-    t.start()
-
-    print("Bot is running...")
     app.run_polling()
-
-if __name__ == "__main__":
-    main()
