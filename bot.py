@@ -1,4 +1,3 @@
-
 import time
 import requests
 import json
@@ -62,14 +61,14 @@ def execute_real_buy(token_mint, amount_sol):
     sol_mint = "So11111111111111111111111111111111111111112"
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://jup.ag/",
         "Origin": "https://jup.ag"
     }
 
-    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=150"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=200"
     
     quote_res = None
     for attempt in range(3):
@@ -83,19 +82,20 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(2)
 
     if not quote_res or "error" in quote_res:
-        err_msg = quote_res.get("error", "خطای اتصال به صرافی Jupiter (اختلال شبکه)") if quote_res else "خطای عدم پاسخگویی صرافی"
-        return False, err_msg
+        return False, "خطای عدم پاسخگویی صرافی (بلاک ابری رندر)"
 
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
-        "wrapAndUnwrapSol": True
+        "wrapAndUnwrapSol": True,
+        "dynamicComputeUnitLimit": True,
+        "prioritizationFeeLamports": "auto"
     }
     
     swap_res = None
     for attempt in range(3):
         try:
-            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=10)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=10)
             if res.status_code == 200:
                 swap_res = res.json()
                 break
@@ -104,7 +104,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(2)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "تراکنش سواپ توسط صرافی رد شد یا پاسخ نامعتبر بود"
+        return False, "تراکنش سواپ توسط صرافی رد شد"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -130,7 +130,7 @@ def execute_real_buy(token_mint, amount_sol):
         else:
             return False, "تراکنش توسط شبکه سولانا ریجکت شد"
     except Exception as e:
-        return False, f"خطا در امضا و ارسال تراکنش: {str(e)}"
+        return False, f"خطا در ارسال تراکنش: {str(e)}"
 
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
@@ -183,7 +183,7 @@ def auto_trader_loop(app):
             
             solana_tokens = []
             if isinstance(res, list):
-                solana_tokens = [item for item in res if item.get('chainId') == 'solana']
+                solana_tokens = [item for item in res if item.get('chainId'] == 'solana']
 
             for t in solana_tokens[:6]:
                 if not IS_RUNNING:
@@ -256,12 +256,13 @@ def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
 
+# کیبورد شیشه‌ای که حجم فعلی را روی دکمه دستی نشان می‌دهد
 def get_main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🟢 روشن کردن اسکنر", callback_data="start_bot"),
          InlineKeyboardButton("🔴 خاموش کردن اسکنر", callback_data="stop_bot")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-         InlineKeyboardButton("⚙️ تنظیم حجم خرید (دستی)", callback_data="menu_volume")],
+         InlineKeyboardButton(f"⚙️ حجم: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume")],
     ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -313,7 +314,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_VOLUME = True
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text("⚙️ لطفاً حجم خرید جدید (به سولانا، مثلاً 0.01) را تایپ کنید و بفرستید:", reply_markup=cancel_kb)
+            await query.edit_message_text(f"⚙️ حجم فعلی: {BUY_AMOUNT_SOL} SOL\nلطفاً حجم خرید جدید (به سولانا) را تایپ کنید و بفرستید:", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("⚙️ لطفاً حجم خرید جدید (به سولانا) را تایپ کنید:")
             
@@ -341,7 +342,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("❌ خطا! لطفاً فقط یک عدد معتبر (مثلاً 0.005) وارد کنید:")
     else:
-        await update.message.reply_text("🤖 برای کنترل ربات از دکمه‌ها استفاده کنید یا از منوی تنظیمات حجم اقدام نمایید.", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🤖 برای کنترل ربات از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
 
 if __name__ == "__main__":
     web_thread = Thread(target=run_web)
@@ -360,3 +361,4 @@ if __name__ == "__main__":
 
     print("🚀 ربات نهایی با موفقیت استارت شد و آماده به‌کار است.")
     app.run_polling()
+
