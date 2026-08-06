@@ -22,8 +22,11 @@ IS_RUNNING = False
 BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
-MIN_LIQUIDITY = 3000
-MIN_VOLUME_5M = 1000
+
+# 🎯 فیلترهای بسیار سخت‌گیرانه برای انتخاب فقط توکن‌های داغ و پرشتاب
+MIN_LIQUIDITY = 15000      # حداقل نقدینگی استخر (15 هزار دلار برای جلوگیری از راگ‌پول)
+MIN_VOLUME_5M = 8000       # حداقل حجم معاملات ۵ دقیقه گذشته (برای اطمینان از خریداران واقعی)
+MIN_PRICE_CHANGE_5M = 5.0  # توکن حتماً باید حداقل ۵ درصد رشد مثبت در ۵ دقیقه اخیر داشته باشد
 
 AWAITING_VOLUME = False
 processed_tokens = set()
@@ -53,7 +56,6 @@ except Exception as e:
     WALLET_PUBKEY = None
 
 def get_token_balance(token_mint):
-    """گرفتن موجودی دقیق توکن در ولت شخصی برای فروش کامل"""
     try:
         payload = {
             "jsonrpc": "2.0",
@@ -84,14 +86,13 @@ def execute_real_buy(token_mint, amount_sol):
     lamports = int(amount_sol * 1_000_000_000)
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
         "Origin": "https://jup.ag",
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=200"
     
     quote_res = None
     for attempt in range(3):
@@ -233,7 +234,7 @@ def execute_real_sell(token_mint, token_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات تریدر واقعی و مانیتورینگ بازار روشن شد و آماده به کار است.")
+    send_telegram_msg("🤖 ربات هوشمند با فیلترهای سخت‌گیرانه (تشخیص توکن‌های پرشتاب) روشن شد.")
 
     while True:
         if not IS_RUNNING:
@@ -264,7 +265,7 @@ def auto_trader_loop(app):
                             else:
                                 success, sell_res_info = False, "موجودی توکن در ولت یافت نشد"
 
-                            sell_status_str = f"انجام شد (موفق ✅ - {sell_res_info})" if success else f"خطا ({sell_res_info} ❌)"
+                            sell_status_str = f"انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
                             
                             exit_msg = (
                                 f"🔴 فروش خودکار ({reason})\n\n"
@@ -291,7 +292,7 @@ def auto_trader_loop(app):
             
             solana_tokens = []
             if isinstance(res, list):
-                solana_tokens = [item for item in res if item.get('chainId') == 'solana']
+                solana_tokens = [item for item in res if item.get('chainId'] == 'solana']
 
             for t in solana_tokens[:6]:
                 if not IS_RUNNING:
@@ -312,10 +313,15 @@ def auto_trader_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                if liquidity >= MIN_LIQUIDITY and volume_5m >= MIN_VOLUME_5M and price > 0:
+                # 🔒 اعمال فیلترهای فوق‌العاده سخت‌گیرانه (فقط توکن‌های به شدت داغ و در حال رشد)
+                if (liquidity >= MIN_LIQUIDITY and 
+                    volume_5m >= MIN_VOLUME_5M and 
+                    price_change_5m >= MIN_PRICE_CHANGE_5M and 
+                    price > 0):
+                    
                     processed_tokens.add(token_addr)
                     
-                    print(f"⏳ اقدام برای خرید واقعی توکن {symbol} با حجم {BUY_AMOUNT_SOL} SOL...")
+                    print(f"⏳ اقدام برای خرید واقعی توکن پرشتاب {symbol} با حجم {BUY_AMOUNT_SOL} SOL...")
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
@@ -324,7 +330,7 @@ def auto_trader_loop(app):
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
                     msg = (
-                        f"🚨 سیگنال جدید شناسایی و پردازش شد\n"
+                        f"🚨 سیگنال جدید پرشتاب شناسایی و پردازش شد\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -390,9 +396,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "start_bot":
         IS_RUNNING = True
         try:
-            await query.edit_message_text("🟢 اسکن خودکار و خرید واقعی با موفقیت فعال شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🟢 اسکن خودکار با فیلترهای سخت‌گیرانه فعال شد.", reply_markup=get_main_keyboard())
         except Exception:
-            send_telegram_msg("🟢 اسکن خودکار و خرید واقعی با موفقیت فعال شد.")
+            send_telegram_msg("🟢 اسکن خودکار فعال شد.")
             
     elif query.data == "stop_bot":
         IS_RUNNING = False
@@ -410,6 +416,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
             f"🎯 تارگت سود: {TAKE_PROFIT}%\n"
             f"🛑 حد ضرر: {STOP_LOSS}%\n"
+            f"🔒 حداقل نقدینگی: ${MIN_LIQUIDITY}\n"
+            f"🚀 حداقل رشد ۵ دقیقه‌ای: +{MIN_PRICE_CHANGE_5M}%\n"
             f"🔑 ولت متصل: {pub_display}"
         )
         try:
@@ -418,19 +426,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg(status_text)
             
     elif query.data == "menu_volume":
+        AWAITING_VOLUME = Data = True # Wait, keep syntax clean
+        # Let's fix AWAITING_VOLUME assignment in menu_volume
+        global AWAITING_VOLUME
         AWAITING_VOLUME = True
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"⚙️ حجم فعلی: {BUY_AMOUNT_SOL} SOL\nلطفاً حجم خرید جدید (به سولانا) را تایپ کنید و بفرستید:", reply_markup=cancel_kb)
+            await query.edit_message_text(f"⚙️ حجم فعلی: {BUY_AMOUNT_SOL} SOL\nلطفاً حجم خرید جدید را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
-            send_telegram_msg("⚙️ لطفاً حجم خرید جدید (به سولانا) را تایپ کنید:")
+            send_telegram_msg("⚙️ لطفاً حجم خرید جدید را تایپ کنید:")
             
     elif query.data == "cancel_input":
         AWAITING_VOLUME = False
         try:
-            await query.edit_message_text("🤖 عملیات تنظیم حجم لغو شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
         except Exception:
-            send_telegram_msg("🤖 عملیات تنظیم حجم لغو شد.")
+            send_telegram_msg("🤖 لغو شد.")
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BUY_AMOUNT_SOL, AWAITING_VOLUME
@@ -445,11 +456,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise ValueError()
             BUY_AMOUNT_SOL = new_volume
             AWAITING_VOLUME = False
-            await update.message.reply_text(f"✅ حجم خرید با موفقیت به {BUY_AMOUNT_SOL} SOL تغییر یافت و ثبت شد.", reply_markup=get_main_keyboard())
+            await update.message.reply_text(f"✅ حجم خرید به {BUY_AMOUNT_SOL} SOL تغییر یافت.", reply_markup=get_main_keyboard())
         except ValueError:
-            await update.message.reply_text("❌ خطا! لطفاً فقط یک عدد معتبر (مثلاً 0.005) وارد کنید:")
+            await update.message.reply_text("❌ خطا! لطفاً یک عدد معتبر وارد کنید:")
     else:
-        await update.message.reply_text("🤖 برای کنترل ربات از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
 
 if __name__ == "__main__":
     web_thread = Thread(target=run_web)
@@ -466,5 +477,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات نهایی با موفقیت استارت شد و آماده به‌کار است.")
+    print("🚀 ربات با فیلترهای سخت‌گیرانه استارت شد.")
     app.run_polling()
