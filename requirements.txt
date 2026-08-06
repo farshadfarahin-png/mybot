@@ -1,5 +1,6 @@
 python-telegram-bot
-flask
 requests
 base58
 solders
+flask
+curl_cffi
