@@ -1,3 +1,4 @@
+
 import time
 import requests
 import json
@@ -9,7 +10,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
-from curl_cffi import requests as c_requests
 
 # ==========================================
 # تنظیمات اصلی شما
@@ -20,7 +20,6 @@ PRIVATE_KEY_BASE58 = "5E3ff6vpUSDnpno8WvQcwHsiEgwXdV1yMWx5NjyqGguXAyWS9vrjcs3tQe
 
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 
-# تنظیمات پیش‌فرض ربات
 IS_RUNNING = False
 BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
@@ -55,39 +54,59 @@ except Exception as e:
     send_telegram_msg(err_txt)
     WALLET_PUBKEY = None
 
-# تابع خرید واقعی با استفاده از curl_cffi برای دور زدن کامل بلاک کلاودفلر صرافی ژپیتر
 def execute_real_buy(token_mint, amount_sol):
+    if not WALLET_PUBKEY:
+        return False, "کلید عمومی ولت نامعتبر است"
+
+    lamports = int(amount_sol * 1_000_000_000)
+    sol_mint = "So11111111111111111111111111111111111111112"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://jup.ag/",
+        "Origin": "https://jup.ag"
+    }
+
+    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=150"
+    
+    quote_res = None
+    for attempt in range(3):
+        try:
+            res = requests.get(quote_url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                quote_res = res.json()
+                break
+        except Exception:
+            pass
+        time.sleep(2)
+
+    if not quote_res or "error" in quote_res:
+        err_msg = quote_res.get("error", "خطای اتصال به صرافی Jupiter (اختلال شبکه)") if quote_res else "خطای عدم پاسخگویی صرافی"
+        return False, err_msg
+
+    swap_payload = {
+        "quoteResponse": quote_res,
+        "userPublicKey": WALLET_PUBKEY,
+        "wrapAndUnwrapSol": True
+    }
+    
+    swap_res = None
+    for attempt in range(3):
+        try:
+            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=10)
+            if res.status_code == 200:
+                swap_res = res.json()
+                break
+        except Exception:
+            pass
+        time.sleep(2)
+
+    if not swap_res or "swapTransaction" not in swap_res:
+        return False, "تراکنش سواپ توسط صرافی رد شد یا پاسخ نامعتبر بود"
+
     try:
-        if not WALLET_PUBKEY:
-            return False, "کلید عمومی ولت نامعتبر است"
-
-        lamports = int(amount_sol * 1_000_000_000)
-        sol_mint = "So11111111111111111111111111111111111111112"
-
-        quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=150"
-        
-        try:
-            quote_res = c_requests.get(quote_url, impersonate="chrome", timeout=12).json()
-        except Exception:
-            return False, "خطای اتصال به صرافی Jupiter (بلاک کلاودفلر یا اختلال)"
-        
-        if "error" in quote_res:
-            return False, f"خطای صرافی: {quote_res['error']}"
-
-        swap_payload = {
-            "quoteResponse": quote_res,
-            "userPublicKey": WALLET_PUBKEY,
-            "wrapAndUnwrapSol": True
-        }
-        
-        try:
-            swap_res = c_requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, impersonate="chrome", timeout=12).json()
-        except Exception:
-            return False, "خطا در ساخت تراکنش سواپ"
-        
-        if "swapTransaction" not in swap_res:
-            return False, "تراکنش سواپ توسط صرافی رد شد"
-
         swap_tx_b64 = swap_res["swapTransaction"]
         raw_tx = base58.b58decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
@@ -110,14 +129,13 @@ def execute_real_buy(token_mint, amount_sol):
             return True, tx_res["result"]
         else:
             return False, "تراکنش توسط شبکه سولانا ریجکت شد"
-
     except Exception as e:
-        return False, f"خطای ناشناخته خرید: {str(e)}"
+        return False, f"خطا در امضا و ارسال تراکنش: {str(e)}"
 
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات تریدر واقعی و مانیتورینگ بازار روشن شد و با قدرت کار می‌کند.")
+    send_telegram_msg("🤖 ربات تریدر واقعی و مانیتورینگ بازار روشن شد و آماده به کار است.")
 
     while True:
         if not IS_RUNNING:
@@ -189,7 +207,7 @@ def auto_trader_loop(app):
                 if liquidity >= MIN_LIQUIDITY and volume_5m >= MIN_VOLUME_5M and price > 0:
                     processed_tokens.add(token_addr)
                     
-                    print(f"⏳ اقدام برای خرید واقعی توکن {symbol}...")
+                    print(f"⏳ اقدام برای خرید واقعی توکن {symbol} با حجم {BUY_AMOUNT_SOL} SOL...")
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
@@ -322,6 +340,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ حجم خرید با موفقیت به {BUY_AMOUNT_SOL} SOL تغییر یافت و ثبت شد.", reply_markup=get_main_keyboard())
         except ValueError:
             await update.message.reply_text("❌ خطا! لطفاً فقط یک عدد معتبر (مثلاً 0.005) وارد کنید:")
+    else:
+        await update.message.reply_text("🤖 برای کنترل ربات از دکمه‌ها استفاده کنید یا از منوی تنظیمات حجم اقدام نمایید.", reply_markup=get_main_keyboard())
 
 if __name__ == "__main__":
     web_thread = Thread(target=run_web)
@@ -340,4 +360,3 @@ if __name__ == "__main__":
 
     print("🚀 ربات نهایی با موفقیت استارت شد و آماده به‌کار است.")
     app.run_polling()
-
