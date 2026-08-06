@@ -425,7 +425,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg(status_text)
             
     elif query.data == "menu_volume":
-        global AWAITING_VOLUME
         AWAITING_VOLUME = True
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
