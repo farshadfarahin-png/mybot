@@ -23,8 +23,8 @@ BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
 
-# فیلترهای سخت‌گیرانه برای توکن‌های پرشتاب و داغ
-MIN_LIQUIDITY = 15000      
+# فیلتر نقدینگی روی ۳۵ هزار دلار تنظیم شد (کمتر از این را رد می‌کند)
+MIN_LIQUIDITY = 35000      
 MIN_VOLUME_5M = 8000       
 MIN_PRICE_CHANGE_5M = 5.0  
 
@@ -234,7 +234,7 @@ def execute_real_sell(token_mint, token_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات هوشمند با فیلترهای سخت‌گیرانه (تشخیص توکن‌های پرشتاب) روشن شد.")
+    send_telegram_msg("🤖 ربات هوشمند با فیلتر نقدینگی حداقل ۳۵,۰۰۰ دلار روشن شد.")
 
     while True:
         if not IS_RUNNING:
@@ -395,7 +395,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "start_bot":
         IS_RUNNING = True
         try:
-            await query.edit_message_text("🟢 اسکن خودکار با فیلترهای سخت‌گیرانه فعال شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🟢 اسکن خودکار با فیلتر نقدینگی ۳۵ هزار دلار فعال شد.", reply_markup=get_main_keyboard())
         except Exception:
             send_telegram_msg("🟢 اسکن خودکار فعال شد.")
             
@@ -473,5 +473,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات با فیلترهای سخت‌گیرانه استارت شد.")
+    print("🚀 ربات با نقدینگی حداقل ۳۵k استارت شد.")
     app.run_polling()
