@@ -31,57 +31,62 @@ AWAITING_VOLUME = False
 processed_tokens = set()
 active_positions = {}
 
-# تابع مستقل و قطعی برای ارسال پیام به تلگرام بدون خطای ترد
+# تابع ارسال پیام امن به تلگرام بدون به هم ریختگی
 def send_telegram_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "parse_mode": "Markdown"
+            "text": text
         }
-        res = requests.post(url, json=payload, timeout=5)
-        print(f"Telegram API response: {res.status_code}")
+        requests.post(url, json=payload, timeout=5)
     except Exception as e:
         print(f"❌ خطای ارسال پیام به تلگرام: {e}")
 
-# ساخت کلید عمومی و کلید اصلی از Private Key
+# لود کردن ولت
 try:
     decoded_key = base58.b58decode(PRIVATE_KEY_BASE58)
     sender_keypair = Keypair.from_bytes(decoded_key)
     WALLET_PUBKEY = str(sender_keypair.pubkey())
-    print(f"✅ ولت با موفقیت لود شد: {WALLET_PUBKEY}")
+    print(f"✅ ولت لود شد: {WALLET_PUBKEY}")
 except Exception as e:
-    err_txt = f"❌ خطای پردازش کلید خصوصی: {e}"
+    err_txt = f"خطا در کلید خصوصی: {e}"
     print(err_txt)
     send_telegram_msg(err_txt)
     WALLET_PUBKEY = None
 
-# تابع اجرای خرید واقعی (Swap) از طریق Jupiter API
+# تابع خرید واقعی با مدیریت کامل خطاها
 def execute_real_buy(token_mint, amount_sol):
     try:
         if not WALLET_PUBKEY:
-            return False, "Invalid Wallet Pubkey"
+            return False, "کلید عمومی ولت نامعتبر است"
 
         lamports = int(amount_sol * 1_000_000_000)
         sol_mint = "So11111111111111111111111111111111111111112"
 
         quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=100"
-        quote_res = requests.get(quote_url, timeout=10).json()
+        
+        try:
+            quote_res = requests.get(quote_url, timeout=10).json()
+        except Exception:
+            return False, "خطای اتصال به صرافی (Jupiter API)"
         
         if "error" in quote_res:
-            err_msg = f"Jupiter Quote Error: {quote_res['error']}"
-            return False, err_msg
+            return False, f"خطای صرافی: {quote_res['error']}"
 
         swap_payload = {
             "quoteResponse": quote_res,
             "userPublicKey": WALLET_PUBKEY,
             "wrapAndUnwrapSol": True
         }
-        swap_res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, timeout=10).json()
+        
+        try:
+            swap_res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, timeout=10).json()
+        except Exception:
+            return False, "خطا در ساخت تراکنش سواپ"
         
         if "swapTransaction" not in swap_res:
-            return False, f"Swap transaction failed payload: {swap_res}"
+            return False, "تراکنش سواپ توسط صرافی رد شد"
 
         swap_tx_b64 = swap_res["swapTransaction"]
         raw_tx = base58.b58decode(swap_tx_b64)
@@ -104,16 +109,16 @@ def execute_real_buy(token_mint, amount_sol):
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
-            return False, str(tx_res)
+            return False, "تراکنش توسط شبکه سولانا ریجکت شد"
 
     except Exception as e:
-        return False, str(e)
+        return False, "خطای ناشناخته در اجرای خرید"
 
-# موتور پردازش و تحلیل بازار
+# حلقه اصلی اسکنر و تریدر
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات تریدر واقعی روشن شد و آماده اسکن بازار است.")
+    send_telegram_msg("🤖 ربات تریدر روشن شد و آماده اسکن بازار است.")
 
     while True:
         if not IS_RUNNING:
@@ -142,8 +147,8 @@ def auto_trader_loop(app):
                             f"🛑 فروش خودکار ({reason})\n\n"
                             f"🪙 توکن: {symbol}\n"
                             f"📉 قیمت خروج: ${current_price:.8f}\n"
-                            f"⚠️ سود/زیان نهایی: {pnl_percent:.2f}%\n\n"
-                            f"🔗 [مشاهده نمودار](https://dexscreener.com/solana/{token_addr})"
+                            f"⚠️ سود/زیان: {pnl_percent:.2f}%\n"
+                            f"🔗 https://dexscreener.com/solana/{token_addr}"
                         )
                         send_telegram_msg(exit_msg)
                         tokens_to_close.append(token_addr)
@@ -151,7 +156,7 @@ def auto_trader_loop(app):
             for t_addr in tokens_to_close:
                 active_positions.pop(t_addr, None)
 
-            # ۲. اسکن توکن‌های ترند بازار سولانا
+            # ۲. اسکن توکن‌های ترند بازار
             url_trending = "https://api.dexscreener.com/token-boosts/top/v1"
             res = requests.get(url_trending, timeout=8).json()
             
@@ -175,13 +180,11 @@ def auto_trader_loop(app):
                 price = float(pair.get('priceUsd', 0))
                 liquidity = float(pair.get('liquidity', {}).get('usd', 0))
                 volume_5m = float(pair.get('volume', {}).get('m5', 0))
-                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
                 if liquidity >= MIN_LIQUIDITY and volume_5m >= MIN_VOLUME_5M:
                     processed_tokens.add(token_addr)
                     
-                    # اجرای خرید واقعی
                     print(f"⏳ تلاش برای خرید واقعی توکن {symbol}...")
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
@@ -202,20 +205,16 @@ def auto_trader_loop(app):
                     target_tp = price * (1 + (TAKE_PROFIT / 100))
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
-                    solscan_link = f"https://solscan.io/tx/{result_info}"
-                    dex_link = f"https://dexscreener.com/solana/{token_addr}"
-
                     msg = (
-                        f"🚨 سیگنال جدید شناسایی شد\n"
-                        f"✅ وضعیت خرید واقعی: انجام شد (موفق روی بلاکچین)\n\n"
+                        f"🚨 خرید واقعی موفق روی بلاکچین!\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس: {token_addr}\n\n"
                         f"💵 قیمت ورود: ${price:.8f}\n"
-                        f"💰 مقدار خرید: {BUY_AMOUNT_SOL} SOL\n"
-                        f"🎯 تارگت حد سود (TP): ${target_tp:.8f} (+{TAKE_PROFIT}%)\n"
-                        f"🛑 حد ضرر (SL): ${target_sl:.8f} ({STOP_LOSS}%)\n\n"
-                        f"🔗 [مشاهده تراکنش در Solscan]({solscan_link})\n"
-                        f"📈 [مشاهده در DexScreener]({dex_link})"
+                        f"💰 حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
+                        f"🎯 تارگت سود ({TAKE_PROFIT}%): ${target_tp:.8f}\n"
+                        f"🛑 حد ضرر ({STOP_LOSS}%): ${target_sl:.8f}\n\n"
+                        f"🔗 تراکنش: https://solscan.io/tx/{result_info}\n"
+                        f"📈 نمودار: https://dexscreener.com/solana/{token_addr}"
                     )
                     send_telegram_msg(msg)
         except Exception as e:
@@ -247,7 +246,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_VOLUME
     AWAITING_VOLUME = False
-    await update.message.reply_text("🤖 اتاق کنترل ربات تریدر واقعی سولانا", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    await update.message.reply_text("🤖 اتاق کنترل ربات تریدر واقعی سولانا", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, AWAITING_VOLUME
@@ -282,7 +281,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔑 ولت: {pub_display}"
         )
         try:
-            await query.edit_message_text(status_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+            await query.edit_message_text(status_text, reply_markup=get_main_keyboard())
         except Exception:
             send_telegram_msg(status_text)
             
@@ -290,9 +289,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_VOLUME = True
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text("⚙️ لطفاً مقدار حجم خرید جدید را به صورت عدد تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
+            await query.edit_message_text("⚙️ لطفاً حجم خرید جدید را به صورت عدد تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
-            send_telegram_msg("⚙️ لطفاً مقدار حجم خرید جدید را به صورت عدد تایپ کنید:")
+            send_telegram_msg("⚙️ لطفاً حجم خرید جدید را به صورت عدد تایپ کنید:")
             
     elif query.data == "cancel_input":
         AWAITING_VOLUME = False
@@ -313,7 +312,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise ValueError()
             BUY_AMOUNT_SOL = new_volume
             AWAITING_VOLUME = False
-            await update.message.reply_text(f"✅ حجم خرید به **{BUY_AMOUNT_SOL} SOL** تغییر کرد.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+            await update.message.reply_text(f"✅ حجم خرید به {BUY_AMOUNT_SOL} SOL تغییر کرد.", reply_markup=get_main_keyboard())
         except ValueError:
             await update.message.reply_text("❌ خطا! فقط عدد معتبر وارد کنید:")
 
