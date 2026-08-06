@@ -11,7 +11,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
-# خواندن اطلاعات از متغیرهای محیطی سرور
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
@@ -60,12 +59,14 @@ def execute_real_buy(token_mint, amount_sol):
     sol_mint = "So11111111111111111111111111111111111111112"
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json",
-        "Content-Type": "application/json"
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://jup.ag",
+        "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
     
     quote_res = None
     for attempt in range(3):
@@ -91,7 +92,7 @@ def execute_real_buy(token_mint, amount_sol):
     swap_res = None
     for attempt in range(3):
         try:
-            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=10)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=10)
             if res.status_code == 200:
                 swap_res = res.json()
                 break
@@ -104,7 +105,6 @@ def execute_real_buy(token_mint, amount_sol):
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
-        # اصلاح قطعی: استفاده از base64 برای دیکد کردن پاسخ ژوپیتر
         raw_tx = base64.b64decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
         
@@ -181,7 +181,7 @@ def auto_trader_loop(app):
             
             solana_tokens = []
             if isinstance(res, list):
-                solana_tokens = [item for item in res if item.get('chainId') == 'solana']
+                solana_tokens = [item for item in res if item.get('chainId'] == 'solana']
 
             for t in solana_tokens[:6]:
                 if not IS_RUNNING:
@@ -318,7 +318,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "cancel_input":
         AWAITING_VOLUME = False
         try:
-            await query.edit_message_text("🤖 عملیات تنظیم حجم لغو شد.", reply_markup=get_main_keyboard())
+            await query.edit_manager_text("🤖 عملیات تنظیم حجم لغو شد.", reply_markup=get_main_keyboard()) if hasattr(query, 'edit_manager_text') else await query.edit_message_text("🤖 عملیات تنظیم حجم لغو شد.", reply_markup=get_main_keyboard())
         except Exception:
             send_telegram_msg("🤖 عملیات تنظیم حجم لغو شد.")
 
