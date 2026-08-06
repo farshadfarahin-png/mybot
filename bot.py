@@ -1,6 +1,7 @@
 import time
 import requests
 import json
+import base64
 import base58
 import os
 from threading import Thread
@@ -10,12 +11,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
-# ==========================================
-# تنظیمات اصلی شما
-# ==========================================
-TELEGRAM_BOT_TOKEN = "8604836306:AAGxFStZhLvYzUOJ_StFwt0yQ14DZEn1Ly4"
-TELEGRAM_CHAT_ID = "601441430"
-PRIVATE_KEY_BASE58 = "5E3ff6vpUSDnpno8WvQcwHsiEgwXdV1yMWx5NjyqGguXAyWS9vrjcs3tQeQajxQuAbJdQnPybTbrWGiTeYfaworh"
+# خواندن اطلاعات از متغیرهای محیطی سرور
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
+PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
 
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 
@@ -62,13 +61,11 @@ def execute_real_buy(token_mint, amount_sol):
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://jup.ag/",
-        "Origin": "https://jup.ag"
+        "Accept": "application/json",
+        "Content-Type": "application/json"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=200"
+    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={sol_mint}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
     
     quote_res = None
     for attempt in range(3):
@@ -79,35 +76,36 @@ def execute_real_buy(token_mint, amount_sol):
                 break
         except Exception:
             pass
-        time.sleep(2)
+        time.sleep(1)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای عدم پاسخگویی صرافی"
+        return False, "خطای دریافت قیمت از صرافی"
 
-    # پاکسازی و تنظیمات دقیق بدنه درخواست سواپ بدون کارامترهای دارای اشکال کاراکتری
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
-        "wrapAndUnwrapSol": True
+        "wrapAndUnwrapSol": True,
+        "dynamicComputeUnitLimit": True
     }
     
     swap_res = None
     for attempt in range(3):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=10)
+            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=10)
             if res.status_code == 200:
                 swap_res = res.json()
                 break
         except Exception:
             pass
-        time.sleep(2)
+        time.sleep(1)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "تراکنش سواپ توسط صرافی رد شد"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
-        raw_tx = base58.b58decode(swap_tx_b64)
+        # اصلاح قطعی: استفاده از base64 برای دیکد کردن پاسخ ژوپیتر
+        raw_tx = base64.b64decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
         
         signature = sender_keypair.sign_message(bytes(txn.message))
@@ -119,7 +117,7 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58"}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=15).json()
@@ -127,9 +125,10 @@ def execute_real_buy(token_mint, amount_sol):
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
-            return False, "تراکنش توسط شبکه سولانا ریجکت شد"
+            err_details = tx_res.get('error', {}).get('message', 'ریجکت توسط شبکه')
+            return False, f"{err_details}"
     except Exception as e:
-        return False, f"خطا در ارسال تراکنش: {str(e)}"
+        return False, f"خطای امضا: {str(e)}"
 
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
@@ -359,4 +358,3 @@ if __name__ == "__main__":
 
     print("🚀 ربات نهایی با موفقیت استارت شد و آماده به‌کار است.")
     app.run_polling()
-
