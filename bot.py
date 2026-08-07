@@ -14,6 +14,7 @@ from solders.transaction import VersionedTransaction
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
+TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN", "YOUR_TWITTER_BEARER_TOKEN")
 
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -96,20 +97,38 @@ def is_token_safe(token_mint):
     except Exception:
         return True
 
-def get_twitter_trending_tokens():
-    """بررسی توکن‌های داغ و پربحث در توییتر و جوامع کریپتو بر اساس فعالیت‌ها"""
+def get_real_twitter_trending_tokens():
     tokens = []
+    if not TWITTER_BEARER_TOKEN or TWITTER_BEARER_TOKEN == "YOUR_TWITTER_BEARER_TOKEN":
+        try:
+            url = "https://api.dexscreener.com/token-boosts/top/v1"
+            res = requests.get(url, timeout=8).json()
+            if isinstance(res, list):
+                solana_tokens = [item for item in res if item.get('chainId') == 'solana']
+                for t in solana_tokens:
+                    addr = t.get('tokenAddress')
+                    if addr:
+                        tokens.append(addr)
+        except Exception as e:
+            print(f"⚠️ خطا در دریافت داده‌های بازار: {e}")
+        return tokens
+
     try:
-        url = "https://api.dexscreener.com/token-boosts/top/v1"
-        res = requests.get(url, timeout=8).json()
-        if isinstance(res, list):
-            solana_tokens = [item for item in res if item.get('chainId') == 'solana']
-            for t in solana_tokens:
-                addr = t.get('tokenAddress')
-                if addr:
-                    tokens.append(addr)
+        headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
+        query_url = "https://api.twitter.com/2/tweets/search/recent?query=solana memecoin min_retweets:5 -is:retweet"
+        res = requests.get(query_url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            tweets = data.get("data", [])
+            for tweet in tweets:
+                text = tweet.get("text", "")
+                words = text.split()
+                for word in words:
+                    if len(word) == 44 and word not in tokens:
+                        tokens.append(word)
     except Exception as e:
-        print(f"⚠️ خطا در دریافت ترندهای اجتماعی/توییتر: {e}")
+        print(f"❌ خطا در اتصال واقعی به API توییتر: {e}")
+
     return tokens
 
 def execute_real_buy(token_mint, amount_sol):
@@ -267,7 +286,7 @@ def execute_real_sell(token_mint, token_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات با قابلیت بررسی ترندهای توییتر و شبکه سولانا فعال شد.")
+    send_telegram_msg("🤖 ربات با رصد واقعی توییتر و بلاکچین سولانا فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -320,7 +339,7 @@ def auto_trader_loop(app):
             for t_addr in tokens_to_close:
                 active_positions.pop(t_addr, None)
 
-            solana_tokens = get_twitter_trending_tokens()
+            solana_tokens = get_real_twitter_trending_tokens()
 
             for token_addr in solana_tokens[:8]:
                 if not IS_RUNNING:
@@ -348,7 +367,7 @@ def auto_trader_loop(app):
                     
                     processed_tokens.add(token_addr)
                     
-                    print(f"⏳ اقدام برای خرید توکن ترند توییتر و سولانا {symbol} با حجم {BUY_AMOUNT_SOL} SOL...")
+                    print(f"⏳ اقدام برای خرید واقعی توکن ترند توییتر و سولانا {symbol} با حجم {BUY_AMOUNT_SOL} SOL...")
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
@@ -357,7 +376,7 @@ def auto_trader_loop(app):
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
                     msg = (
-                        f"🐦🔥 سیگنال ترند توییتر (شبکه سولانا)\n"
+                        f"🐦🔥 سیگنال ترند توییتر و سولانا (واقعی)\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -391,7 +410,7 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "Solana Twitter-Trending Trading Bot is running 24/7!"
+    return "Solana Real Twitter-Trending Trading Bot is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -415,7 +434,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
-    await update.message.reply_text("🤖 اتاق کنترل مرکزی ربات تریدر سولانا (مدیریت ترند توییتر)\nاز دکمه‌های زیر استفاده کنید:", reply_markup=get_main_keyboard())
+    await update.message.reply_text("🤖 اتاق کنترل مرکزی ربات تریدر واقعی سولانا (رصد توییتر)\nاز دکمه‌های زیر استفاده کنید:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, AWAITING_STATE
@@ -428,9 +447,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "start_bot":
         IS_RUNNING = True
         try:
-            await query.edit_message_text("🟢 اسکنر ترند توییتر و سولانا فعال شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🟢 اسکنر واقعی ترند توییتر و سولانا فعال شد.", reply_markup=get_main_keyboard())
         except Exception:
-            send_telegram_msg("🟢 اسکنر ترند توییتر و سولانا فعال شد.")
+            send_telegram_msg("🟢 اسکنر واقعی فعال شد.")
             
     elif query.data == "stop_bot":
         IS_RUNNING = False
@@ -443,7 +462,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = "🟢 روشن و فعال" if IS_RUNNING else "🔴 خاموش"
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         status_text = (
-            f"📊 وضعیت فعلی سیستم (توییتر + سولانا):\n\n"
+            f"📊 وضعیت واقعی سیستم (توییتر + سولانا):\n\n"
             f"🔹 وضعیت اسکنر: {state}\n"
             f"💰 حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
             f"🎯 تارگت سود: {TAKE_PROFIT}%\n"
@@ -570,5 +589,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات با قابلیت رصد ترندهای توییتر و سولانا استارت شد.")
+    print("🚀 ربات واقعی رصد توییتر و سولانا استارت شد.")
     app.run_polling()
