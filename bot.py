@@ -38,7 +38,7 @@ MIN_VOLUME_5M = 5000
 MIN_PRICE_CHANGE_5M = 5.0  
 
 AWAITING_STATE = None 
-token_creation_temp = {} # حافظه موقت برای مراحل ساخت توکن
+token_creation_temp = {} # متغیر اضافه شده فقط برای ذخیره مراحل ویزاردی ساخت توکن
 
 processed_tokens = set()
 active_positions = {}
@@ -125,6 +125,7 @@ def get_real_market_trending_tokens():
     """جایگزین حرفه‌ای برای توییتر: شکار توکن‌های داغ و پر سر و صدا به محض شروع هیاهو از Dexscreener"""
     tokens = []
     try:
+        # دریافت توکن‌های بوست‌شده و پرتردد شبکه سولانا
         url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
         res = requests.get(url_boost, timeout=4).json()
         if isinstance(res, list):
@@ -137,6 +138,7 @@ def get_real_market_trending_tokens():
         pass
 
     try:
+        # جستجوی توکن‌های جدیدی که حجم و واکنش بالایی گرفته‌اند
         latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
         res_latest = requests.get(latest_url, timeout=4).json()
         for p in res_latest.get("pairs", []):
@@ -401,7 +403,7 @@ def create_real_solana_token(name, symbol, supply_amount):
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=15).json()
         if "result" in tx_res:
             tx_sig = tx_res["result"]
-            return True, f"آدرس توکن (Mint):\n`{str(mint_pubkey)}`\n\nتراکنش در سول‌اسکن:\nhttps://solscan.io/tx/{tx_sig}"
+            return True, f"مینت: {str(mint_pubkey)}\nتراکنش: https://solscan.io/tx/{tx_sig}"
         else:
             err_msg = tx_res.get("error", {}).get("message", "خطای شبکه")
             return False, err_msg
@@ -411,7 +413,7 @@ def create_real_solana_token(name, symbol, supply_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار فعال شد.")
+    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار (جایگزین حرفه‌ای توییتر) فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -449,8 +451,8 @@ def auto_trader_loop(app):
                                 f"🔴 فروش خودکار ({reason})\n\n"
                                 f"🪙 توکن: {symbol}\n"
                                 f"📌 وضعیت فروش: {sell_status_str}\n"
-                                f"📍 آدرس:\n`{token_addr}`\n\n"
-                                f"📉 قیمت خروج: `${current_price:.8f}`\n"
+                                f"📍 آدرس:\n{token_addr}\n\n"
+                                f"📉 قیمت خروج: ${current_price:.8f}\n"
                                 f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
                                 f"🔗 لینک‌های اختصاصی توکن:\n"
                                 f"🔍 تراکنش در Solscan\n{solscan_link}\n"
@@ -464,6 +466,7 @@ def auto_trader_loop(app):
             for t_addr in tokens_to_close:
                 active_positions.pop(t_addr, None)
 
+            # استفاده از موتور قدرتمند جدید به جای توییتر برای شکار لحظه‌ای توکن‌های اول راه
             solana_tokens = get_real_market_trending_tokens()
 
             for token_addr in solana_tokens[:30]:
@@ -505,15 +508,15 @@ def auto_trader_loop(app):
                         f"⚡🔥 سیگنال سریع شکار شد (اول راه و وایرال)\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
-                        f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
-                        f"💵 نقطه ورود دقیق: `${price:.8f}`\n"
+                        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                        f"💵 نقطه ورود دقیق: ${price:.8f}\n"
                         f"💰 مقدار خرید: {BUY_AMOUNT_SOL} SOL\n"
-                        f"🎯 تارگت سود (+{TAKE_PROFIT}%): `${target_tp:.8f}`\n"
-                        f"🛑 حد ضرر (-{STOP_LOSS}%): `${target_sl:.8f}`\n\n"
+                        f"🎯 تارگت سود (+{TAKE_PROFIT}%): ${target_tp:.8f}\n"
+                        f"🛑 حد ضرر (-{STOP_LOSS}%): ${target_sl:.8f}\n\n"
                         f"📊 تحلیل و آمار لحظه‌ای بازار:\n"
                         f"🔹 روند ۵ دقیقه: {price_change_5m:+.2f}%\n"
-                        f"🔹 حجم معاملاتی ۵ دقیقه: `${volume_5m:,.0f}`\n"
-                        f"💧 نقدینگی استخر: `${liquidity:,.0f}`\n\n"
+                        f"🔹 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
+                        f"💧 نقدینگی استخر: ${liquidity:,.0f}\n\n"
                         f"🔗 لینک‌های اختصاصی این توکن:\n"
                         f"🔍 تراکنش در Solscan\n{solscan_link}\n"
                         f"📈 تحلیل در DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
@@ -625,7 +628,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token_creation_temp.clear()
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text("🪙 ساخت واقعی توکن روی بلاکچین (مرحله ۱ از ۳):\n\nلطفاً **نام کامل توکن** (مثلاً Doge Token) را تایپ کنید:", reply_markup=cancel_kb)
+            await query.edit_message_text("🪙 ساخت واقعی توکن روی بلاکچین (مرحله ۱ از ۳):\n\nلطفاً **نام کامل توکن** را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("🪙 لطفاً نام کامل توکن را تایپ کنید:")
             
@@ -694,17 +697,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_input = update.message.text.strip()
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         
-        # مراحل ساخت توکن به صورت ویزاردی
         if AWAITING_STATE == "create_token_name":
             token_creation_temp["name"] = text_input
             AWAITING_STATE = "create_token_symbol"
-            await update.message.reply_text(f"✅ نام ثبت شد: `{text_input}`\n\n(مرحله ۲ از ۳): لطفاً **نماد توکن (Symbol)** (مثلاً DOGE) را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
+            await update.message.reply_text(f"✅ نام ثبت شد: `{text_input}`\n\n(مرحله ۲ از ۳): لطفاً **نماد توکن (Symbol)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
             return
             
         elif AWAITING_STATE == "create_token_symbol":
             token_creation_temp["symbol"] = text_input.upper()
             AWAITING_STATE = "create_token_supply"
-            await update.message.reply_text(f"✅ نماد ثبت شد: `{text_input.upper()}`\n\n(مرحله ۳ از ۳): لطفاً **تعداد کل توکن (Supply)** (مثلاً 1000000000) را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
+            await update.message.reply_text(f"✅ نماد ثبت شد: `{text_input.upper()}`\n\n(مرحله ۳ از ۳): لطفاً **تعداد کل توکن (Supply)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
             return
             
         elif AWAITING_STATE == "create_token_supply":
