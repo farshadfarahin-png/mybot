@@ -390,12 +390,13 @@ def trend_alert_scanner_loop(app):
                     
                     if TREND_ALERT_RUNNING:
                         alert_msg = (
-                            f"🔥 **شکار توکن انفجاری (ترند بازار)** 🚀\n\n"
+                            f"🔥 **اعلان ترند بازار (هشدار سریع)** 🚀\n\n"
                             f"🪙 نام توکن: **{symbol}**\n"
-                            f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                            f"📍 آدرس قرارداد (کپی با یک کلیک):\n`{token_addr}`\n\n"
                             f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
-                            f"🚀 پامپ ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                            f"👥 خریداران: {buys_5m} نفر | حجم: ${volume_5m:,.0f}\n\n"
+                            f"📈 پامپ رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                            f"📊 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
+                            f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
                             f"🔗 https://dexscreener.com/solana/{token_addr}"
                         )
                         send_telegram_msg(alert_msg)
@@ -403,19 +404,29 @@ def trend_alert_scanner_loop(app):
                     if COMBO_RUNNING and token_addr not in active_positions:
                         print(f"⏳ [حالت ترکیبی] خرید توکن ترند {symbol}...")
                         success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
-                        buy_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({result_info} ❌)"
+                        
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp = price * (1 + (TREND_TAKE_PROFIT / 100))
                         target_sl = price * (1 + (TREND_STOP_LOSS / 100))
 
                         combo_msg = (
-                            f"⚡🤖 **خرید ترکیبی ترند (سود {TREND_TAKE_PROFIT}% / ضرر {TREND_STOP_LOSS}%)**\n"
-                            f"📌 وضعیت: {buy_status_str}\n"
-                            f"🪙 توکن: {symbol}\n📍 آدرس:\n`{token_addr}`\n"
-                            f"🎯 تارگت (+{TREND_TAKE_PROFIT}%): ${target_tp:.8f}\n"
-                            f"🛑 حد ضرر ({TREND_STOP_LOSS}%): ${target_sl:.8f}\n"
-                            f"📈 https://dexscreener.com/solana/{token_addr}"
+                            f"⚡🔥 **خرید ترکیبی ترند (سود {TREND_TAKE_PROFIT}% / ضرر {TREND_STOP_LOSS}%)**\n"
+                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                            f"💰 مقدار خرید: SOL {BUY_AMOUNT_SOL}\n"
+                            f"🎯 تارگت سود (+{TREND_TAKE_PROFIT}%): ${target_tp:.8f}\n"
+                            f"🛑 حد ضرر ({TREND_STOP_LOSS}%): ${target_sl:.8f}\n\n"
+                            f"📊 آمار لحظه‌ای بازار:\n"
+                            f"🔹 روند ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                            f"🔗 لینک‌های توکن:\n"
+                            f"🔍 Solscan\n{solscan_link}\n"
+                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                         )
                         if success:
                             active_positions[token_addr] = {
@@ -470,7 +481,7 @@ def auto_trader_loop(app):
                     print(f"⏳ خرید سیگنال معمولی {symbol}...")
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
-                    buy_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({result_info} ❌)"
+                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
                     solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                     target_tp = price * (1 + (TAKE_PROFIT / 100))
@@ -478,11 +489,20 @@ def auto_trader_loop(app):
 
                     msg = (
                         f"⚡🔥 **سیگنال خرید خودکار (سود {TAKE_PROFIT}% / ضرر {STOP_LOSS}%)**\n"
-                        f"📌 وضعیت: {buy_status_str}\n"
-                        f"🪙 توکن: {symbol}\n📍 آدرس:\n`{token_addr}`\n"
-                        f"🎯 تارگت (+{TAKE_PROFIT}%): ${target_tp:.8f}\n"
-                        f"🛑 حد ضرر ({STOP_LOSS}%): ${target_sl:.8f}\n"
-                        f"📈 https://dexscreener.com/solana/{token_addr}"
+                        f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                        f"🪙 توکن: {symbol}\n"
+                        f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                        f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                        f"💰 مقدار خرید: SOL {BUY_AMOUNT_SOL}\n"
+                        f"🎯 تارگت سود (+{TAKE_PROFIT}%): ${target_tp:.8f}\n"
+                        f"🛑 حد ضرر ({STOP_LOSS}%): ${target_sl:.8f}\n\n"
+                        f"📊 آمار لحظه‌ای بازار:\n"
+                        f"🔹 روند ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                        f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                        f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                        f"🔗 لینک‌های توکن:\n"
+                        f"🔍 Solscan\n{solscan_link}\n"
+                        f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                     )
                     
                     if success:
@@ -515,7 +535,6 @@ def get_main_keyboard():
     combo_status = "🟢 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
     
     return InlineKeyboardMarkup([
-        # کنترل‌های اصلی و وضعیت
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
         [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
          InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
@@ -523,14 +542,14 @@ def get_main_keyboard():
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
         [InlineKeyboardButton(f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume")],
         
-        # --- بخش تنظیمات خرید و فروش خودکار (سیگنال) ---
+        # تنظیمات سیگنال معمولی
         [InlineKeyboardButton(f"🔵 [سیگنال] تارگت: +{TAKE_PROFIT}%", callback_data="menu_tp"),
          InlineKeyboardButton(f"🔵 [سیگنال] ضرر: {STOP_LOSS}%", callback_data="menu_sl")],
         [InlineKeyboardButton(f"🔵 نقدینگی: ${MIN_LIQUIDITY}", callback_data="menu_liq"),
          InlineKeyboardButton(f"🔵 حجم ۵دقیقه: ${MIN_VOLUME_5M}", callback_data="menu_vol5m")],
         [InlineKeyboardButton(f"🔵 رشد ۵دقیقه: +{MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
         
-        # --- بخش تنظیمات ترند و حالت ترکیبی ---
+        # تنظیمات ترند و حالت ترکیبی
         [InlineKeyboardButton(f"🔥 [ترند] سود: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
          InlineKeyboardButton(f"🔥 [ترند] ضرر: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
     ])
@@ -540,7 +559,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
-    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا (دسته‌بندی شده):", reply_markup=get_main_keyboard())
+    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, AWAITING_STATE
