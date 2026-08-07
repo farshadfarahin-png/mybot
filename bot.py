@@ -23,12 +23,13 @@ BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
 
-# نقدینگی روی ۳۵k و سایر پارامترهای بهینه‌شده
 MIN_LIQUIDITY = 35000      
 MIN_VOLUME_5M = 15000       
 MIN_PRICE_CHANGE_5M = 10.0  
 
-AWAITING_VOLUME = False
+# وضعیت‌های مختلف برای دریافت ورودی از کاربر در تلگرام
+AWAITING_STATE = None  # می‌تواند شامل: volume, tp, sl, liq, vol5m, chg5m باشد
+
 processed_tokens = set()
 active_positions = {}
 
@@ -80,25 +81,20 @@ def get_token_balance(token_mint):
     return 0
 
 def is_token_safe(token_mint):
-    """تابع جدید بررسی امنیت و ضد اسکم (جلوگیری از هانی‌پات و توکن‌های خطرناک)"""
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
         res = requests.get(url, timeout=5)
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            
-            # اگر امتیاز ریسک بالاتر از حد مجاز باشد یا خطدای خطرناک وجود داشته باشد رد می‌شود
             if risk_score > 3500:
                 return False
-                
             risks = data.get("risks", [])
             for r in risks:
                 if r.get("level") == "danger":
                     return False
         return True
     except Exception:
-        # اگر در استعلام خطایی رخ داد برای اینکه فرصت از دست نرود اجازه عبور داده می‌شود
         return True
 
 def execute_real_buy(token_mint, amount_sol):
@@ -335,7 +331,6 @@ def auto_trader_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                # شرط نهایی همراه با بررسی امنیت و ضد اسکم
                 if (liquidity >= MIN_LIQUIDITY and 
                     volume_5m >= MIN_VOLUME_5M and 
                     price_change_5m >= MIN_PRICE_CHANGE_5M and 
@@ -399,17 +394,22 @@ def get_main_keyboard():
          InlineKeyboardButton("🔴 خاموش کردن اسکنر", callback_data="stop_bot")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
          InlineKeyboardButton(f"⚙️ حجم: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume")],
+        [InlineKeyboardButton(f"🎯 تارگت: {TAKE_PROFIT}%", callback_data="menu_tp"),
+         InlineKeyboardButton(f"🛑 حد ضرر: {STOP_LOSS}%", callback_data="menu_sl")],
+        [InlineKeyboardButton(f"🔒 نقدینگی: ${MIN_LIQUIDITY}", callback_data="menu_liq"),
+         InlineKeyboardButton(f"📈 حجم۵دقیقه: ${MIN_VOLUME_5M}", callback_data="menu_vol5m")],
+        [InlineKeyboardButton(f"🚀 رشد۵دقیقه: +{MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")]
     ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
-    global AWAITING_VOLUME
-    AWAITING_VOLUME = False
-    await update.message.reply_text("🤖 اتاق کنترل مرکزی ربات تریدر سولانا\nاز دکمه‌های زیر استفاده کنید:", reply_markup=get_main_keyboard())
+    global AWAITING_STATE
+    AWAITING_STATE = None
+    await update.message.reply_text("🤖 اتاق کنترل مرکزی ربات تریدر سولانا\nاز دکمه‌های زیر برای تنظیمات استفاده کنید:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global IS_RUNNING, AWAITING_VOLUME
+    global IS_RUNNING, AWAITING_STATE
     query = update.callback_query
     try:
         await query.answer()
@@ -450,34 +450,97 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg(status_text)
             
     elif query.data == "menu_volume":
-        AWAITING_VOLUME = True
+        AWAITING_STATE = "volume"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
             await query.edit_message_text(f"⚙️ حجم فعلی: {BUY_AMOUNT_SOL} SOL\nلطفاً حجم خرید جدید را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("⚙️ لطفاً حجم خرید جدید را تایپ کنید:")
+
+    elif query.data == "menu_tp":
+        AWAITING_STATE = "tp"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"🎯 تارگت سود فعلی: {TAKE_PROFIT}%\nلطفاً درصد جدید تارگت سود را تایپ کنید:", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("🎯 لطفاً درصد جدید تارگت سود را تایپ کنید:")
+
+    elif query.data == "menu_sl":
+        AWAITING_STATE = "sl"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"🛑 حد ضرر فعلی: {STOP_LOSS}%\nلطفاً مقدار جدید حد ضرر (مثلاً منفی ۱۲) را تایپ کنید:", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("🛑 لطفاً مقدار جدید حد ضرر را تایپ کنید:")
+
+    elif query.data == "menu_liq":
+        AWAITING_STATE = "liq"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"🔒 نقدینگی فعلی: ${MIN_LIQUIDITY}\nلطفاً حداقل نقدینگی جدید (به دلار) را تایپ کنید:", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("🔒 لطفاً حداقل نقدینگی جدید را تایپ کنید:")
+
+    elif query.data == "menu_vol5m":
+        AWAITING_STATE = "vol5m"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"📈 حجم ۵ دقیقه فعلی: ${MIN_VOLUME_5M}\nلطفاً حداقل حجم جدید (به دلار) را تایپ کنید:", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("📈 لطفاً حداقل حجم جدید را تایپ کنید:")
+
+    elif query.data == "menu_chg5m":
+        AWAITING_STATE = "chg5m"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"🚀 رشد ۵ دقیقه فعلی: +{MIN_PRICE_CHANGE_5M}%\nلطفاً حداقل درصد رشد جدید را تایپ کنید:", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("🚀 لطفاً حداقل درصد رشد جدید را تایپ کنید:")
             
     elif query.data == "cancel_input":
-        AWAITING_VOLUME = False
+        AWAITING_STATE = None
         try:
             await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
         except Exception:
             send_telegram_msg("🤖 لغو شد.")
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global BUY_AMOUNT_SOL, AWAITING_VOLUME
+    global BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M, MIN_PRICE_CHANGE_5M, AWAITING_STATE
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
 
-    if AWAITING_VOLUME:
+    if AWAITING_STATE:
         text_val = update.message.text.strip().replace(',', '.')
         try:
-            new_volume = float(text_val)
-            if new_volume <= 0:
-                raise ValueError()
-            BUY_AMOUNT_SOL = new_volume
-            AWAITING_VOLUME = False
-            await update.message.reply_text(f"✅ حجم خرید به {BUY_AMOUNT_SOL} SOL تغییر یافت.", reply_markup=get_main_keyboard())
+            val = float(text_val)
+            
+            if AWAITING_STATE == "volume":
+                if val <= 0: raise ValueError()
+                BUY_AMOUNT_SOL = val
+                msg_text = f"✅ حجم خرید به {BUY_AMOUNT_SOL} SOL تغییر یافت."
+            elif AWAITING_STATE == "tp":
+                if val <= 0: raise ValueError()
+                TAKE_PROFIT = val
+                msg_text = f"✅ تارگت سود به {TAKE_PROFIT}% تغییر یافت."
+            elif AWAITING_STATE == "sl":
+                STOP_LOSS = val # می‌تواند منفی باشد
+                msg_text = f"✅ حد ضرر به {STOP_LOSS}% تغییر یافت."
+            elif AWAITING_STATE == "liq":
+                if val < 0: raise ValueError()
+                MIN_LIQUIDITY = val
+                msg_text = f"✅ حداقل نقدینگی به ${MIN_LIQUIDITY} تغییر یافت."
+            elif AWAITING_STATE == "vol5m":
+                if val < 0: raise ValueError()
+                MIN_VOLUME_5M = val
+                msg_text = f"✅ حداقل حجم ۵ دقیقه به ${MIN_VOLUME_5M} تغییر یافت."
+            elif AWAITING_STATE == "chg5m":
+                MIN_PRICE_CHANGE_5M = val
+                msg_text = f"✅ حداقل رشد ۵ دقیقه به +{MIN_PRICE_CHANGE_5M}% تغییر یافت."
+            else:
+                msg_text = "خطا در تنظیمات."
+
+            AWAITING_STATE = None
+            await update.message.reply_text(msg_text, reply_markup=get_main_keyboard())
         except ValueError:
             await update.message.reply_text("❌ خطا! لطفاً یک عدد معتبر وارد کنید:")
     else:
@@ -498,5 +561,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات با سیستم ضد اسکم استارت شد.")
+    print("🚀 ربات با کلیدهای تنظیمات کامل استارت شد.")
     app.run_polling()
