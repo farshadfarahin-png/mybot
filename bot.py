@@ -23,10 +23,10 @@ BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
 
-# تنظیمات توازن‌یافته جدید: نقدینگی ۳۵k، حجم ۲۰k و رشد ۱۵ درصد در ۵ دقیقه
+# تنظیمات بهینه‌شده: نقدینگی روی ۳۵k و بقیه پارامترها متناسب با آن
 MIN_LIQUIDITY = 35000      
-MIN_VOLUME_5M = 20000       
-MIN_PRICE_CHANGE_5M = 15.0  
+MIN_VOLUME_5M = 15000       
+MIN_PRICE_CHANGE_5M = 10.0  
 
 AWAITING_VOLUME = False
 processed_tokens = set()
@@ -234,7 +234,7 @@ def execute_real_sell(token_mint, token_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات هوشمند با تنظیمات توازن‌یافته جدید روشن شد.")
+    send_telegram_msg("🤖 ربات با تنظیمات جدید و نقدینگی ۳۵k فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -294,7 +294,7 @@ def auto_trader_loop(app):
             if isinstance(res, list):
                 solana_tokens = [item for item in res if item.get('chainId') == 'solana']
 
-            for t in solana_tokens[:6]:
+            for t in solana_tokens[:8]:
                 if not IS_RUNNING:
                     break
 
@@ -357,7 +357,7 @@ def auto_trader_loop(app):
         except Exception as e:
             print(f"⚠️ خطای حلقه اصلی تریدر: {e}")
 
-        time.sleep(8)
+        time.sleep(6)
 
 web_app = Flask(__name__)
 
@@ -395,7 +395,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "start_bot":
         IS_RUNNING = True
         try:
-            await query.edit_message_text("🟢 اسکن خودکار با فیلترهای جدید فعال شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🟢 اسکن خودکار فعال شد.", reply_markup=get_main_keyboard())
         except Exception:
             send_telegram_msg("🟢 اسکن خودکار فعال شد.")
             
@@ -474,5 +474,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات با تنظیمات توازن‌یافته استارت شد.")
+    print("🚀 ربات با تنظیمات نهایی استارت شد.")
     app.run_polling()
