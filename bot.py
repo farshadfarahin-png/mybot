@@ -33,6 +33,11 @@ BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
 
+# فیلترهای سبک‌تر برای پیدا شدن راحت‌تر سیگنال
+MIN_LIQUIDITY = 3000       
+MIN_VOLUME_5M = 500       
+MIN_PRICE_CHANGE_5M = 1.0  
+
 AWAITING_STATE = None 
 
 processed_tokens = set()
@@ -60,20 +65,6 @@ except Exception as e:
     print(err_txt)
     send_telegram_msg(err_txt)
     WALLET_PUBKEY = None
-
-def get_sol_balance():
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getBalance",
-            "params": [WALLET_PUBKEY]
-        }
-        res = requests.post(RPC_URL, json=payload, timeout=8).json()
-        lamports = res.get("result", {}).get("value", 0)
-        return lamports / 1_000_000_000
-    except Exception:
-        return 0.0
 
 def get_token_balance(token_mint):
     try:
@@ -106,7 +97,7 @@ def is_token_safe(token_mint):
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            if risk_score > 7000: 
+            if risk_score > 6000: # کمی منعطف‌تر برای رد نشدن همه توکن‌ها
                 return False
         return True
     except Exception:
@@ -325,8 +316,8 @@ def create_real_solana_token(name, symbol, supply_amount):
         return False, str(e)
 
 def auto_trader_loop(app):
-    global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS
-    send_telegram_msg("🤖 اسکنر هوشمند بازار فعال شد.")
+    global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
+    send_telegram_msg("🤖 اسکنر بازار با حساسیت بالاتر فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -384,9 +375,17 @@ def auto_trader_loop(app):
 
                 pair = pair_res['pairs'][0]
                 price = float(pair.get('priceUsd', 0))
+                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
+                volume_5m = float(pair.get('volume', {}).get('m5', 0))
+                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                if price > 0 and is_token_safe(token_addr):
+                if (liquidity >= MIN_LIQUIDITY and 
+                    volume_5m >= MIN_VOLUME_5M and 
+                    price_change_5m >= MIN_PRICE_CHANGE_5M and 
+                    price > 0 and
+                    is_token_safe(token_addr)):
+                    
                     processed_tokens.add(token_addr)
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
@@ -396,6 +395,7 @@ def auto_trader_loop(app):
                         f"📍 آدرس:\n{token_addr}\n"
                         f"💵 ورود: ${price:.8f}\n"
                         f"💰 حجم: {BUY_AMOUNT_SOL} SOL\n"
+                        f"📊 نقدینگی: ${liquidity:,.0f} | حجم ۵م: ${volume_5m:,.0f}\n"
                         f"🔗 تراکنش: https://solscan.io/tx/{result_info if success else 'failed'}"
                     )
                     
@@ -421,11 +421,12 @@ def get_main_keyboard():
         [InlineKeyboardButton("🟢 روشن کردن اسکنر", callback_data="start_bot"),
          InlineKeyboardButton("🔴 خاموش کردن اسکنر", callback_data="stop_bot")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-         InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
-        [InlineKeyboardButton("🪙 ساخت توکن جدید", callback_data="menu_create_token")],
+         InlineKeyboardButton("🪙 ساخت توکن جدید", callback_data="menu_create_token")],
         [InlineKeyboardButton(f"⚙️ حجم: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume"),
          InlineKeyboardButton(f"🎯 تارگت: {TAKE_PROFIT}%", callback_data="menu_tp")],
-        [InlineKeyboardButton(f"🛑 حد ضرر: {STOP_LOSS}%", callback_data="menu_sl")]
+        [InlineKeyboardButton(f"🛑 حد ضرر: {STOP_LOSS}%", callback_data="menu_sl")],
+        [InlineKeyboardButton(f"🔒 نقدینگی: ${MIN_LIQUIDITY}", callback_data="menu_liq"),
+         InlineKeyboardButton(f"📈 حجم۵دقیقه: ${MIN_VOLUME_5M}", callback_data="menu_vol5m")]
     ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -446,7 +447,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "start_bot":
         IS_RUNNING = True
         try:
-            await query.edit_message_text("🟢 اسکنر روشن شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🟢 اسکنر با حساسیت بالا روشن شد.", reply_markup=get_main_keyboard())
         except Exception:
             send_telegram_msg("🟢 اسکنر روشن شد.")
     elif query.data == "stop_bot":
@@ -462,14 +463,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(status_text, reply_markup=get_main_keyboard())
         except Exception:
             send_telegram_msg(status_text)
-    elif query.data == "wallet_balance":
-        bal = get_sol_balance()
-        pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "نامعتبر"
-        bal_text = f"💰 موجودی ولت شما:\n🔹 آدرس: {pub_display}\n🔹 موجودی: {bal:.4f} SOL"
-        try:
-            await query.edit_message_text(bal_text, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(bal_text)
     elif query.data == "menu_create_token":
         AWAITING_STATE = "create_token"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
