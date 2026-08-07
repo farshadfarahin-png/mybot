@@ -28,8 +28,9 @@ ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8kn
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
 RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
-IS_RUNNING = False          # تریدر خودکار (خرید و فروش)
-TREND_ALERT_RUNNING = False # اسکنر اعلان ترند
+IS_RUNNING = False          # موتور ۱: خرید و فروش خودکار مستقل
+TREND_ALERT_RUNNING = False # موتور ۲: اعلان ترند مستقل (فقط هشدار)
+COMBO_RUNNING = False       # موتور ۳: حالت ترکیبی (ترندها هم وارد معامله واقعی می‌شوند)
 
 BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
@@ -295,17 +296,17 @@ def execute_real_sell(token_mint, token_amount):
     except Exception as e:
         return False, f"خطای امضا در فروش: {str(e)}"
 
-# اسکنر اعلان ترند
+# موتور اسکنر ترند و حالت ترکیبی
 def trend_alert_scanner_loop(app):
-    global TREND_ALERT_RUNNING
+    global TREND_ALERT_RUNNING, COMBO_RUNNING
     while True:
-        if not TREND_ALERT_RUNNING:
+        if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
             time.sleep(2)
             continue
         try:
             tokens = get_real_market_trending_tokens()
             for token_addr in tokens[:30]:
-                if not TREND_ALERT_RUNNING:
+                if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
                     break
                 if not token_addr or token_addr in trend_alerted_tokens:
                     continue
@@ -327,26 +328,59 @@ def trend_alert_scanner_loop(app):
                     is_token_safe(token_addr)):
                     
                     trend_alerted_tokens.add(token_addr)
-                    alert_msg = (
-                        f"🚨 **اعلان ترند بازار (هشدار سریع)** 🔥🚀\n\n"
-                        f"🪙 نام توکن: **{symbol}**\n"
-                        f"📍 آدرس قرارداد (کپی با یک کلیک):\n`{token_addr}`\n\n"
-                        f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
-                        f"🚀 شتاب رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                        f"📈 حجم ورودی ۵ دقیقه: ${volume_5m:,.0f}\n"
-                        f"💧 نقدینگی استخر: ${liquidity:,.0f}\n\n"
-                        f"🔗 **لینک مستقیم رصد در DexScreener:**\n"
-                        f"https://dexscreener.com/solana/{token_addr}"
-                    )
-                    send_telegram_msg(alert_msg)
+                    
+                    # 1. اگر اعلان ترند روشن باشد، فقط هشدار می‌فرستد
+                    if TREND_ALERT_RUNNING:
+                        alert_msg = (
+                            f"🚨 **اعلان ترند بازار (هشدار سریع)** 🔥🚀\n\n"
+                            f"🪙 نام توکن: **{symbol}**\n"
+                            f"📍 آدرس قرارداد (کپی با یک کلیک):\n`{token_addr}`\n\n"
+                            f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
+                            f"🚀 شتاب رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                            f"📈 حجم ورودی ۵ دقیقه: ${volume_5m:,.0f}\n"
+                            f"💧 نقدینگی استخر: ${liquidity:,.0f}\n\n"
+                            f"🔗 **لینک مستقیم رصد در DexScreener:**\n"
+                            f"https://dexscreener.com/solana/{token_addr}"
+                        )
+                        send_telegram_msg(alert_msg)
+
+                    # 2. اگر حالت ترکیبی روشن باشد، علاوه بر اعلان، ربات مستقیماً وارد معامله واقعیِ آن ترند می‌شود
+                    if COMBO_RUNNING and token_addr not in active_positions:
+                        print(f"⏳ [حالت ترکیبی] اقدام برای خرید واقعی توکن ترند {symbol}...")
+                        success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+
+                        target_tp = price * (1 + (TAKE_PROFIT / 100))
+                        target_sl = price * (1 + (STOP_LOSS / 100))
+
+                        combo_msg = (
+                            f"⚡🤖 **خرید خودکار از طریق حالت ترکیبی (ترند)**\n"
+                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                            f"💰 مقدار خرید: {BUY_AMOUNT_SOL} SOL\n"
+                            f"🎯 تارگت سود (+{TAKE_PROFIT}%): ${target_tp:.8f}\n"
+                            f"🛑 حد ضرر (-{STOP_LOSS}%): ${target_sl:.8f}\n\n"
+                            f"🔗 لینک‌های توکن:\n"
+                            f"🔍 Solscan\n{solscan_link}\n"
+                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                        )
+                        if success:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol
+                            }
+                        send_telegram_msg(combo_msg)
         except Exception as e:
             print(f"⚠️ خطای اسکنر ترند: {e}")
         time.sleep(5)
 
-# تریدر خودکار خرید و فروش
+# موتور تریدر خودکار مستقل (خرید و فروش معمولی)
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
-    send_telegram_msg("⚡ تریدر خودکار فعال شد.")
+    send_telegram_msg("⚡ تریدر خودکار مستقل فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -470,22 +504,17 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "Combined Solana Bot is running 24/7!"
+    return "Multi-Mode Solana Bot is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
 
 def get_main_keyboard():
-    trader_status = "🟢 تریدر: روشن" if IS_RUNNING else "🔴 تریدر: خاموش"
+    trader_status = "🟢 خرید و فروش: روشن" if IS_RUNNING else "🔴 خرید و فروش: خاموش"
     trend_status = "🟢 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
+    combo_status = "🟢 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
     
-    # اگر هر دو روشن باشند، حالت ترکیبی فعال است
-    if IS_RUNNING and TREND_ALERT_RUNNING:
-        combo_status = "🟢 حالت ترکیبی: فعال (همه با هم)"
-    else:
-        combo_status = "🔴 حالت ترکیبی: خاموش"
-
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
         [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
@@ -505,10 +534,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
-    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا\nاز دکمه‌ها برای مدیریت موتورها استفاده کنید:", reply_markup=get_main_keyboard())
+    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا\nدکمه‌ها را به دلخواه مدیریت کنید:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global IS_RUNNING, TREND_ALERT_RUNNING, AWAITING_STATE
+    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, AWAITING_STATE
     query = update.callback_query
     try:
         await query.answer()
@@ -516,15 +545,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     if query.data == "toggle_combo":
-        # اگر هر دو روشنند، هر دو را خاموش کن؛ در غیر این صورت هر دو را روشن کن
-        if IS_RUNNING and TREND_ALERT_RUNNING:
-            IS_RUNNING = False
-            TREND_ALERT_RUNNING = False
-            state_txt = "🔴 حالت ترکیبی خاموش شد (هر دو موتور متوقف شدند)."
-        else:
-            IS_RUNNING = True
-            TREND_ALERT_RUNNING = True
-            state_txt = "🟢 حالت ترکیبی روشن شد!\n(هم تریدر خرید/فروش و هم اعلان ترند هم‌زمان فعال شدند)."
+        COMBO_RUNNING = not COMBO_RUNNING
+        state_txt = "🟢 حالت ترکیبی روشن شد (خرید خودکار از روی ترندها فعال شد)." if COMBO_RUNNING else "🔴 حالت ترکیبی خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -532,7 +554,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "toggle_trader":
         IS_RUNNING = not IS_RUNNING
-        state_txt = "🟢 تریدر خودکار روشن شد." if IS_RUNNING else "🔴 تریدر خودکار خاموش شد."
+        state_txt = "🟢 خرید و فروش خودکار روشن شد." if IS_RUNNING else "🔴 خرید و فروش خودکار خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -549,13 +571,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "status":
         t_state = "🟢 فعال" if IS_RUNNING else "🔴 خاموش"
         trend_state = "🟢 فعال" if TREND_ALERT_RUNNING else "🔴 خاموش"
-        combo_state = "🟢 فعال (همه با هم)" if (IS_RUNNING and TREND_ALERT_RUNNING) else "🔴 غیرفعال"
+        combo_state = "🟢 فعال" if COMBO_RUNNING else "🔴 خاموش"
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         current_sol_bal = get_sol_balance()
         status_text = (
             f"📊 وضعیت سیستم:\n\n"
-            f"🔹 حالت ترکیبی: {combo_state}\n"
-            f"🔹 تریدر خرید/فروش: {t_state}\n"
+            f"🔹 حالت ترکیبی (خرید از ترند): {combo_state}\n"
+            f"🔹 خرید و فروش خودکار: {t_state}\n"
             f"🔹 اعلان ترند: {trend_state}\n"
             f"💰 موجودی ولت: {current_sol_bal:.4f} SOL\n"
             f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
