@@ -12,11 +12,11 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.hash import Hash
 from solders.instruction import Instruction, AccountMeta
-from solders.system_program import CreateAccountParams, create_account
-from solders.token_program import InitializeMintParams, initialize_mint, MintToParams, mint_to, TOKEN_PROGRAM_ID
 from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
+from solders.system_program import create_account, CreateAccountParams
 
+# تنظیمات کلیدی محیطی
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
@@ -24,6 +24,7 @@ TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN", "YOUR_TWITTER_BEAR
 
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 SOL_MINT = "So11111111111111111111111111111111111111112"
+TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
 RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
@@ -293,7 +294,7 @@ def execute_real_sell(token_mint, token_amount):
         return False, f"خطای امضا در فروش: {str(e)}"
 
 def create_real_solana_token(name, symbol, supply_amount):
-    """ساخت کاملاً واقعی توکن SPL روی بلاکچین اصلی سولانا"""
+    """ساخت کاملاً واقعی توکن روی بلاکچین بدون خطای ماژول"""
     if not WALLET_PUBKEY or not sender_keypair:
         return False, "ولت تنظیم نشده است"
     try:
@@ -314,7 +315,7 @@ def create_real_solana_token(name, symbol, supply_amount):
         }, timeout=10).json()
         blockhash_str = bh_resp.get("result", {}).get("value", {}).get("blockhash")
         if not blockhash_str:
-            return False, "خطا در دریافت بلاک‌هاش از شبکه سولانا"
+            return False, "خطا در دریافت بلاک‌هاش از شبکه"
         recent_blockhash = Hash.from_string(blockhash_str)
         
         create_acc_ix = create_account(
@@ -327,14 +328,14 @@ def create_real_solana_token(name, symbol, supply_amount):
             )
         )
         
-        init_mint_ix = initialize_mint(
-            InitializeMintParams(
-                program_id=TOKEN_PROGRAM_ID,
-                mint=mint_pubkey,
-                decimals=9,
-                mint_authority=sender_keypair.pubkey(),
-                freeze_authority=None
-            )
+        init_data = bytes([0, 9]) + bytes(sender_keypair.pubkey()) + bytes([0])
+        init_mint_ix = Instruction(
+            program_id=TOKEN_PROGRAM_ID,
+            accounts=[
+                AccountMeta(mint_pubkey, is_signer=False, is_writable=True),
+                AccountMeta(RENT_SYSVAR, is_signer=False, is_writable=False)
+            ],
+            data=init_data
         )
         
         def get_associated_token_address(wallet: Pubkey, mint: Pubkey) -> Pubkey:
@@ -361,14 +362,15 @@ def create_real_solana_token(name, symbol, supply_amount):
         )
         
         supply_raw = int(float(supply_amount) * 10**9)
-        mint_to_ix = mint_to(
-            MintToParams(
-                program_id=TOKEN_PROGRAM_ID,
-                mint=mint_pubkey,
-                dest=sender_ata,
-                authority=sender_keypair.pubkey(),
-                amount=supply_raw
-            )
+        mint_to_data = bytes([7]) + supply_raw.to_bytes(8, "little")
+        mint_to_ix = Instruction(
+            program_id=TOKEN_PROGRAM_ID,
+            accounts=[
+                AccountMeta(mint_pubkey, is_signer=False, is_writable=True),
+                AccountMeta(sender_ata, is_signer=False, is_writable=True),
+                AccountMeta(sender_keypair.pubkey(), is_signer=True, is_writable=False)
+            ],
+            data=mint_to_data
         )
         
         message = MessageV0.try_compile(
