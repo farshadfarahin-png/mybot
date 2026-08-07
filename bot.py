@@ -26,7 +26,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
-RENT_SYSVAR = Pubkey.from_string("SysvarRent11111111111111111111111111111111")
+RENT_SYSVAR = Pubkey.from_bytes(base58.b58decode("SysvarRent111111111111111111111111111111111"))
 
 IS_RUNNING = False
 BUY_AMOUNT_SOL = 0.005
@@ -58,7 +58,6 @@ try:
 except Exception as e:
     err_txt = f"خطا در کلید خصوصی ولت: {e}"
     print(err_txt)
-    send_telegram_msg(err_txt)
     WALLET_PUBKEY = None
 
 def get_sol_balance():
@@ -326,7 +325,6 @@ def create_real_solana_token(name, symbol, supply_amount):
 
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS
-    send_telegram_msg("🤖 اسکنر هوشمند بازار فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -414,7 +412,7 @@ def home():
     return "Bot is running!"
 
 def run_web():
-    web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), use_reloader=False)
 
 def get_main_keyboard():
     return InlineKeyboardMarkup([
@@ -445,16 +443,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "start_bot":
         IS_RUNNING = True
+        send_telegram_msg("🤖 اسکنر هوشمند بازار فعال شد.")
         try:
             await query.edit_message_text("🟢 اسکنر روشن شد.", reply_markup=get_main_keyboard())
         except Exception:
-            send_telegram_msg("🟢 اسکنر روشن شد.")
+            pass
     elif query.data == "stop_bot":
         IS_RUNNING = False
+        send_telegram_msg("🤖 اسکنر هوشمند بازار متوقف شد.")
         try:
             await query.edit_message_text("🔴 اسکنر خاموش شد.", reply_markup=get_main_keyboard())
         except Exception:
-            send_telegram_msg("🔴 اسکنر خاموش شد.")
+            pass
     elif query.data == "status":
         state = "🟢 روشن" if IS_RUNNING else "🔴 خاموش"
         status_text = f"📊 وضعیت:\nاسکنر: {state}\nحجم خرید: {BUY_AMOUNT_SOL} SOL\nتارگت: {TAKE_PROFIT}%\nحد ضرر: {STOP_LOSS}%"
