@@ -33,10 +33,9 @@ BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
 
-# فیلترهای سبک‌تر برای پیدا شدن راحت‌تر سیگنال
-MIN_LIQUIDITY = 3000       
-MIN_VOLUME_5M = 500       
-MIN_PRICE_CHANGE_5M = 1.0  
+MIN_LIQUIDITY = 5000       
+MIN_VOLUME_5M = 1000       
+MIN_PRICE_CHANGE_5M = 2.0  
 
 AWAITING_STATE = None 
 
@@ -97,7 +96,7 @@ def is_token_safe(token_mint):
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            if risk_score > 6000: # کمی منعطف‌تر برای رد نشدن همه توکن‌ها
+            if risk_score > 4500:
                 return False
         return True
     except Exception:
@@ -114,8 +113,8 @@ def get_real_twitter_trending_tokens():
                 addr = t.get('tokenAddress')
                 if addr and addr not in tokens:
                     tokens.append(addr)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت داده‌های دکس: {e}")
 
     try:
         latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
@@ -137,7 +136,7 @@ def execute_real_buy(token_mint, amount_sol):
 
     lamports = int(amount_sol * 1_000_000_000)
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=500"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
     
     try:
         quote_res = requests.get(quote_url, headers=headers, timeout=10).json()
@@ -177,7 +176,7 @@ def execute_real_sell(token_mint, token_amount):
     if not WALLET_PUBKEY:
         return False, "ولت نامعتبر است"
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=500"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=400"
     
     try:
         quote_res = requests.get(quote_url, headers=headers, timeout=10).json()
@@ -317,7 +316,7 @@ def create_real_solana_token(name, symbol, supply_amount):
 
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
-    send_telegram_msg("🤖 اسکنر بازار با حساسیت بالاتر فعال شد.")
+    send_telegram_msg("🤖 اسکنر بازار و رصد توکن‌ها فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -363,7 +362,7 @@ def auto_trader_loop(app):
 
             solana_tokens = get_real_twitter_trending_tokens()
 
-            for token_addr in solana_tokens[:15]:
+            for token_addr in solana_tokens[:10]:
                 if not IS_RUNNING:
                     break
                 if not token_addr or token_addr in processed_tokens or token_addr in active_positions:
@@ -405,7 +404,7 @@ def auto_trader_loop(app):
         except Exception:
             pass
 
-        time.sleep(5)
+        time.sleep(8)
 
 web_app = Flask(__name__)
 
@@ -447,7 +446,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "start_bot":
         IS_RUNNING = True
         try:
-            await query.edit_message_text("🟢 اسکنر با حساسیت بالا روشن شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🟢 اسکنر روشن شد.", reply_markup=get_main_keyboard())
         except Exception:
             send_telegram_msg("🟢 اسکنر روشن شد.")
     elif query.data == "stop_bot":
