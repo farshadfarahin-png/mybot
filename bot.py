@@ -66,6 +66,24 @@ except Exception as e:
     send_telegram_msg(err_txt)
     WALLET_PUBKEY = None
 
+def get_sol_balance():
+    """استعلام لحظه‌ای موجودی SOL ولت"""
+    if not WALLET_PUBKEY:
+        return 0.0
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBalance",
+            "params": [WALLET_PUBKEY]
+        }
+        res = requests.post(RPC_URL, json=payload, timeout=8).json()
+        lamports = res.get("result", {}).get("value", 0)
+        return lamports / 1_000_000_000
+    except Exception as e:
+        print(f"⚠️ خطا در استعلام موجودی SOL: {e}")
+        return 0.0
+
 def get_token_balance(token_mint):
     try:
         payload = {
@@ -538,7 +556,8 @@ def get_main_keyboard():
         [InlineKeyboardButton("🟢 روشن کردن اسکنر", callback_data="start_bot"),
          InlineKeyboardButton("🔴 خاموش کردن اسکنر", callback_data="stop_bot")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-         InlineKeyboardButton("🪙 ساخت توکن جدید", callback_data="menu_create_token")],
+         InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
+        [InlineKeyboardButton("🪙 ساخت توکن جدید", callback_data="menu_create_token")],
         [InlineKeyboardButton(f"⚙️ حجم: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume"),
          InlineKeyboardButton(f"🎯 تارگت: {TAKE_PROFIT}%", callback_data="menu_tp")],
         [InlineKeyboardButton(f"🛑 حد ضرر: {STOP_LOSS}%", callback_data="menu_sl"),
@@ -579,10 +598,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "status":
         state = "🟢 روشن و فعال" if IS_RUNNING else "🔴 خاموش"
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
+        current_sol_bal = get_sol_balance()
         status_text = (
             f"📊 وضعیت واقعی سیستم (توییتر + سولانا):\n\n"
             f"🔹 وضعیت اسکنر: {state}\n"
-            f"💰 حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
+            f"💰 موجودی ولت: {current_sol_bal:.4f} SOL\n"
+            f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
             f"🎯 تارگت سود: {TAKE_PROFIT}%\n"
             f"🛑 حد ضرر: {STOP_LOSS}%\n"
             f"🔒 حداقل نقدینگی: ${MIN_LIQUIDITY}\n"
@@ -594,6 +615,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(status_text, reply_markup=get_main_keyboard())
         except Exception:
             send_telegram_msg(status_text)
+
+    elif query.data == "wallet_balance":
+        current_sol_bal = get_sol_balance()
+        pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
+        balance_text = (
+            f"💰 رصد لحظه‌ای موجودی ولت:\n\n"
+            f"🔹 آدرس: {pub_display}\n"
+            f"🔹 موجودی فعلی: {current_sol_bal:.4f} SOL"
+        )
+        try:
+            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
+        except Exception:
+            send_telegram_msg(balance_text)
 
     elif query.data == "menu_create_token":
         AWAITING_STATE = "create_token"
