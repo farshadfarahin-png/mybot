@@ -67,7 +67,7 @@ except Exception as e:
     WALLET_PUBKEY = None
 
 def get_sol_balance():
-    """استعلام لحظه‌ای موجودی SOL ولت"""
+    """رصد لحظه‌ای موجودی SOL ولت"""
     if not WALLET_PUBKEY:
         return 0.0
     try:
@@ -77,11 +77,10 @@ def get_sol_balance():
             "method": "getBalance",
             "params": [WALLET_PUBKEY]
         }
-        res = requests.post(RPC_URL, json=payload, timeout=8).json()
+        res = requests.post(RPC_URL, json=payload, timeout=5).json()
         lamports = res.get("result", {}).get("value", 0)
         return lamports / 1_000_000_000
-    except Exception as e:
-        print(f"⚠️ خطا در استعلام موجودی SOL: {e}")
+    except Exception:
         return 0.0
 
 def get_token_balance(token_mint):
@@ -127,35 +126,41 @@ def is_token_safe(token_mint):
 
 def get_real_twitter_trending_tokens():
     tokens = []
-    if not TWITTER_BEARER_TOKEN or TWITTER_BEARER_TOKEN == "YOUR_TWITTER_BEARER_TOKEN":
-        try:
-            url = "https://api.dexscreener.com/token-boosts/top/v1"
-            res = requests.get(url, timeout=8).json()
-            if isinstance(res, list):
-                solana_tokens = [item for item in res if item.get('chainId') == 'solana']
-                for t in solana_tokens:
+    try:
+        url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
+        res = requests.get(url_boost, timeout=5).json()
+        if isinstance(res, list):
+            for t in res:
+                if t.get('chainId') == 'solana':
                     addr = t.get('tokenAddress')
-                    if addr:
+                    if addr and addr not in tokens:
                         tokens.append(addr)
-        except Exception as e:
-            print(f"⚠️ خطا در دریافت داده‌های بازار: {e}")
-        return tokens
+    except Exception:
+        pass
 
     try:
-        headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
-        query_url = "https://api.twitter.com/2/tweets/search/recent?query=solana memecoin min_retweets:5 -is:retweet"
-        res = requests.get(query_url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            tweets = data.get("data", [])
-            for tweet in tweets:
-                text = tweet.get("text", "")
-                words = text.split()
-                for word in words:
-                    if len(word) == 44 and word not in tokens:
-                        tokens.append(word)
-    except Exception as e:
-        print(f"❌ خطا در اتصال واقعی به API توییتر: {e}")
+        latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
+        res_latest = requests.get(latest_url, timeout=5).json()
+        for p in res_latest.get("pairs", []):
+            if p.get("chainId") == "solana":
+                addr = p.get("baseToken", {}).get("address")
+                if addr and addr not in tokens:
+                    tokens.append(addr)
+    except Exception:
+        pass
+
+    if TWITTER_BEARER_TOKEN and TWITTER_BEARER_TOKEN != "YOUR_TWITTER_BEARER_TOKEN":
+        try:
+            headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
+            query_url = "https://api.twitter.com/2/tweets/search/recent?query=solana memecoin min_retweets:3 -is:retweet"
+            res = requests.get(query_url, headers=headers, timeout=6)
+            if res.status_code == 200:
+                for tweet in res.json().get("data", []):
+                    for word in tweet.get("text", "").split():
+                        if len(word) == 44 and word not in tokens:
+                            tokens.append(word)
+        except Exception:
+            pass
 
     return tokens
 
@@ -175,15 +180,15 @@ def execute_real_buy(token_mint, amount_sol):
     quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=200"
     
     quote_res = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=10)
+            res = requests.get(quote_url, headers=headers, timeout=6)
             if res.status_code == 200:
                 quote_res = res.json()
                 break
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(0.5)
 
     if not quote_res or "error" in quote_res:
         return False, "خطای دریافت قیمت از صرافی"
@@ -196,15 +201,15 @@ def execute_real_buy(token_mint, amount_sol):
     }
     
     swap_res = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=10)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
             if res.status_code == 200:
                 swap_res = res.json()
                 break
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(0.5)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "تراکنش سواپ توسط صرافی رد شد"
@@ -226,7 +231,7 @@ def execute_real_buy(token_mint, amount_sol):
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=15).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
         
         if "result" in tx_res:
             return True, tx_res["result"]
@@ -250,15 +255,15 @@ def execute_real_sell(token_mint, token_amount):
     quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=300"
     
     quote_res = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=10)
+            res = requests.get(quote_url, headers=headers, timeout=6)
             if res.status_code == 200:
                 quote_res = res.json()
                 break
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(0.5)
 
     if not quote_res or "error" in quote_res:
         return False, "خطای دریافت قیمت فروش از صرافی"
@@ -271,15 +276,15 @@ def execute_real_sell(token_mint, token_amount):
     }
     
     swap_res = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=10)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
             if res.status_code == 200:
                 swap_res = res.json()
                 break
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(0.5)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "تراکنش فروش توسط صرافی رد شد"
@@ -301,7 +306,7 @@ def execute_real_sell(token_mint, token_amount):
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=15).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
         
         if "result" in tx_res:
             return True, tx_res["result"]
@@ -323,14 +328,14 @@ def create_real_solana_token(name, symbol, supply_amount):
             "jsonrpc": "2.0", "id": 1,
             "method": "getMinimumBalanceForRentExemption",
             "params": [82]
-        }, timeout=10).json()
+        }, timeout=8).json()
         lamports = rent_resp.get("result", 1461600)
         
         bh_resp = requests.post(RPC_URL, json={
             "jsonrpc": "2.0", "id": 1,
             "method": "getLatestBlockhash",
             "params": [{"commitment": "confirmed"}]
-        }, timeout=10).json()
+        }, timeout=8).json()
         blockhash_str = bh_resp.get("result", {}).get("value", {}).get("blockhash")
         if not blockhash_str:
             return False, "خطا در دریافت بلاک‌هاش از شبکه"
@@ -408,7 +413,7 @@ def create_real_solana_token(name, symbol, supply_amount):
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=20).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=15).json()
         if "result" in tx_res:
             tx_sig = tx_res["result"]
             return True, f"مینت: {str(mint_pubkey)}\nتراکنش: https://solscan.io/tx/{tx_sig}"
@@ -421,18 +426,18 @@ def create_real_solana_token(name, symbol, supply_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات با رصد واقعی توییتر و بلاکچین سولانا فعال شد.")
+    send_telegram_msg("⚡ ربات پرسرعت با رصد لحظه‌ای موجودی و بلاکچین فعال شد.")
 
     while True:
         if not IS_RUNNING:
-            time.sleep(3)
+            time.sleep(1)
             continue
 
         try:
             tokens_to_close = []
             for token_addr, pos in list(active_positions.items()):
                 try:
-                    pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=6).json()
+                    pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
                     if not pair_res.get('pairs'):
                         continue
                     pair = pair_res['pairs'][0]
@@ -476,14 +481,14 @@ def auto_trader_loop(app):
 
             solana_tokens = get_real_twitter_trending_tokens()
 
-            for token_addr in solana_tokens[:8]:
+            for token_addr in solana_tokens[:25]:
                 if not IS_RUNNING:
                     break
 
                 if not token_addr or token_addr in processed_tokens or token_addr in active_positions:
                     continue
 
-                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=6).json()
+                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
                 if not pair_res.get('pairs'):
                     continue
 
@@ -502,7 +507,7 @@ def auto_trader_loop(app):
                     
                     processed_tokens.add(token_addr)
                     
-                    print(f"⏳ اقدام برای خرید واقعی توکن ترند توییتر و سولانا {symbol} با حجم {BUY_AMOUNT_SOL} SOL...")
+                    print(f"⏳ اقدام برای خرید واقعی توکن {symbol} با حجم {BUY_AMOUNT_SOL} SOL...")
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
@@ -511,7 +516,7 @@ def auto_trader_loop(app):
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
                     msg = (
-                        f"🐦🔥 سیگنال ترند توییتر و سولانا (واقعی)\n"
+                        f"⚡🔥 سیگنال سریع شکار شد (واقعی)\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -539,7 +544,7 @@ def auto_trader_loop(app):
         except Exception as e:
             print(f"⚠️ خطای حلقه اصلی تریدر: {e}")
 
-        time.sleep(6)
+        time.sleep(2)
 
 web_app = Flask(__name__)
 
@@ -584,9 +589,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "start_bot":
         IS_RUNNING = True
         try:
-            await query.edit_message_text("🟢 اسکنر واقعی ترند توییتر و سولانا فعال شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🟢 اسکنر پرسرعت ترند بازار فعال شد.", reply_markup=get_main_keyboard())
         except Exception:
-            send_telegram_msg("🟢 اسکنر واقعی فعال شد.")
+            send_telegram_msg("🟢 اسکنر پرسرعت فعال شد.")
             
     elif query.data == "stop_bot":
         IS_RUNNING = False
@@ -600,7 +605,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         current_sol_bal = get_sol_balance()
         status_text = (
-            f"📊 وضعیت واقعی سیستم (توییتر + سولانا):\n\n"
+            f"📊 وضعیت واقعی سیستم:\n\n"
             f"🔹 وضعیت اسکنر: {state}\n"
             f"💰 موجودی ولت: {current_sol_bal:.4f} SOL\n"
             f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
@@ -774,5 +779,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات واقعی رصد توییتر، ترید و سازنده توکن سولانا استارت شد.")
+    print("🚀 ربات واقعی رصد پرسرعت توییتر، ترید و سازنده توکن سولانا استارت شد.")
     app.run_polling()
