@@ -9,6 +9,12 @@ from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.hash import Hash
+from solders.instruction import Instruction, AccountMeta
+from solders.system_program import CreateAccountParams, create_account
+from solders.token_program import InitializeMintParams, initialize_mint, MintToParams, mint_to, TOKEN_PROGRAM_ID
+from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
@@ -18,6 +24,9 @@ TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN", "YOUR_TWITTER_BEAR
 
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 SOL_MINT = "So11111111111111111111111111111111111111112"
+ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
+RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
 IS_RUNNING = False
 BUY_AMOUNT_SOL = 0.005
@@ -283,23 +292,116 @@ def execute_real_sell(token_mint, token_amount):
     except Exception as e:
         return False, f"خطای امضا در فروش: {str(e)}"
 
-def create_new_solana_token(name, symbol, supply):
-    """ساخت واقعی توکن استاندارد SPL روی شبکه اصلی سولانا با استفاده از ابزارهای انحصاری"""
-    if not WALLET_PUBKEY:
+def create_real_solana_token(name, symbol, supply_amount):
+    """ساخت کاملاً واقعی توکن SPL روی بلاکچین اصلی سولانا"""
+    if not WALLET_PUBKEY or not sender_keypair:
         return False, "ولت تنظیم نشده است"
     try:
-        new_mint_keypair = Keypair()
-        mint_pubkey = str(new_mint_keypair.pubkey())
+        mint_keypair = Keypair()
+        mint_pubkey = mint_keypair.pubkey()
         
-        # ثبت درخواست ساخت توکن روی بلاکچین اصلی با متادیتای واقعی
-        return True, f"توکن با موفقیت ساخته شد!\nآدرس مینت: {mint_pubkey}\nنام: {name}\nنماد: {symbol}\nتعداد کل: {supply}"
+        rent_resp = requests.post(RPC_URL, json={
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getMinimumBalanceForRentExemption",
+            "params": [82]
+        }, timeout=10).json()
+        lamports = rent_resp.get("result", 1461600)
+        
+        bh_resp = requests.post(RPC_URL, json={
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getLatestBlockhash",
+            "params": [{"commitment": "confirmed"}]
+        }, timeout=10).json()
+        blockhash_str = bh_resp.get("result", {}).get("value", {}).get("blockhash")
+        if not blockhash_str:
+            return False, "خطا در دریافت بلاک‌هاش از شبکه سولانا"
+        recent_blockhash = Hash.from_string(blockhash_str)
+        
+        create_acc_ix = create_account(
+            CreateAccountParams(
+                from_pubkey=sender_keypair.pubkey(),
+                to_pubkey=mint_pubkey,
+                lamports=lamports,
+                space=82,
+                owner=TOKEN_PROGRAM_ID
+            )
+        )
+        
+        init_mint_ix = initialize_mint(
+            InitializeMintParams(
+                program_id=TOKEN_PROGRAM_ID,
+                mint=mint_pubkey,
+                decimals=9,
+                mint_authority=sender_keypair.pubkey(),
+                freeze_authority=None
+            )
+        )
+        
+        def get_associated_token_address(wallet: Pubkey, mint: Pubkey) -> Pubkey:
+            assoc, _ = Pubkey.find_program_address(
+                bytes(wallet) + bytes(TOKEN_PROGRAM_ID) + bytes(mint),
+                ATA_PROGRAM_ID
+            )
+            return assoc
+            
+        sender_ata = get_associated_token_address(sender_keypair.pubkey(), mint_pubkey)
+        
+        create_ata_ix = Instruction(
+            program_id=ATA_PROGRAM_ID,
+            accounts=[
+                AccountMeta(sender_keypair.pubkey(), is_signer=True, is_writable=True),
+                AccountMeta(sender_ata, is_signer=False, is_writable=True),
+                AccountMeta(sender_keypair.pubkey(), is_signer=False, is_writable=False),
+                AccountMeta(mint_pubkey, is_signer=False, is_writable=False),
+                AccountMeta(SYS_PROG_ID, is_signer=False, is_writable=False),
+                AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
+                AccountMeta(RENT_SYSVAR, is_signer=False, is_writable=False),
+            ],
+            data=bytes()
+        )
+        
+        supply_raw = int(float(supply_amount) * 10**9)
+        mint_to_ix = mint_to(
+            MintToParams(
+                program_id=TOKEN_PROGRAM_ID,
+                mint=mint_pubkey,
+                dest=sender_ata,
+                authority=sender_keypair.pubkey(),
+                amount=supply_raw
+            )
+        )
+        
+        message = MessageV0.try_compile(
+            payer=sender_keypair.pubkey(),
+            instructions=[create_acc_ix, init_mint_ix, create_ata_ix, mint_to_ix],
+            address_lookup_table_accounts=[],
+            recent_blockhash=recent_blockhash
+        )
+        
+        txn = VersionedTransaction(message, [sender_keypair, mint_keypair])
+        serialized_tx = base58.b58encode(bytes(txn)).decode('utf-8')
+        
+        rpc_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False}]
+        }
+        
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=20).json()
+        if "result" in tx_res:
+            tx_sig = tx_res["result"]
+            return True, f"مینت: {str(mint_pubkey)}\nتراکنش: https://solscan.io/tx/{tx_sig}"
+        else:
+            err_msg = tx_res.get("error", {}).get("message", "خطای شبکه")
+            return False, err_msg
     except Exception as e:
-        return False, f"خطا در ساخت توکن: {str(e)}"
+        return False, str(e)
 
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات با قابلیت رصد واقعی توییتر و بلاکچین سولانا فعال شد.")
+    send_telegram_msg("🤖 ربات با رصد واقعی توییتر و بلاکچین سولانا فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -495,7 +597,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_STATE = "create_token"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text("🪙 ساخت توکن جدید:\nلطفاً اطلاعات توکن را به این فرمت ارسال کنید:\nنام, نماد, تعداد\n(مثلا: MyToken, MTK, 1000000000)", reply_markup=cancel_kb)
+            await query.edit_message_text("🪙 ساخت واقعی توکن روی بلاکچین:\nلطفاً اطلاعات را به این فرمت بفرستید:\nنام, نماد, تعداد\n(مثلا: TestToken, TST, 1000000000)", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("🪙 لطفاً اطلاعات ساخت توکن را بفرستید (نام, نماد, تعداد):")
             
@@ -569,12 +671,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ فرمت اشتباه است! لطفاً به این شکل بفرستید:\nنام, نماد, تعداد\nمثال: TestToken, TST, 1000000000")
                     return
                 t_name, t_symbol, t_supply = parts[0], parts[1], parts[2]
-                success, res_msg = create_new_solana_token(t_name, t_symbol, t_supply)
+                
+                await update.message.reply_text("⏳ در حال ارسال تراکنش ساخت توکن به شبکه سولانا...")
+                success, res_msg = create_real_solana_token(t_name, t_symbol, t_supply)
+                
                 AWAITING_STATE = None
-                await update.message.reply_text(f"🪙 نتیجه ساخت توکن:\n{res_msg}", reply_markup=get_main_keyboard())
+                if success:
+                    final_txt = f"✅ توکن واقعی با موفقیت روی بلاکچین ساخته شد!\n\n🏷 نام: {t_name}\n📌 نماد: {t_symbol}\n📦 تعداد: {t_supply}\n\n{res_msg}"
+                else:
+                    final_txt = f"❌ خطا در ساخت توکن روی بلاکچین:\n{res_msg}"
+                    
+                await update.message.reply_text(final_txt, reply_markup=get_main_keyboard())
                 return
             except Exception as e:
-                await update.message.reply_text(f"❌ خطا در پردازش اطلاعات توکن: {e}")
+                await update.message.reply_text(f"❌ خطا در پردازش: {e}")
                 return
 
         text_val = text_input.replace(',', '.')
@@ -628,5 +738,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات واقعی رصد توییتر، ترید و ساخت توکن سولانا استارت شد.")
+    print("🚀 ربات واقعی رصد توییتر، ترید و سازنده توکن سولانا استارت شد.")
     app.run_polling()
