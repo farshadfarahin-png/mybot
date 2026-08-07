@@ -211,7 +211,7 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "preflightCommitment": "processed"}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -286,7 +286,7 @@ def execute_real_sell(token_mint, token_amount):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "preflightCommitment": "processed"}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -409,7 +409,7 @@ def create_real_solana_token(name, symbol, supply_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار فعال شد.")
+    send_telegram_msg("⚡ ربات پرسرعت با لینک‌های اصلاح‌شده و اسکنر آنی فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -452,7 +452,7 @@ def auto_trader_loop(app):
                                 f"🔗 لینک‌های اختصاصی توکن:\n"
                                 f"🔍 تراکنش در Solscan\nhttps://solscan.io/tx/{sell_res_info if success else 'failed'}\n"
                                 f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}\n"
-                                f"⚡ Photon\nhttps://photon-sol.today/token/{token_addr}"
+                                f"⚡ Photon\nhttps://photon-sol.xyz/token/{token_addr}"
                             )
                             send_telegram_msg(exit_msg)
                             tokens_to_close.append(token_addr)
@@ -514,7 +514,7 @@ def auto_trader_loop(app):
                         f"🔗 لینک‌های اختصاصی این توکن:\n"
                         f"🔍 تراکنش در Solscan\nhttps://solscan.io/tx/{result_info if success else 'failed'}\n"
                         f"📈 تحلیل در DexScreener\nhttps://dexscreener.com/solana/{token_addr}\n"
-                        f"⚡ رصد حرفه‌ای در Photon\nhttps://photon-sol.today/token/{token_addr}"
+                        f"⚡ رصد حرفه‌ای در Photon\nhttps://photon-sol.xyz/token/{token_addr}"
                     )
                     
                     if success:
