@@ -122,7 +122,7 @@ def is_token_safe(token_mint):
         return True
 
 def get_real_market_trending_tokens():
-    """شکار توکن‌های داغ و پر سر و صدا به محض شروع هیاهو از Dexscreener"""
+    """جایگزین حرفه‌ای برای توییتر: شکار توکن‌های داغ و پر سر و صدا به محض شروع هیاهو از Dexscreener"""
     tokens = []
     try:
         url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
@@ -302,7 +302,7 @@ def execute_real_sell(token_mint, token_amount):
         return False, f"خطای امضا در فروش: {str(e)}"
 
 def create_real_solana_token(name, symbol, supply_amount):
-    """ساخت کاملاً واقعی توکن روی بلاکچین با دریافت آخرین بلاک‌هاش به صورت تازه و مقاوم در برابر خطا"""
+    """ساخت کاملاً واقعی توکن روی بلاکچین بدون خطای Sequence"""
     if not WALLET_PUBKEY or not sender_keypair:
         return False, "ولت تنظیم نشده است"
     try:
@@ -316,22 +316,14 @@ def create_real_solana_token(name, symbol, supply_amount):
         }, timeout=8).json()
         lamports = rent_resp.get("result", 1461600)
         
-        # تلاش برای دریافت بلاک‌هاش به‌روز با commitment مناسب
-        blockhash_str = None
-        for _ in range(3):
-            bh_resp = requests.post(RPC_URL, json={
-                "jsonrpc": "2.0", "id": 1,
-                "method": "getLatestBlockhash",
-                "params": [{"commitment": "finalized"}]
-            }, timeout=8).json()
-            blockhash_str = bh_resp.get("result", {}).get("value", {}).get("blockhash")
-            if blockhash_str:
-                break
-            time.sleep(0.5)
-
+        bh_resp = requests.post(RPC_URL, json={
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getLatestBlockhash",
+            "params": [{"commitment": "confirmed"}]
+        }, timeout=8).json()
+        blockhash_str = bh_resp.get("result", {}).get("value", {}).get("blockhash")
         if not blockhash_str:
-            return False, "خطا در دریافت بلاک‌هاش از شبکه (Blockhash not found)"
-            
+            return False, "خطا در دریافت بلاک‌هاش از شبکه"
         recent_blockhash = Hash.from_string(blockhash_str)
         
         create_acc_ix = create_account(
@@ -419,7 +411,7 @@ def create_real_solana_token(name, symbol, supply_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("⚡ ربات تریدر و اسکنر بازار سولانا فعال شد.")
+    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -569,6 +561,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
+    token_creation_temp.clear()
     await update.message.reply_text("🤖 اتاق کنترل مرکزی ربات تریدر و سازنده توکن سولانا\nاز دکمه‌های زیر استفاده کنید:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -632,7 +625,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token_creation_temp.clear()
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text("🪙 ساخت توکن جدید روی بلاکچین (مرحله ۱ از ۳):\n\nلطفاً **نام کامل توکن** (مثلاً Doge Token) را تایپ کنید:", reply_markup=cancel_kb)
+            await query.edit_message_text("🪙 ساخت واقعی توکن روی بلاکچین (مرحله ۱ از ۳):\n\nلطفاً **نام کامل توکن** (مثلاً Doge Token) را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("🪙 لطفاً نام کامل توکن را تایپ کنید:")
             
@@ -701,7 +694,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_input = update.message.text.strip()
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         
-        # روند ساخت توکن مرحله به مرحله (ویزاردی)
+        # مراحل ساخت توکن به صورت ویزاردی
         if AWAITING_STATE == "create_token_name":
             token_creation_temp["name"] = text_input
             AWAITING_STATE = "create_token_symbol"
@@ -784,5 +777,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات واقعی رصد بازار، ترید و سازنده توکن سولانا استارت شد.")
+    print("🚀 ربات واقعی رصد پرسرعت بازار، ترید و سازنده توکن سولانا استارت شد.")
     app.run_polling()
