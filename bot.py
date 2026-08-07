@@ -515,19 +515,24 @@ def get_main_keyboard():
     combo_status = "🟢 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
     
     return InlineKeyboardMarkup([
+        # کنترل‌های اصلی و وضعیت
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
         [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
          InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
-        [InlineKeyboardButton(f"⚙️ حجم: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume"),
-         InlineKeyboardButton(f"🎯 تارگت: {TAKE_PROFIT}%", callback_data="menu_tp")],
-        [InlineKeyboardButton(f"🛑 حد ضرر: {STOP_LOSS}%", callback_data="menu_sl"),
-         InlineKeyboardButton(f"🔒 نقدینگی: ${MIN_LIQUIDITY}", callback_data="menu_liq")],
-        [InlineKeyboardButton(f"📈 حجم۵دقیقه: ${MIN_VOLUME_5M}", callback_data="menu_vol5m"),
-         InlineKeyboardButton(f"🚀 رشد۵دقیقه: +{MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
-        [InlineKeyboardButton(f"🎯 سود ترند: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
-         InlineKeyboardButton(f"🛑 ضرر ترند: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
+        [InlineKeyboardButton(f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume")],
+        
+        # --- بخش تنظیمات خرید و فروش خودکار (سیگنال) ---
+        [InlineKeyboardButton(f"🔵 [سیگنال] تارگت: +{TAKE_PROFIT}%", callback_data="menu_tp"),
+         InlineKeyboardButton(f"🔵 [سیگنال] ضرر: {STOP_LOSS}%", callback_data="menu_sl")],
+        [InlineKeyboardButton(f"🔵 نقدینگی: ${MIN_LIQUIDITY}", callback_data="menu_liq"),
+         InlineKeyboardButton(f"🔵 حجم ۵دقیقه: ${MIN_VOLUME_5M}", callback_data="menu_vol5m")],
+        [InlineKeyboardButton(f"🔵 رشد ۵دقیقه: +{MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
+        
+        # --- بخش تنظیمات ترند و حالت ترکیبی ---
+        [InlineKeyboardButton(f"🔥 [ترند] سود: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
+         InlineKeyboardButton(f"🔥 [ترند] ضرر: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
     ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -535,7 +540,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
-    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا (تمام گزینه‌ها):", reply_markup=get_main_keyboard())
+    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا (دسته‌بندی شده):", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, AWAITING_STATE
@@ -579,7 +584,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔹 اعلان ترند: {'🟢 روشن' if TREND_ALERT_RUNNING else '🔴 خاموش'}\n"
             f"💰 موجودی ولت: {current_sol_bal:.4f} SOL\n"
             f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
-            f"🔒 نقدینگی سیگنال: ${MIN_LIQUIDITY}\n"
             f"🔑 ولت متصل: {pub_display}"
         )
         try:
@@ -647,7 +651,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_STATE = "trend_tp"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"🎯 سود ترند فعلی: +{TREND_TAKE_PROFIT}%\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
+            await query.edit_message_text(f"🔥 [ترند] سود فعلی: +{TREND_TAKE_PROFIT}%\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
 
@@ -655,7 +659,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_STATE = "trend_sl"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"🛑 ضرر ترند فعلی: {TREND_STOP_LOSS}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 15-):", reply_markup=cancel_kb)
+            await query.edit_message_text(f"🔥 [ترند] ضرر فعلی: {TREND_STOP_LOSS}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 15-):", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
             
