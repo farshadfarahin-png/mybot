@@ -34,20 +34,16 @@ COMBO_RUNNING = False       # حالت ترکیبی (ترندهای انفجار
 
 BUY_AMOUNT_SOL = 0.005
 
-# تنظیمات خرید و فروش خودکار معمولی (سیگنال)
+# تنظیمات سیگنال معمولی
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
-
-# تنظیمات حالت ترکیبی / ترند (قابل تغییر از منو)
-TREND_TAKE_PROFIT = 60.0
-TREND_STOP_LOSS = -15.0
-
-# فیلترهای خرید و فروش معمولی (سیگنال)
 MIN_LIQUIDITY = 35000       
 MIN_VOLUME_5M = 5000       
 MIN_PRICE_CHANGE_5M = 5.0  
 
-# فیلترهای موتور ترند (پامپ خفن + خریداران زیاد + پول سنگین)
+# تنظیمات ترند / حالت ترکیبی
+TREND_TAKE_PROFIT = 60.0
+TREND_STOP_LOSS = -15.0
 TREND_MIN_VOLUME_5M = 40000  
 TREND_MIN_CHANGE_5M = 15.0   
 MIN_BUYS_5M = 50             
@@ -305,7 +301,6 @@ def execute_real_sell(token_mint, token_amount):
     except Exception as e:
         return False, f"خطای امضا در فروش: {str(e)}"
 
-# بررسی سود و ضرر پوزیشن‌ها
 def check_positions_loop():
     while True:
         try:
@@ -359,9 +354,8 @@ def check_positions_loop():
             print(f"⚠️ خطای حلقه بررسی پوزیشن‌ها: {e}")
         time.sleep(2)
 
-# موتور اسکنر ترند و حالت ترکیبی
 def trend_alert_scanner_loop(app):
-    global TREND_ALERT_RUNNING, COMBO_RUNNING, TREND_TAKE_PROFIT, TREND_STOP_LOSS
+    global TREND_ALERT_RUNNING, COMBO_RUNNING, TREND_TAKE_PROFIT, TREND_STOP_LOSS, TREND_MIN_VOLUME_5M, MIN_BUYS_5M
     while True:
         if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
             time.sleep(2)
@@ -435,7 +429,6 @@ def trend_alert_scanner_loop(app):
             print(f"⚠️ خطای اسکنر ترند: {e}")
         time.sleep(5)
 
-# موتور خرید و فروش خودکار مستقل
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     send_telegram_msg("⚡ خرید و فروش خودکار مستقل فعال شد.")
@@ -527,7 +520,12 @@ def get_main_keyboard():
          InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
-        [InlineKeyboardButton(f"⚙️ حجم: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume")],
+        [InlineKeyboardButton(f"⚙️ حجم: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume"),
+         InlineKeyboardButton(f"🎯 تارگت: {TAKE_PROFIT}%", callback_data="menu_tp")],
+        [InlineKeyboardButton(f"🛑 حد ضرر: {STOP_LOSS}%", callback_data="menu_sl"),
+         InlineKeyboardButton(f"🔒 نقدینگی: ${MIN_LIQUIDITY}", callback_data="menu_liq")],
+        [InlineKeyboardButton(f"📈 حجم۵دقیقه: ${MIN_VOLUME_5M}", callback_data="menu_vol5m"),
+         InlineKeyboardButton(f"🚀 رشد۵دقیقه: +{MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
         [InlineKeyboardButton(f"🎯 سود ترند: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
          InlineKeyboardButton(f"🛑 ضرر ترند: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
     ])
@@ -537,7 +535,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
-    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا:", reply_markup=get_main_keyboard())
+    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا (تمام گزینه‌ها):", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, AWAITING_STATE
@@ -575,12 +573,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         current_sol_bal = get_sol_balance()
         status_text = (
-            f"📊 وضعیت سیستم:\n\n"
-            f"🔹 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'} (سود ترند: +{TREND_TAKE_PROFIT}% | ضرر: {TREND_STOP_LOSS}%)\n"
-            f"🔹 خرید و فروش خودکار: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'} (سود سیگنال: +{TAKE_PROFIT}% | ضرر: {STOP_LOSS}%)\n"
+            f"📊 وضعیت کامل سیستم:\n\n"
+            f"🔹 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'} (سود: +{TREND_TAKE_PROFIT}% | ضرر: {TREND_STOP_LOSS}%)\n"
+            f"🔹 خرید و فروش خودکار: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'} (سود: +{TAKE_PROFIT}% | ضرر: {STOP_LOSS}%)\n"
             f"🔹 اعلان ترند: {'🟢 روشن' if TREND_ALERT_RUNNING else '🔴 خاموش'}\n"
             f"💰 موجودی ولت: {current_sol_bal:.4f} SOL\n"
             f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
+            f"🔒 نقدینگی سیگنال: ${MIN_LIQUIDITY}\n"
             f"🔑 ولت متصل: {pub_display}"
         )
         try:
@@ -604,21 +603,61 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             send_telegram_msg("لطفاً حجم جدید را تایپ کنید:")
 
+    elif query.data == "menu_tp":
+        AWAITING_STATE = "tp"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"🎯 تارگت سیگنال فعلی: +{TAKE_PROFIT}%\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
+
+    elif query.data == "menu_sl":
+        AWAITING_STATE = "sl"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"🛑 حد ضرر سیگنال فعلی: {STOP_LOSS}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 12-):", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
+
+    elif query.data == "menu_liq":
+        AWAITING_STATE = "liq"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"🔒 نقدینگی فعلی: ${MIN_LIQUIDITY}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
+
+    elif query.data == "menu_vol5m":
+        AWAITING_STATE = "vol5m"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"📈 حجم ۵ دقیقه فعلی: ${MIN_VOLUME_5M}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
+
+    elif query.data == "menu_chg5m":
+        AWAITING_STATE = "chg5m"
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
+        try:
+            await query.edit_message_text(f"🚀 رشد ۵ دقیقه فعلی: +{MIN_PRICE_CHANGE_5M}%\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
+        except Exception:
+            send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
+
     elif query.data == "menu_trend_tp":
         AWAITING_STATE = "trend_tp"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"🎯 سود ترند فعلی: +{TREND_TAKE_PROFIT}%\nلطفاً درصد جدید سود ترند را تایپ کنید:", reply_markup=cancel_kb)
+            await query.edit_message_text(f"🎯 سود ترند فعلی: +{TREND_TAKE_PROFIT}%\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
-            send_telegram_msg("لطفاً درصد جدید سود ترند را تایپ کنید:")
+            send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
 
     elif query.data == "menu_trend_sl":
         AWAITING_STATE = "trend_sl"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"🛑 ضرر ترند فعلی: {TREND_STOP_LOSS}%\nلطفاً مقدار جدید ضرر ترند را تایپ کنید (مثلاً 15-):", reply_markup=cancel_kb)
+            await query.edit_message_text(f"🛑 ضرر ترند فعلی: {TREND_STOP_LOSS}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 15-):", reply_markup=cancel_kb)
         except Exception:
-            send_telegram_msg("لطفاً مقدار جدید ضرر ترند را تایپ کنید:")
+            send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
             
     elif query.data == "cancel_input":
         AWAITING_STATE = None
@@ -628,7 +667,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg("لغو شد.")
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global BUY_AMOUNT_SOL, TREND_TAKE_PROFIT, TREND_STOP_LOSS, AWAITING_STATE
+    global BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M, MIN_PRICE_CHANGE_5M, TREND_TAKE_PROFIT, TREND_STOP_LOSS, AWAITING_STATE
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
 
@@ -641,13 +680,31 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if val <= 0: raise ValueError()
                 BUY_AMOUNT_SOL = val
                 msg = f"✅ حجم خرید به {BUY_AMOUNT_SOL} SOL تغییر یافت."
+            elif AWAITING_STATE == "tp":
+                if val <= 0: raise ValueError()
+                TAKE_PROFIT = val
+                msg = f"✅ تارگت سیگنال به +{TAKE_PROFIT}% تغییر یافت."
+            elif AWAITING_STATE == "sl":
+                STOP_LOSS = val
+                msg = f"✅ حد ضرر سیگنال به {STOP_LOSS}% تغییر یافت."
+            elif AWAITING_STATE == "liq":
+                if val < 0: raise ValueError()
+                MIN_LIQUIDITY = val
+                msg = f"✅ نقدینگی به ${MIN_LIQUIDITY} تغییر یافت."
+            elif AWAITING_STATE == "vol5m":
+                if val < 0: raise ValueError()
+                MIN_VOLUME_5M = val
+                msg = f"✅ حجم ۵ دقیقه به ${MIN_VOLUME_5M} تغییر یافت."
+            elif AWAITING_STATE == "chg5m":
+                MIN_PRICE_CHANGE_5M = val
+                msg = f"✅ رشد ۵ دقیقه به +{MIN_PRICE_CHANGE_5M}% تغییر یافت."
             elif AWAITING_STATE == "trend_tp":
                 if val <= 0: raise ValueError()
                 TREND_TAKE_PROFIT = val
                 msg = f"✅ سود ترند به +{TREND_TAKE_PROFIT}% تغییر یافت."
             elif AWAITING_STATE == "trend_sl":
                 TREND_STOP_LOSS = val
-                msg = f"✅ حد ضرر ترند به {TREND_STOP_LOSS}% تغییر یافت."
+                msg = f"✅ ضرر ترند به {TREND_STOP_LOSS}% تغییر یافت."
             else:
                 msg = "خطا در تنظیمات."
 
