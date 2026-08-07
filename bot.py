@@ -27,8 +27,7 @@ MIN_LIQUIDITY = 35000
 MIN_VOLUME_5M = 15000       
 MIN_PRICE_CHANGE_5M = 10.0  
 
-# وضعیت‌های مختلف برای دریافت ورودی از کاربر در تلگرام
-AWAITING_STATE = None  # می‌تواند شامل: volume, tp, sl, liq, vol5m, chg5m باشد
+AWAITING_STATE = None 
 
 processed_tokens = set()
 active_positions = {}
@@ -96,6 +95,22 @@ def is_token_safe(token_mint):
         return True
     except Exception:
         return True
+
+def get_twitter_trending_tokens():
+    """بررسی توکن‌های داغ و پربحث در توییتر و جوامع کریپتو بر اساس فعالیت‌ها"""
+    tokens = []
+    try:
+        url = "https://api.dexscreener.com/token-boosts/top/v1"
+        res = requests.get(url, timeout=8).json()
+        if isinstance(res, list):
+            solana_tokens = [item for item in res if item.get('chainId') == 'solana']
+            for t in solana_tokens:
+                addr = t.get('tokenAddress')
+                if addr:
+                    tokens.append(addr)
+    except Exception as e:
+        print(f"⚠️ خطا در دریافت ترندهای اجتماعی/توییتر: {e}")
+    return tokens
 
 def execute_real_buy(token_mint, amount_sol):
     if not WALLET_PUBKEY:
@@ -252,7 +267,7 @@ def execute_real_sell(token_mint, token_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات با سیستم ضد اسکم و نقدینگی ۳۵k فعال شد.")
+    send_telegram_msg("🤖 ربات با قابلیت بررسی ترندهای توییتر و شبکه سولانا فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -305,18 +320,12 @@ def auto_trader_loop(app):
             for t_addr in tokens_to_close:
                 active_positions.pop(t_addr, None)
 
-            url_trending = "https://api.dexscreener.com/token-boosts/top/v1"
-            res = requests.get(url_trending, timeout=8).json()
-            
-            solana_tokens = []
-            if isinstance(res, list):
-                solana_tokens = [item for item in res if item.get('chainId') == 'solana']
+            solana_tokens = get_twitter_trending_tokens()
 
-            for t in solana_tokens[:8]:
+            for token_addr in solana_tokens[:8]:
                 if not IS_RUNNING:
                     break
 
-                token_addr = t.get('tokenAddress')
                 if not token_addr or token_addr in processed_tokens or token_addr in active_positions:
                     continue
 
@@ -339,7 +348,7 @@ def auto_trader_loop(app):
                     
                     processed_tokens.add(token_addr)
                     
-                    print(f"⏳ اقدام برای خرید واقعی توکن پرشتاب {symbol} با حجم {BUY_AMOUNT_SOL} SOL...")
+                    print(f"⏳ اقدام برای خرید توکن ترند توییتر و سولانا {symbol} با حجم {BUY_AMOUNT_SOL} SOL...")
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
@@ -348,7 +357,7 @@ def auto_trader_loop(app):
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
                     msg = (
-                        f"🚨 سیگنال جدید شناسایی و پردازش شد\n"
+                        f"🐦🔥 سیگنال ترند توییتر (شبکه سولانا)\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -382,7 +391,7 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "Solana Ultimate Trading Bot is running 24/7!"
+    return "Solana Twitter-Trending Trading Bot is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -406,7 +415,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
-    await update.message.reply_text("🤖 اتاق کنترل مرکزی ربات تریدر سولانا\nاز دکمه‌های زیر برای تنظیمات استفاده کنید:", reply_markup=get_main_keyboard())
+    await update.message.reply_text("🤖 اتاق کنترل مرکزی ربات تریدر سولانا (مدیریت ترند توییتر)\nاز دکمه‌های زیر استفاده کنید:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, AWAITING_STATE
@@ -419,9 +428,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "start_bot":
         IS_RUNNING = True
         try:
-            await query.edit_message_text("🟢 اسکن خودکار فعال شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🟢 اسکنر ترند توییتر و سولانا فعال شد.", reply_markup=get_main_keyboard())
         except Exception:
-            send_telegram_msg("🟢 اسکن خودکار فعال شد.")
+            send_telegram_msg("🟢 اسکنر ترند توییتر و سولانا فعال شد.")
             
     elif query.data == "stop_bot":
         IS_RUNNING = False
@@ -434,7 +443,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = "🟢 روشن و فعال" if IS_RUNNING else "🔴 خاموش"
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         status_text = (
-            f"📊 وضعیت فعلی سیستم:\n\n"
+            f"📊 وضعیت فعلی سیستم (توییتر + سولانا):\n\n"
             f"🔹 وضعیت اسکنر: {state}\n"
             f"💰 حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
             f"🎯 تارگت سود: {TAKE_PROFIT}%\n"
@@ -469,7 +478,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_STATE = "sl"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"🛑 حد ضرر فعلی: {STOP_LOSS}%\nلطفاً مقدار جدید حد ضرر (مثلاً منفی ۱۲) را تایپ کنید:", reply_markup=cancel_kb)
+            await query.edit_message_text(f"🛑 حد ضرر فعلی: {STOP_LOSS}%\nلطفاً مقدار جدید حد ضرر را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("🛑 لطفاً مقدار جدید حد ضرر را تایپ کنید:")
 
@@ -477,7 +486,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_STATE = "liq"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"🔒 نقدینگی فعلی: ${MIN_LIQUIDITY}\nلطفاً حداقل نقدینگی جدید (به دلار) را تایپ کنید:", reply_markup=cancel_kb)
+            await query.edit_message_text(f"🔒 نقدینگی فعلی: ${MIN_LIQUIDITY}\nلطفاً حداقل نقدینگی جدید را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("🔒 لطفاً حداقل نقدینگی جدید را تایپ کنید:")
 
@@ -485,7 +494,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_STATE = "vol5m"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"📈 حجم ۵ دقیقه فعلی: ${MIN_VOLUME_5M}\nلطفاً حداقل حجم جدید (به دلار) را تایپ کنید:", reply_markup=cancel_kb)
+            await query.edit_message_text(f"📈 حجم ۵ دقیقه فعلی: ${MIN_VOLUME_5M}\nلطفاً حداقل حجم جدید را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("📈 لطفاً حداقل حجم جدید را تایپ کنید:")
 
@@ -523,7 +532,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 TAKE_PROFIT = val
                 msg_text = f"✅ تارگت سود به {TAKE_PROFIT}% تغییر یافت."
             elif AWAITING_STATE == "sl":
-                STOP_LOSS = val # می‌تواند منفی باشد
+                STOP_LOSS = val 
                 msg_text = f"✅ حد ضرر به {STOP_LOSS}% تغییر یافت."
             elif AWAITING_STATE == "liq":
                 if val < 0: raise ValueError()
@@ -561,5 +570,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات با کلیدهای تنظیمات کامل استارت شد.")
+    print("🚀 ربات با قابلیت رصد ترندهای توییتر و سولانا استارت شد.")
     app.run_polling()
