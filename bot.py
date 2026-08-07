@@ -122,7 +122,6 @@ def is_token_safe(token_mint):
         return True
 
 def get_real_market_trending_tokens():
-    """جایگزین حرفه‌ای برای توییتر: شکار توکن‌های داغ و پر سر و صدا به محض شروع هیاهو از Dexscreener"""
     tokens = []
     try:
         url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
@@ -154,7 +153,6 @@ def execute_real_buy(token_mint, amount_sol):
         return False, "کلید عمومی ولت نامعتبر است"
 
     lamports = int(amount_sol * 1_000_000_000)
-
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
@@ -203,10 +201,8 @@ def execute_real_buy(token_mint, amount_sol):
         swap_tx_b64 = swap_res["swapTransaction"]
         raw_tx = base64.b64decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
-        
         signature = sender_keypair.sign_message(bytes(txn.message))
         signed_txn = VersionedTransaction.populate(txn.message, [signature])
-        
         serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
         rpc_payload = {
@@ -217,7 +213,6 @@ def execute_real_buy(token_mint, amount_sol):
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
-        
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
@@ -238,7 +233,6 @@ def execute_real_sell(token_mint, token_amount):
     }
 
     quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=300"
-
     quote_res = None
     for attempt in range(2):
         try:
@@ -278,10 +272,8 @@ def execute_real_sell(token_mint, token_amount):
         swap_tx_b64 = swap_res["swapTransaction"]
         raw_tx = base64.b64decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
-        
         signature = sender_keypair.sign_message(bytes(txn.message))
         signed_txn = VersionedTransaction.populate(txn.message, [signature])
-        
         serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
         rpc_payload = {
@@ -292,7 +284,6 @@ def execute_real_sell(token_mint, token_amount):
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
-        
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
@@ -302,7 +293,7 @@ def execute_real_sell(token_mint, token_amount):
         return False, f"خطای امضا در فروش: {str(e)}"
 
 def create_real_solana_token(name, symbol, supply_amount):
-    """ساخت کاملاً واقعی توکن روی بلاکچین بدون خطای Sequence"""
+    """ساخت کاملاً واقعی توکن روی بلاکچین با کسر کارمزد و اجاره شبکه"""
     if not WALLET_PUBKEY or not sender_keypair:
         return False, "ولت تنظیم نشده است"
     try:
@@ -401,7 +392,7 @@ def create_real_solana_token(name, symbol, supply_amount):
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=15).json()
         if "result" in tx_res:
             tx_sig = tx_res["result"]
-            return True, f"مینت: {str(mint_pubkey)}\nتراکنش: https://solscan.io/tx/{tx_sig}"
+            return True, f"🪙 آدرس مینت:\n`{str(mint_pubkey)}`\n\n🔍 تراکنش پرداخت کارمزد و ساخت:\nhttps://solscan.io/tx/{tx_sig}\n\n📈 **مرحله بعدی (لیست شدن در دکس):**\nپس از تأمین نقدینگی در صرافی‌هایی مثل Raydium یا Jupiter، توکن شما در DexScreener نمایش داده می‌شود."
         else:
             err_msg = tx_res.get("error", {}).get("message", "خطای شبکه")
             return False, err_msg
@@ -410,8 +401,7 @@ def create_real_solana_token(name, symbol, supply_amount):
 
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
-    
-    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار (جایگزین حرفه‌ای توییتر) فعال شد.")
+    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -442,7 +432,7 @@ def auto_trader_loop(app):
                             else:
                                 success, sell_res_info = False, "موجودی توکن در ولت یافت نشد"
 
-                            sell_status_str = f"انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
+                            sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
                             
                             exit_msg = (
@@ -502,7 +492,7 @@ def auto_trader_loop(app):
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
                     msg = (
-                        f"⚡🔥 سیگنال سریع شکار شد (اول راه و وایرال)\n"
+                        f"⚡🔥 سیگنال سریع شکار شد\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -510,13 +500,13 @@ def auto_trader_loop(app):
                         f"💰 مقدار خرید: {BUY_AMOUNT_SOL} SOL\n"
                         f"🎯 تارگت سود (+{TAKE_PROFIT}%): ${target_tp:.8f}\n"
                         f"🛑 حد ضرر (-{STOP_LOSS}%): ${target_sl:.8f}\n\n"
-                        f"📊 تحلیل و آمار لحظه‌ای بازار:\n"
+                        f"📊 آمار لحظه‌ای بازار:\n"
                         f"🔹 روند ۵ دقیقه: {price_change_5m:+.2f}%\n"
-                        f"🔹 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
-                        f"💧 نقدینگی استخر: ${liquidity:,.0f}\n\n"
-                        f"🔗 لینک‌های اختصاصی این توکن:\n"
-                        f"🔍 تراکنش در Solscan\n{solscan_link}\n"
-                        f"📈 تحلیل در DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                        f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                        f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
+                        f"🔗 لینک‌های توکن:\n"
+                        f"🔍 Solscan\n{solscan_link}\n"
+                        f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                     )
                     
                     if success:
@@ -625,7 +615,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token_creation_temp.clear()
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text("🪙 ساخت واقعی توکن روی بلاکچین (مرحله ۱ از ۳):\n\nلطفاً **نام کامل توکن** را تایپ کنید:", reply_markup=cancel_kb)
+            await query.edit_message_text("🪙 **ساخت توکن روی بلاکچین (مرحله ۱ از ۴):**\n\nلطفاً **نام کامل توکن** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
         except Exception:
             send_telegram_msg("🪙 لطفاً نام کامل توکن را تایپ کنید:")
             
@@ -691,40 +681,62 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if AWAITING_STATE:
-        text_input = update.message.text.strip()
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         
         if AWAITING_STATE == "create_token_name":
+            text_input = update.message.text.strip() if update.message.text else ""
             token_creation_temp["name"] = text_input
             AWAITING_STATE = "create_token_symbol"
-            await update.message.reply_text(f"✅ نام ثبت شد: `{text_input}`\n\n(مرحله ۲ از ۳): لطفاً **نماد توکن (Symbol)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
+            await update.message.reply_text(f"✅ نام ثبت شد: `{text_input}`\n\n**(مرحله ۲ از ۴):** لطفاً **نماد توکن (Symbol)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
             return
             
         elif AWAITING_STATE == "create_token_symbol":
+            text_input = update.message.text.strip() if update.message.text else ""
             token_creation_temp["symbol"] = text_input.upper()
             AWAITING_STATE = "create_token_supply"
-            await update.message.reply_text(f"✅ نماد ثبت شد: `{text_input.upper()}`\n\n(مرحله ۳ از ۳): لطفاً **تعداد کل توکن (Supply)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
+            await update.message.reply_text(f"✅ نماد ثبت شد: `{text_input.upper()}`\n\n**(مرحله ۳ از ۴):** لطفاً **تعداد کل توکن (Supply)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
             return
             
         elif AWAITING_STATE == "create_token_supply":
-            t_supply = text_input
+            text_input = update.message.text.strip() if update.message.text else ""
+            token_creation_temp["supply"] = text_input
+            AWAITING_STATE = "create_token_logo"
+            await update.message.reply_text(f"✅ تعداد ثبت شد: `{text_input}`\n\n**(مرحله ۴ از ۴):** لطفاً **عکس لوگوی توکن** را ارسال کنید یا کلمه `ندارد` را بنویسید:", reply_markup=cancel_kb, parse_mode="Markdown")
+            return
+
+        elif AWAITING_STATE == "create_token_logo":
+            if update.message.photo:
+                token_creation_temp["logo"] = "دریافت شد ✅"
+            else:
+                text_input = update.message.text.strip() if update.message.text else "ندارد"
+                token_creation_temp["logo"] = text_input
+
             t_name = token_creation_temp.get("name", "Token")
             t_symbol = token_creation_temp.get("symbol", "TKN")
+            t_supply = token_creation_temp.get("supply", "1000000")
             
-            await update.message.reply_text(f"⏳ در حال ارسال تراکنش ساخت توکن `{t_symbol}` به شبکه سولانا...")
+            await update.message.reply_text(f"⏳ **تأیید تراکنش:** در حال پرداخت کارمزد و استقرار قرارداد هوشمند توکن `{t_symbol}` روی شبکه سولانا...", parse_mode="Markdown")
+            
             success, res_msg = create_real_solana_token(t_name, t_symbol, t_supply)
             
             AWAITING_STATE = None
             token_creation_temp.clear()
             
             if success:
-                final_txt = f"✅ توکن واقعی با موفقیت روی بلاکچین ساخته شد!\n\n🏷 نام: {t_name}\n📌 نماد: {t_symbol}\n📦 تعداد: {t_supply}\n\n{res_msg}"
+                final_txt = (
+                    f"🎉 **توکن شما با موفقیت روی بلاکچین ساخته شد!**\n\n"
+                    f"🏷 نام: {t_name}\n"
+                    f"📌 نماد: {t_symbol}\n"
+                    f"📦 تعداد کل: {t_supply}\n\n"
+                    f"{res_msg}"
+                )
             else:
-                final_txt = f"❌ خطا در ساخت توکن روی بلاکچین:\n{res_msg}"
+                final_txt = f"❌ **خطا در ساخت توکن روی بلاکچین:**\n{res_msg}"
                 
             await update.message.reply_text(final_txt, reply_markup=get_main_keyboard(), parse_mode="Markdown")
             return
 
+        text_input = update.message.text.strip() if update.message.text else ""
         text_val = text_input.replace(',', '.')
         try:
             val = float(text_val)
@@ -770,11 +782,11 @@ if __name__ == "__main__":
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, text_handler))
 
     trader_thread = Thread(target=auto_trader_loop, args=(app,))
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات واقعی رصد پرسرعت بازار، ترید و سازنده توکن سولانا استارت شد.")
+    print("🚀 ربات کامل ترید و سازنده توکن سولانا استارت شد.")
     app.run_polling()
