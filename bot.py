@@ -23,7 +23,7 @@ BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
 
-# تنظیمات بهینه‌شده: نقدینگی روی ۳۵k و بقیه پارامترها متناسب با آن
+# نقدینگی روی ۳۵k و سایر پارامترهای بهینه‌شده
 MIN_LIQUIDITY = 35000      
 MIN_VOLUME_5M = 15000       
 MIN_PRICE_CHANGE_5M = 10.0  
@@ -78,6 +78,28 @@ def get_token_balance(token_mint):
     except Exception as e:
         print(f"⚠️ خطا در استعلام موجودی توکن: {e}")
     return 0
+
+def is_token_safe(token_mint):
+    """تابع جدید بررسی امنیت و ضد اسکم (جلوگیری از هانی‌پات و توکن‌های خطرناک)"""
+    try:
+        url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            risk_score = data.get("score", 0)
+            
+            # اگر امتیاز ریسک بالاتر از حد مجاز باشد یا خطدای خطرناک وجود داشته باشد رد می‌شود
+            if risk_score > 3500:
+                return False
+                
+            risks = data.get("risks", [])
+            for r in risks:
+                if r.get("level") == "danger":
+                    return False
+        return True
+    except Exception:
+        # اگر در استعلام خطایی رخ داد برای اینکه فرصت از دست نرود اجازه عبور داده می‌شود
+        return True
 
 def execute_real_buy(token_mint, amount_sol):
     if not WALLET_PUBKEY:
@@ -234,7 +256,7 @@ def execute_real_sell(token_mint, token_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("🤖 ربات با تنظیمات جدید و نقدینگی ۳۵k فعال شد.")
+    send_telegram_msg("🤖 ربات با سیستم ضد اسکم و نقدینگی ۳۵k فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -313,10 +335,12 @@ def auto_trader_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
+                # شرط نهایی همراه با بررسی امنیت و ضد اسکم
                 if (liquidity >= MIN_LIQUIDITY and 
                     volume_5m >= MIN_VOLUME_5M and 
                     price_change_5m >= MIN_PRICE_CHANGE_5M and 
-                    price > 0):
+                    price > 0 and
+                    is_token_safe(token_addr)):
                     
                     processed_tokens.add(token_addr)
                     
@@ -474,5 +498,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات با تنظیمات نهایی استارت شد.")
+    print("🚀 ربات با سیستم ضد اسکم استارت شد.")
     app.run_polling()
