@@ -20,14 +20,13 @@ from solders.system_program import create_account, CreateAccountParams
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
-TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN", "YOUR_TWITTER_BEARER_TOKEN")
 
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
-RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
+RENT_SYSVAR = Pubkey.from_string("SysvarRent11111111111111111111111111111111")
 
 IS_RUNNING = False
 BUY_AMOUNT_SOL = 0.005
@@ -49,7 +48,8 @@ def send_telegram_msg(text):
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": text,
-            "disable_web_page_preview": True
+            "disable_web_page_preview": True,
+            "parse_mode": "Markdown"
         }
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
@@ -120,9 +120,11 @@ def is_token_safe(token_mint):
     except Exception:
         return True
 
-def get_real_twitter_trending_tokens():
+def get_real_market_trending_tokens():
+    """جایگزین حرفه‌ای برای توییتر: شکار توکن‌های داغ و پر سر و صدا به محض شروع هیاهو از Dexscreener"""
     tokens = []
     try:
+        # دریافت توکن‌های بوست‌شده و پرتردد شبکه سولانا
         url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
         res = requests.get(url_boost, timeout=4).json()
         if isinstance(res, list):
@@ -135,6 +137,7 @@ def get_real_twitter_trending_tokens():
         pass
 
     try:
+        # جستجوی توکن‌های جدیدی که حجم و واکنش بالایی گرفته‌اند
         latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
         res_latest = requests.get(latest_url, timeout=4).json()
         for p in res_latest.get("pairs", []):
@@ -409,7 +412,7 @@ def create_real_solana_token(name, symbol, supply_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار فعال شد.")
+    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار (جایگزین حرفه‌ای توییتر) فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -447,8 +450,8 @@ def auto_trader_loop(app):
                                 f"🔴 فروش خودکار ({reason})\n\n"
                                 f"🪙 توکن: {symbol}\n"
                                 f"📌 وضعیت فروش: {sell_status_str}\n"
-                                f"📍 آدرس:\n{token_addr}\n\n"
-                                f"📉 قیمت خروج: ${current_price:.8f}\n"
+                                f"📍 آدرس:\n`{token_addr}`\n\n"
+                                f"📉 قیمت خروج: `${current_price:.8f}`\n"
                                 f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
                                 f"🔗 لینک‌های اختصاصی توکن:\n"
                                 f"🔍 تراکنش در Solscan\n{solscan_link}\n"
@@ -462,7 +465,8 @@ def auto_trader_loop(app):
             for t_addr in tokens_to_close:
                 active_positions.pop(t_addr, None)
 
-            solana_tokens = get_real_twitter_trending_tokens()
+            # استفاده از موتور قدرتمند جدید به جای توییتر برای شکار لحظه‌ای توکن‌های اول راه
+            solana_tokens = get_real_market_trending_tokens()
 
             for token_addr in solana_tokens[:30]:
                 if not IS_RUNNING:
@@ -500,18 +504,18 @@ def auto_trader_loop(app):
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
                     msg = (
-                        f"⚡🔥 سیگنال سریع شکار شد (واقعی)\n"
+                        f"⚡🔥 سیگنال سریع شکار شد (اول راه و وایرال)\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
-                        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                        f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                        f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                        f"💵 نقطه ورود دقیق: `${price:.8f}`\n"
                         f"💰 مقدار خرید: {BUY_AMOUNT_SOL} SOL\n"
-                        f"🎯 تارگت سود (+{TAKE_PROFIT}%): ${target_tp:.8f}\n"
-                        f"🛑 حد ضرر (-{STOP_LOSS}%): ${target_sl:.8f}\n\n"
+                        f"🎯 تارگت سود (+{TAKE_PROFIT}%): `${target_tp:.8f}`\n"
+                        f"🛑 حد ضرر (-{STOP_LOSS}%): `${target_sl:.8f}`\n\n"
                         f"📊 تحلیل و آمار لحظه‌ای بازار:\n"
                         f"🔹 روند ۵ دقیقه: {price_change_5m:+.2f}%\n"
-                        f"🔹 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
-                        f"💧 نقدینگی استخر: ${liquidity:,.0f}\n\n"
+                        f"🔹 حجم معاملاتی ۵ دقیقه: `${volume_5m:,.0f}`\n"
+                        f"💧 نقدینگی استخر: `${liquidity:,.0f}`\n\n"
                         f"🔗 لینک‌های اختصاصی این توکن:\n"
                         f"🔍 تراکنش در Solscan\n{solscan_link}\n"
                         f"📈 تحلیل در DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
@@ -762,5 +766,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات واقعی رصد پرسرعت توییتر، ترید و سازنده توکن سولانا استارت شد.")
+    print("🚀 ربات واقعی رصد پرسرعت بازار، ترید و سازنده توکن سولانا استارت شد.")
     app.run_polling()
