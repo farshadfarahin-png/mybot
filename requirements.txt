@@ -4,3 +4,4 @@ base58
 solders
 flask
 curl_cffi
+tweepy
