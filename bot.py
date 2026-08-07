@@ -26,7 +26,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
-RENT_SYSVAR = Pubkey.from_string("SysvarRent11111111111111111111111111111111")
+RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
 IS_RUNNING = False
 BUY_AMOUNT_SOL = 0.005
@@ -740,7 +740,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif AWAITING_STATE == "sl":
                 STOP_LOSS = val 
                 msg_text = f"✅ حد ضرر به {STOP_LOSS}% تغییر یافت."
-            elif AWAIT_STATE == "liq":
+            elif AWAITING_STATE == "liq":
                 if val < 0: raise ValueError()
                 MIN_LIQUIDITY = val
                 msg_text = f"✅ حداقل نقدینگی به ${MIN_LIQUIDITY} تغییر یافت."
