@@ -34,9 +34,9 @@ BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
 
-MIN_LIQUIDITY = 5000       
-MIN_VOLUME_5M = 1000       
-MIN_PRICE_CHANGE_5M = 1.0  
+MIN_LIQUIDITY = 35000       
+MIN_VOLUME_5M = 5000       
+MIN_PRICE_CHANGE_5M = 5.0  
 
 AWAITING_STATE = None 
 
@@ -202,16 +202,16 @@ def execute_real_buy(token_mint, amount_sol):
         raw_tx = base64.b64decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
         
-        # امضای صحیح نسخه جدید تراکنش‌های سولانا
-        txn.sign([sender_keypair])
+        signature = sender_keypair.sign_message(bytes(txn.message))
+        signed_txn = VersionedTransaction.populate(txn.message, [signature])
         
-        serialized_tx = base58.b58encode(bytes(txn)).decode('utf-8')
+        serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
         rpc_payload = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "preflightCommitment": "processed"}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -236,7 +236,7 @@ def execute_real_sell(token_mint, token_amount):
     }
 
     quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=300"
-    
+
     quote_res = None
     for attempt in range(2):
         try:
@@ -277,16 +277,16 @@ def execute_real_sell(token_mint, token_amount):
         raw_tx = base64.b64decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
         
-        # امضای صحیح نسخه جدید تراکنش‌های فروش
-        txn.sign([sender_keypair])
+        signature = sender_keypair.sign_message(bytes(txn.message))
+        signed_txn = VersionedTransaction.populate(txn.message, [signature])
         
-        serialized_tx = base58.b58encode(bytes(txn)).decode('utf-8')
+        serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
         rpc_payload = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "preflightCommitment": "processed"}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -409,7 +409,7 @@ def create_real_solana_token(name, symbol, supply_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("⚡ ربات پرسرعت بدون فانتون و با لینک‌های استاندارد Solscan فعال شد.")
+    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -433,15 +433,15 @@ def auto_trader_loop(app):
 
                         if pnl_percent >= TAKE_PROFIT or pnl_percent <= STOP_LOSS:
                             reason = "حد سود (TP) فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
-                            
+
                             token_balance = get_token_balance(token_addr)
                             if token_balance > 0:
                                 success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             else:
                                 success, sell_res_info = False, "موجودی توکن در ولت یافت نشد"
 
-                            sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
-                            solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "ثبت نشد"
+                            sell_status_str = f"انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
+                            solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
                             
                             exit_msg = (
                                 f"🔴 فروش خودکار ({reason})\n\n"
@@ -494,7 +494,7 @@ def auto_trader_loop(app):
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "ثبت نشد در شبکه"
+                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                     target_tp = price * (1 + (TAKE_PROFIT / 100))
                     target_sl = price * (1 + (STOP_LOSS / 100))
@@ -762,5 +762,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات واقعی رصد پرسرعت ترند، ترید و سازنده توکن سولانا استارت شد.")
+    print("🚀 ربات واقعی رصد پرسرعت توییتر، ترید و سازنده توکن سولانا استارت شد.")
     app.run_polling()
