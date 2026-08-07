@@ -38,6 +38,7 @@ MIN_VOLUME_5M = 5000
 MIN_PRICE_CHANGE_5M = 5.0  
 
 AWAITING_STATE = None 
+token_creation_temp = {}
 
 processed_tokens = set()
 active_positions = {}
@@ -124,7 +125,6 @@ def get_real_market_trending_tokens():
     """جایگزین حرفه‌ای برای توییتر: شکار توکن‌های داغ و پر سر و صدا به محض شروع هیاهو از Dexscreener"""
     tokens = []
     try:
-        # دریافت توکن‌های بوست‌شده و پرتردد شبکه سولانا
         url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
         res = requests.get(url_boost, timeout=4).json()
         if isinstance(res, list):
@@ -137,7 +137,6 @@ def get_real_market_trending_tokens():
         pass
 
     try:
-        # جستجوی توکن‌های جدیدی که حجم و واکنش بالایی گرفته‌اند
         latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
         res_latest = requests.get(latest_url, timeout=4).json()
         for p in res_latest.get("pairs", []):
@@ -240,7 +239,7 @@ def execute_real_sell(token_mint, token_amount):
 
     quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=300"
 
-quote_res = None
+    quote_res = None
     for attempt in range(2):
         try:
             res = requests.get(quote_url, headers=headers, timeout=5)
@@ -348,8 +347,7 @@ def create_real_solana_token(name, symbol, supply_amount):
         )
         
         def get_associated_token_address(wallet: Pubkey, mint: Pubkey) -> Pubkey:
-
-assoc, _ = Pubkey.find_program_address(
+            assoc, _ = Pubkey.find_program_address(
                 [bytes(wallet), bytes(TOKEN_PROGRAM_ID), bytes(mint)],
                 ATA_PROGRAM_ID
             )
@@ -438,7 +436,7 @@ def auto_trader_loop(app):
                         if pnl_percent >= TAKE_PROFIT or pnl_percent <= STOP_LOSS:
                             reason = "حد سود (TP) فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
 
-token_balance = get_token_balance(token_addr)
+                            token_balance = get_token_balance(token_addr)
                             if token_balance > 0:
                                 success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             else:
@@ -466,7 +464,6 @@ token_balance = get_token_balance(token_addr)
             for t_addr in tokens_to_close:
                 active_positions.pop(t_addr, None)
 
-            # استفاده از موتور قدرتمند جدید به جای توییتر برای شکار لحظه‌ای توکن‌های اول راه
             solana_tokens = get_real_market_trending_tokens()
 
             for token_addr in solana_tokens[:30]:
@@ -509,8 +506,7 @@ token_balance = get_token_balance(token_addr)
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-
-f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                        f"💵 نقطه ورود دقیق: ${price:.8f}\n"
                         f"💰 مقدار خرید: {BUY_AMOUNT_SOL} SOL\n"
                         f"🎯 تارگت سود (+{TAKE_PROFIT}%): ${target_tp:.8f}\n"
                         f"🛑 حد ضرر (-{STOP_LOSS}%): ${target_sl:.8f}\n\n"
@@ -535,7 +531,7 @@ f"💵 نقطه ورود دقیق: ${price:.8f}\n"
 
         time.sleep(1)
 
-web_app = Flask(name)
+web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
@@ -565,6 +561,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
+    token_creation_temp.clear()
     await update.message.reply_text("🤖 اتاق کنترل مرکزی ربات تریدر و سازنده توکن سولانا\nاز دکمه‌های زیر استفاده کنید:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -593,8 +590,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = "🟢 روشن و فعال" if IS_RUNNING else "🔴 خاموش"
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         current_sol_bal = get_sol_balance()
-
-status_text = (
+        status_text = (
             f"📊 وضعیت واقعی سیستم:\n\n"
             f"🔹 وضعیت اسکنر: {state}\n"
             f"💰 موجودی ولت: {current_sol_bal:.4f} SOL\n"
@@ -625,12 +621,13 @@ status_text = (
             send_telegram_msg(balance_text)
 
     elif query.data == "menu_create_token":
-        AWAITING_STATE = "create_token"
+        AWAITING_STATE = "create_token_name"
+        token_creation_temp.clear()
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text("🪙 ساخت واقعی توکن روی بلاکچین:\nلطفاً اطلاعات را به این فرمت بفرستید:\nنام, نماد, تعداد\n(مثلا: TestToken, TST, 1000000000)", reply_markup=cancel_kb)
+            await query.edit_message_text("🪙 ساخت واقعی توکن روی بلاکچین (مرحله ۱ از ۳):\n\nلطفاً **نام کامل توکن** را تایپ کنید:", reply_markup=cancel_kb)
         except Exception:
-            send_telegram_msg("🪙 لطفاً اطلاعات ساخت توکن را بفرستید (نام, نماد, تعداد):")
+            send_telegram_msg("🪙 لطفاً نام کامل توکن را تایپ کنید:")
             
     elif query.data == "menu_volume":
         AWAITING_STATE = "volume"
@@ -672,7 +669,7 @@ status_text = (
         except Exception:
             send_telegram_msg("📈 لطفاً حداقل حجم جدید را تایپ کنید:")
 
-elif query.data == "menu_chg5m":
+    elif query.data == "menu_chg5m":
         AWAITING_STATE = "chg5m"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
@@ -682,6 +679,7 @@ elif query.data == "menu_chg5m":
             
     elif query.data == "cancel_input":
         AWAITING_STATE = None
+        token_creation_temp.clear()
         try:
             await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
         except Exception:
@@ -694,29 +692,38 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if AWAITING_STATE:
         text_input = update.message.text.strip()
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         
-        if AWAITING_STATE == "create_token":
-            try:
-                parts = [p.strip() for p in text_input.split(',')]
-                if len(parts) < 3:
-                    await update.message.reply_text("❌ فرمت اشتباه است! لطفاً به این شکل بفرستید:\nنام, نماد, تعداد\nمثال: TestToken, TST, 1000000000")
-                    return
-                t_name, t_symbol, t_supply = parts[0], parts[1], parts[2]
+        if AWAITING_STATE == "create_token_name":
+            token_creation_temp["name"] = text_input
+            AWAITING_STATE = "create_token_symbol"
+            await update.message.reply_text(f"✅ نام ثبت شد: `{text_input}`\n\n(مرحله ۲ از ۳): لطفاً **نماد توکن (Symbol)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
+            return
+            
+        elif AWAITING_STATE == "create_token_symbol":
+            token_creation_temp["symbol"] = text_input.upper()
+            AWAITING_STATE = "create_token_supply"
+            await update.message.reply_text(f"✅ نماد ثبت شد: `{text_input.upper()}`\n\n(مرحله ۳ از ۳): لطفاً **تعداد کل توکن (Supply)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
+            return
+            
+        elif AWAITING_STATE == "create_token_supply":
+            t_supply = text_input
+            t_name = token_creation_temp.get("name", "Token")
+            t_symbol = token_creation_temp.get("symbol", "TKN")
+            
+            await update.message.reply_text(f"⏳ در حال ارسال تراکنش ساخت توکن `{t_symbol}` به شبکه سولانا...")
+            success, res_msg = create_real_solana_token(t_name, t_symbol, t_supply)
+            
+            AWAITING_STATE = None
+            token_creation_temp.clear()
+            
+            if success:
+                final_txt = f"✅ توکن واقعی با موفقیت روی بلاکچین ساخته شد!\n\n🏷 نام: {t_name}\n📌 نماد: {t_symbol}\n📦 تعداد: {t_supply}\n\n{res_msg}"
+            else:
+                final_txt = f"❌ خطا در ساخت توکن روی بلاکچین:\n{res_msg}"
                 
-                await update.message.reply_text("⏳ در حال ارسال تراکنش ساخت توکن به شبکه سولانا...")
-                success, res_msg = create_real_solana_token(t_name, t_symbol, t_supply)
-                
-                AWAITING_STATE = None
-                if success:
-                    final_txt = f"✅ توکن واقعی با موفقیت روی بلاکچین ساخته شد!\n\n🏷 نام: {t_name}\n📌 نماد: {t_symbol}\n📦 تعداد: {t_supply}\n\n{res_msg}"
-                else:
-                    final_txt = f"❌ خطا در ساخت توکن روی بلاکچین:\n{res_msg}"
-                    
-                await update.message.reply_text(final_txt, reply_markup=get_main_keyboard())
-                return
-            except Exception as e:
-                await update.message.reply_text(f"❌ خطا در پردازش: {e}")
-                return
+            await update.message.reply_text(final_txt, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+            return
 
         text_val = text_input.replace(',', '.')
         try:
@@ -733,7 +740,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif AWAITING_STATE == "sl":
                 STOP_LOSS = val 
                 msg_text = f"✅ حد ضرر به {STOP_LOSS}% تغییر یافت."
-            elif AWAITING_STATE == "liq":
+            elif AWAIT_STATE == "liq":
                 if val < 0: raise ValueError()
                 MIN_LIQUIDITY = val
                 msg_text = f"✅ حداقل نقدینگی به ${MIN_LIQUIDITY} تغییر یافت."
@@ -754,12 +761,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
 
-if name == "main":
+if __name__ == "__main__":
     web_thread = Thread(target=run_web)
     web_thread.daemon = True
     web_thread.start()
 
-app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
