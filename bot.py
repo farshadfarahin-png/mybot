@@ -202,10 +202,10 @@ def execute_real_buy(token_mint, amount_sol):
         raw_tx = base64.b64decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
         
-        signature = sender_keypair.sign_message(bytes(txn.message))
-        signed_txn = VersionedTransaction.populate(txn.message, [signature])
+        # امضای صحیح نسخه جدید تراکنش‌های سولانا
+        txn.sign([sender_keypair])
         
-        serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
+        serialized_tx = base58.b58encode(bytes(txn)).decode('utf-8')
 
         rpc_payload = {
             "jsonrpc": "2.0",
@@ -277,10 +277,10 @@ def execute_real_sell(token_mint, token_amount):
         raw_tx = base64.b64decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
         
-        signature = sender_keypair.sign_message(bytes(txn.message))
-        signed_txn = VersionedTransaction.populate(txn.message, [signature])
+        # امضای صحیح نسخه جدید تراکنش‌های فروش
+        txn.sign([sender_keypair])
         
-        serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
+        serialized_tx = base58.b58encode(bytes(txn)).decode('utf-8')
 
         rpc_payload = {
             "jsonrpc": "2.0",
@@ -409,7 +409,7 @@ def create_real_solana_token(name, symbol, supply_amount):
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     
-    send_telegram_msg("⚡ ربات پرسرعت با لینک‌های اصلاح‌شده و اسکنر آنی فعال شد.")
+    send_telegram_msg("⚡ ربات پرسرعت بدون فانتون و با لینک‌های استاندارد Solscan فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -440,7 +440,8 @@ def auto_trader_loop(app):
                             else:
                                 success, sell_res_info = False, "موجودی توکن در ولت یافت نشد"
 
-                            sell_status_str = f"انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
+                            sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
+                            solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "ثبت نشد"
                             
                             exit_msg = (
                                 f"🔴 فروش خودکار ({reason})\n\n"
@@ -450,9 +451,8 @@ def auto_trader_loop(app):
                                 f"📉 قیمت خروج: ${current_price:.8f}\n"
                                 f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
                                 f"🔗 لینک‌های اختصاصی توکن:\n"
-                                f"🔍 تراکنش در Solscan\nhttps://solscan.io/tx/{sell_res_info if success else 'failed'}\n"
-                                f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}\n"
-                                f"⚡ Photon\nhttps://photon-sol.xyz/token/{token_addr}"
+                                f"🔍 تراکنش در Solscan\n{solscan_link}\n"
+                                f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                             )
                             send_telegram_msg(exit_msg)
                             tokens_to_close.append(token_addr)
@@ -494,6 +494,7 @@ def auto_trader_loop(app):
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "ثبت نشد در شبکه"
 
                     target_tp = price * (1 + (TAKE_PROFIT / 100))
                     target_sl = price * (1 + (STOP_LOSS / 100))
@@ -512,9 +513,8 @@ def auto_trader_loop(app):
                         f"🔹 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
                         f"💧 نقدینگی استخر: ${liquidity:,.0f}\n\n"
                         f"🔗 لینک‌های اختصاصی این توکن:\n"
-                        f"🔍 تراکنش در Solscan\nhttps://solscan.io/tx/{result_info if success else 'failed'}\n"
-                        f"📈 تحلیل در DexScreener\nhttps://dexscreener.com/solana/{token_addr}\n"
-                        f"⚡ رصد حرفه‌ای در Photon\nhttps://photon-sol.xyz/token/{token_addr}"
+                        f"🔍 تراکنش در Solscan\n{solscan_link}\n"
+                        f"📈 تحلیل در DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                     )
                     
                     if success:
@@ -762,5 +762,5 @@ if __name__ == "__main__":
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات واقعی رصد پرسرعت توییتر، ترید و سازنده توکن سولانا استارت شد.")
+    print("🚀 ربات واقعی رصد پرسرعت ترند، ترید و سازنده توکن سولانا استارت شد.")
     app.run_polling()
