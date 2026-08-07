@@ -28,7 +28,9 @@ ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8kn
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
 RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
-IS_RUNNING = False
+IS_RUNNING = False          # تریدر خودکار (خرید و فروش)
+TREND_ALERT_RUNNING = False # اسکنر اعلان ترند
+
 BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
@@ -37,10 +39,12 @@ MIN_LIQUIDITY = 35000
 MIN_VOLUME_5M = 5000       
 MIN_PRICE_CHANGE_5M = 5.0  
 
-AWAITING_STATE = None 
-token_creation_temp = {}
+TREND_MIN_VOLUME_5M = 10000
+TREND_MIN_CHANGE_5M = 8.0
 
+AWAITING_STATE = None 
 processed_tokens = set()
+trend_alerted_tokens = set()
 active_positions = {}
 
 def send_telegram_msg(text):
@@ -68,7 +72,6 @@ except Exception as e:
     WALLET_PUBKEY = None
 
 def get_sol_balance():
-    """رصد لحظه‌ای موجودی SOL ولت"""
     if not WALLET_PUBKEY:
         return 0.0
     try:
@@ -115,7 +118,7 @@ def is_token_safe(token_mint):
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            if risk_score > 6000:
+            if risk_score > 5000:
                 return False
         return True
     except Exception:
@@ -292,116 +295,58 @@ def execute_real_sell(token_mint, token_amount):
     except Exception as e:
         return False, f"خطای امضا در فروش: {str(e)}"
 
-def create_real_solana_token(name, symbol, supply_amount):
-    """ساخت کاملاً واقعی توکن روی بلاکچین با کسر کارمزد و اجاره شبکه"""
-    if not WALLET_PUBKEY or not sender_keypair:
-        return False, "ولت تنظیم نشده است"
-    try:
-        mint_keypair = Keypair()
-        mint_pubkey = mint_keypair.pubkey()
-        
-        rent_resp = requests.post(RPC_URL, json={
-            "jsonrpc": "2.0", "id": 1,
-            "method": "getMinimumBalanceForRentExemption",
-            "params": [82]
-        }, timeout=8).json()
-        lamports = rent_resp.get("result", 1461600)
-        
-        bh_resp = requests.post(RPC_URL, json={
-            "jsonrpc": "2.0", "id": 1,
-            "method": "getLatestBlockhash",
-            "params": [{"commitment": "confirmed"}]
-        }, timeout=8).json()
-        blockhash_str = bh_resp.get("result", {}).get("value", {}).get("blockhash")
-        if not blockhash_str:
-            return False, "خطا در دریافت بلاک‌هاش از شبکه"
-        recent_blockhash = Hash.from_string(blockhash_str)
-        
-        create_acc_ix = create_account(
-            CreateAccountParams(
-                from_pubkey=sender_keypair.pubkey(),
-                to_pubkey=mint_pubkey,
-                lamports=lamports,
-                space=82,
-                owner=TOKEN_PROGRAM_ID
-            )
-        )
-        
-        init_data = bytes([0, 9]) + bytes(sender_keypair.pubkey()) + bytes([0])
-        init_mint_ix = Instruction(
-            program_id=TOKEN_PROGRAM_ID,
-            accounts=[
-                AccountMeta(mint_pubkey, is_signer=False, is_writable=True),
-                AccountMeta(RENT_SYSVAR, is_signer=False, is_writable=False)
-            ],
-            data=init_data
-        )
-        
-        def get_associated_token_address(wallet: Pubkey, mint: Pubkey) -> Pubkey:
-            assoc, _ = Pubkey.find_program_address(
-                [bytes(wallet), bytes(TOKEN_PROGRAM_ID), bytes(mint)],
-                ATA_PROGRAM_ID
-            )
-            return assoc
-            
-        sender_ata = get_associated_token_address(sender_keypair.pubkey(), mint_pubkey)
-        
-        create_ata_ix = Instruction(
-            program_id=ATA_PROGRAM_ID,
-            accounts=[
-                AccountMeta(sender_keypair.pubkey(), is_signer=True, is_writable=True),
-                AccountMeta(sender_ata, is_signer=False, is_writable=True),
-                AccountMeta(sender_keypair.pubkey(), is_signer=False, is_writable=False),
-                AccountMeta(mint_pubkey, is_signer=False, is_writable=False),
-                AccountMeta(SYS_PROG_ID, is_signer=False, is_writable=False),
-                AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
-                AccountMeta(RENT_SYSVAR, is_signer=False, is_writable=False),
-            ],
-            data=bytes()
-        )
-        
-        supply_raw = int(float(supply_amount) * 10**9)
-        mint_to_data = bytes([7]) + supply_raw.to_bytes(8, "little")
-        mint_to_ix = Instruction(
-            program_id=TOKEN_PROGRAM_ID,
-            accounts=[
-                AccountMeta(mint_pubkey, is_signer=False, is_writable=True),
-                AccountMeta(sender_ata, is_signer=False, is_writable=True),
-                AccountMeta(sender_keypair.pubkey(), is_signer=True, is_writable=False)
-            ],
-            data=mint_to_data
-        )
-        
-        message = MessageV0.try_compile(
-            payer=sender_keypair.pubkey(),
-            instructions=[create_acc_ix, init_mint_ix, create_ata_ix, mint_to_ix],
-            address_lookup_table_accounts=[],
-            recent_blockhash=recent_blockhash
-        )
-        
-        txn = VersionedTransaction(message, [sender_keypair, mint_keypair])
-        serialized_tx = base58.b58encode(bytes(txn)).decode('utf-8')
-        
-        rpc_payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False}]
-        }
-        
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=15).json()
-        if "result" in tx_res:
-            tx_sig = tx_res["result"]
-            return True, f"🪙 آدرس مینت:\n`{str(mint_pubkey)}`\n\n🔍 تراکنش پرداخت کارمزد و ساخت:\nhttps://solscan.io/tx/{tx_sig}\n\n📈 **مرحله بعدی (لیست شدن در دکس):**\nپس از تأمین نقدینگی در صرافی‌هایی مثل Raydium یا Jupiter، توکن شما در DexScreener نمایش داده می‌شود."
-        else:
-            err_msg = tx_res.get("error", {}).get("message", "خطای شبکه")
-            return False, err_msg
-    except Exception as e:
-        return False, str(e)
+# اسکنر اعلان ترند
+def trend_alert_scanner_loop(app):
+    global TREND_ALERT_RUNNING
+    while True:
+        if not TREND_ALERT_RUNNING:
+            time.sleep(2)
+            continue
+        try:
+            tokens = get_real_market_trending_tokens()
+            for token_addr in tokens[:30]:
+                if not TREND_ALERT_RUNNING:
+                    break
+                if not token_addr or token_addr in trend_alerted_tokens:
+                    continue
 
+                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
+                if not pair_res.get('pairs'):
+                    continue
+
+                pair = pair_res['pairs'][0]
+                price = float(pair.get('priceUsd', 0))
+                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
+                volume_5m = float(pair.get('volume', {}).get('m5', 0))
+                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
+                symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
+
+                if (price_change_5m >= TREND_MIN_CHANGE_5M and 
+                    volume_5m >= TREND_MIN_VOLUME_5M and 
+                    price > 0 and 
+                    is_token_safe(token_addr)):
+                    
+                    trend_alerted_tokens.add(token_addr)
+                    alert_msg = (
+                        f"🚨 **اعلان ترند بازار (هشدار سریع)** 🔥🚀\n\n"
+                        f"🪙 نام توکن: **{symbol}**\n"
+                        f"📍 آدرس قرارداد (کپی با یک کلیک):\n`{token_addr}`\n\n"
+                        f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
+                        f"🚀 شتاب رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                        f"📈 حجم ورودی ۵ دقیقه: ${volume_5m:,.0f}\n"
+                        f"💧 نقدینگی استخر: ${liquidity:,.0f}\n\n"
+                        f"🔗 **لینک مستقیم رصد در DexScreener:**\n"
+                        f"https://dexscreener.com/solana/{token_addr}"
+                    )
+                    send_telegram_msg(alert_msg)
+        except Exception as e:
+            print(f"⚠️ خطای اسکنر ترند: {e}")
+        time.sleep(5)
+
+# تریدر خودکار خرید و فروش
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
-    send_telegram_msg("⚡ ربات فوق‌العاده سریع با اسکنر آنی بازار فعال شد.")
+    send_telegram_msg("⚡ تریدر خودکار فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -492,7 +437,7 @@ def auto_trader_loop(app):
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
                     msg = (
-                        f"⚡🔥 سیگنال سریع شکار شد\n"
+                        f"⚡🔥 سیگنال خرید خودکار\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -525,19 +470,28 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "Solana Real Trading & Token Creator Bot is running 24/7!"
+    return "Combined Solana Bot is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
 
 def get_main_keyboard():
+    trader_status = "🟢 تریدر: روشن" if IS_RUNNING else "🔴 تریدر: خاموش"
+    trend_status = "🟢 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
+    
+    # اگر هر دو روشن باشند، حالت ترکیبی فعال است
+    if IS_RUNNING and TREND_ALERT_RUNNING:
+        combo_status = "🟢 حالت ترکیبی: فعال (همه با هم)"
+    else:
+        combo_status = "🔴 حالت ترکیبی: خاموش"
+
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 روشن کردن اسکنر", callback_data="start_bot"),
-         InlineKeyboardButton("🔴 خاموش کردن اسکنر", callback_data="stop_bot")],
+        [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
+        [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
+         InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
-        [InlineKeyboardButton("🪙 ساخت توکن جدید", callback_data="menu_create_token")],
         [InlineKeyboardButton(f"⚙️ حجم: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume"),
          InlineKeyboardButton(f"🎯 تارگت: {TAKE_PROFIT}%", callback_data="menu_tp")],
         [InlineKeyboardButton(f"🛑 حد ضرر: {STOP_LOSS}%", callback_data="menu_sl"),
@@ -551,45 +505,62 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
-    token_creation_temp.clear()
-    await update.message.reply_text("🤖 اتاق کنترل مرکزی ربات تریدر و سازنده توکن سولانا\nاز دکمه‌های زیر استفاده کنید:", reply_markup=get_main_keyboard())
+    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا\nاز دکمه‌ها برای مدیریت موتورها استفاده کنید:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global IS_RUNNING, AWAITING_STATE
+    global IS_RUNNING, TREND_ALERT_RUNNING, AWAITING_STATE
     query = update.callback_query
     try:
         await query.answer()
     except Exception:
         pass
 
-    if query.data == "start_bot":
-        IS_RUNNING = True
+    if query.data == "toggle_combo":
+        # اگر هر دو روشنند، هر دو را خاموش کن؛ در غیر این صورت هر دو را روشن کن
+        if IS_RUNNING and TREND_ALERT_RUNNING:
+            IS_RUNNING = False
+            TREND_ALERT_RUNNING = False
+            state_txt = "🔴 حالت ترکیبی خاموش شد (هر دو موتور متوقف شدند)."
+        else:
+            IS_RUNNING = True
+            TREND_ALERT_RUNNING = True
+            state_txt = "🟢 حالت ترکیبی روشن شد!\n(هم تریدر خرید/فروش و هم اعلان ترند هم‌زمان فعال شدند)."
         try:
-            await query.edit_message_text("🟢 اسکنر پرسرعت ترند بازار فعال شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
-            send_telegram_msg("🟢 اسکنر پرسرعت فعال شد.")
+            send_telegram_msg(state_txt)
+
+    elif query.data == "toggle_trader":
+        IS_RUNNING = not IS_RUNNING
+        state_txt = "🟢 تریدر خودکار روشن شد." if IS_RUNNING else "🔴 تریدر خودکار خاموش شد."
+        try:
+            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
+        except Exception:
+            send_telegram_msg(state_txt)
             
-    elif query.data == "stop_bot":
-        IS_RUNNING = False
+    elif query.data == "toggle_trend":
+        TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
+        state_txt = "🟢 اعلان ترند روشن شد." if TREND_ALERT_RUNNING else "🔴 اعلان ترند خاموش شد."
         try:
-            await query.edit_message_text("🔴 ربات متوقف شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
-            send_telegram_msg("🔴 ربات متوقف شد.")
+            send_telegram_msg(state_txt)
             
     elif query.data == "status":
-        state = "🟢 روشن و فعال" if IS_RUNNING else "🔴 خاموش"
+        t_state = "🟢 فعال" if IS_RUNNING else "🔴 خاموش"
+        trend_state = "🟢 فعال" if TREND_ALERT_RUNNING else "🔴 خاموش"
+        combo_state = "🟢 فعال (همه با هم)" if (IS_RUNNING and TREND_ALERT_RUNNING) else "🔴 غیرفعال"
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         current_sol_bal = get_sol_balance()
         status_text = (
-            f"📊 وضعیت واقعی سیستم:\n\n"
-            f"🔹 وضعیت اسکنر: {state}\n"
+            f"📊 وضعیت سیستم:\n\n"
+            f"🔹 حالت ترکیبی: {combo_state}\n"
+            f"🔹 تریدر خرید/فروش: {t_state}\n"
+            f"🔹 اعلان ترند: {trend_state}\n"
             f"💰 موجودی ولت: {current_sol_bal:.4f} SOL\n"
             f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL\n"
             f"🎯 تارگت سود: {TAKE_PROFIT}%\n"
             f"🛑 حد ضرر: {STOP_LOSS}%\n"
-            f"🔒 حداقل نقدینگی: ${MIN_LIQUIDITY}\n"
-            f"📈 حداقل حجم ۵ دقیقه‌ای: ${MIN_VOLUME_5M}\n"
-            f"🚀 حداقل رشد ۵ دقیقه‌ای: +{MIN_PRICE_CHANGE_5M}%\n"
             f"🔑 ولت متصل: {pub_display}"
         )
         try:
@@ -601,7 +572,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_sol_bal = get_sol_balance()
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         balance_text = (
-            f"💰 رصد لحظه‌ای موجودی ولت:\n\n"
+            f"💰 موجودی ولت:\n\n"
             f"🔹 آدرس: {pub_display}\n"
             f"🔹 موجودی فعلی: {current_sol_bal:.4f} SOL"
         )
@@ -610,15 +581,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             send_telegram_msg(balance_text)
 
-    elif query.data == "menu_create_token":
-        AWAITING_STATE = "create_token_name"
-        token_creation_temp.clear()
-        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
-        try:
-            await query.edit_message_text("🪙 **ساخت توکن روی بلاکچین (مرحله ۱ از ۴):**\n\nلطفاً **نام کامل توکن** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
-        except Exception:
-            send_telegram_msg("🪙 لطفاً نام کامل توکن را تایپ کنید:")
-            
     elif query.data == "menu_volume":
         AWAITING_STATE = "volume"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
@@ -669,7 +631,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     elif query.data == "cancel_input":
         AWAITING_STATE = None
-        token_creation_temp.clear()
         try:
             await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
         except Exception:
@@ -681,61 +642,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if AWAITING_STATE:
-        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
-        
-        if AWAITING_STATE == "create_token_name":
-            text_input = update.message.text.strip() if update.message.text else ""
-            token_creation_temp["name"] = text_input
-            AWAITING_STATE = "create_token_symbol"
-            await update.message.reply_text(f"✅ نام ثبت شد: `{text_input}`\n\n**(مرحله ۲ از ۴):** لطفاً **نماد توکن (Symbol)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
-            return
-            
-        elif AWAITING_STATE == "create_token_symbol":
-            text_input = update.message.text.strip() if update.message.text else ""
-            token_creation_temp["symbol"] = text_input.upper()
-            AWAITING_STATE = "create_token_supply"
-            await update.message.reply_text(f"✅ نماد ثبت شد: `{text_input.upper()}`\n\n**(مرحله ۳ از ۴):** لطفاً **تعداد کل توکن (Supply)** را تایپ کنید:", reply_markup=cancel_kb, parse_mode="Markdown")
-            return
-            
-        elif AWAITING_STATE == "create_token_supply":
-            text_input = update.message.text.strip() if update.message.text else ""
-            token_creation_temp["supply"] = text_input
-            AWAITING_STATE = "create_token_logo"
-            await update.message.reply_text(f"✅ تعداد ثبت شد: `{text_input}`\n\n**(مرحله ۴ از ۴):** لطفاً **عکس لوگوی توکن** را ارسال کنید یا کلمه `ندارد` را بنویسید:", reply_markup=cancel_kb, parse_mode="Markdown")
-            return
-
-        elif AWAITING_STATE == "create_token_logo":
-            if update.message.photo:
-                token_creation_temp["logo"] = "دریافت شد ✅"
-            else:
-                text_input = update.message.text.strip() if update.message.text else "ندارد"
-                token_creation_temp["logo"] = text_input
-
-            t_name = token_creation_temp.get("name", "Token")
-            t_symbol = token_creation_temp.get("symbol", "TKN")
-            t_supply = token_creation_temp.get("supply", "1000000")
-            
-            await update.message.reply_text(f"⏳ **تأیید تراکنش:** در حال پرداخت کارمزد و استقرار قرارداد هوشمند توکن `{t_symbol}` روی شبکه سولانا...", parse_mode="Markdown")
-            
-            success, res_msg = create_real_solana_token(t_name, t_symbol, t_supply)
-            
-            AWAITING_STATE = None
-            token_creation_temp.clear()
-            
-            if success:
-                final_txt = (
-                    f"🎉 **توکن شما با موفقیت روی بلاکچین ساخته شد!**\n\n"
-                    f"🏷 نام: {t_name}\n"
-                    f"📌 نماد: {t_symbol}\n"
-                    f"📦 تعداد کل: {t_supply}\n\n"
-                    f"{res_msg}"
-                )
-            else:
-                final_txt = f"❌ **خطا در ساخت توکن روی بلاکچین:**\n{res_msg}"
-                
-            await update.message.reply_text(final_txt, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-            return
-
         text_input = update.message.text.strip() if update.message.text else ""
         text_val = text_input.replace(',', '.')
         try:
@@ -782,11 +688,15 @@ if __name__ == "__main__":
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, text_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     trader_thread = Thread(target=auto_trader_loop, args=(app,))
     trader_thread.daemon = True
     trader_thread.start()
 
-    print("🚀 ربات کامل ترید و سازنده توکن سولانا استارت شد.")
+    trend_thread = Thread(target=trend_alert_scanner_loop, args=(app,))
+    trend_thread.daemon = True
+    trend_thread.start()
+
+    print("🚀 ربات هوشمند سولانا استارت شد.")
     app.run_polling()
