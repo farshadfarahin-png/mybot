@@ -28,20 +28,23 @@ ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8kn
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
 RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
-IS_RUNNING = False          # موتور ۱: خرید و فروش خودکار مستقل
-TREND_ALERT_RUNNING = False # موتور ۲: اعلان ترند مستقل (فقط هشدار)
-COMBO_RUNNING = False       # موتور ۳: حالت ترکیبی (ترندها هم وارد معامله واقعی می‌شوند)
+IS_RUNNING = False          # خرید و فروش خودکار مستقل
+TREND_ALERT_RUNNING = False # اعلان ترند مستقل (فقط هشدار)
+COMBO_RUNNING = False       # حالت ترکیبی (ترندهای انفجاری + خرید واقعی + هشدار)
 
 BUY_AMOUNT_SOL = 0.005
 TAKE_PROFIT = 30.0
 STOP_LOSS = -12.0
 
+# فیلترهای خرید و فروش معمولی (سیگنال)
 MIN_LIQUIDITY = 35000       
 MIN_VOLUME_5M = 5000       
 MIN_PRICE_CHANGE_5M = 5.0  
 
-TREND_MIN_VOLUME_5M = 10000
-TREND_MIN_CHANGE_5M = 8.0
+# فیلترهای سنگین موتور ترند (پامپ خفن + خریداران زیاد + پول سنگین)
+TREND_MIN_VOLUME_5M = 40000  # حداقل ۴۰ هزار دلار حجم ورودی در ۵ دقیقه
+TREND_MIN_CHANGE_5M = 15.0   # حداقل ۱۵ درصد رشد قیمت (پامپ خفن)
+MIN_BUYS_5M = 50             # حداقل ۵۰ نفر خریدار فعال در ۵ دقیقه
 
 AWAITING_STATE = None 
 processed_tokens = set()
@@ -296,7 +299,7 @@ def execute_real_sell(token_mint, token_amount):
     except Exception as e:
         return False, f"خطای امضا در فروش: {str(e)}"
 
-# موتور اسکنر ترند و حالت ترکیبی
+# موتور اسکنر ترند و حالت ترکیبی (پامپ خفن + خریداران زیاد + حجم سنگین)
 def trend_alert_scanner_loop(app):
     global TREND_ALERT_RUNNING, COMBO_RUNNING
     while True:
@@ -320,33 +323,37 @@ def trend_alert_scanner_loop(app):
                 liquidity = float(pair.get('liquidity', {}).get('usd', 0))
                 volume_5m = float(pair.get('volume', {}).get('m5', 0))
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
+                buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
+                # شرط دقیق: پامپ خفن + تعداد خریدار بالا + حجم پول سنگین
                 if (price_change_5m >= TREND_MIN_CHANGE_5M and 
+                    buys_5m >= MIN_BUYS_5M and 
                     volume_5m >= TREND_MIN_VOLUME_5M and 
                     price > 0 and 
                     is_token_safe(token_addr)):
                     
                     trend_alerted_tokens.add(token_addr)
                     
-                    # 1. اگر اعلان ترند روشن باشد، فقط هشدار می‌فرستد
+                    # 1. اگر اعلان ترند روشن باشد، هشدار ارسال می‌کند
                     if TREND_ALERT_RUNNING:
                         alert_msg = (
-                            f"🚨 **اعلان ترند بازار (هشدار سریع)** 🔥🚀\n\n"
+                            f"🔥 **شکار توکن انفجاری (ترند بازار)** 🚀\n\n"
                             f"🪙 نام توکن: **{symbol}**\n"
                             f"📍 آدرس قرارداد (کپی با یک کلیک):\n`{token_addr}`\n\n"
                             f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
-                            f"🚀 شتاب رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                            f"📈 حجم ورودی ۵ دقیقه: ${volume_5m:,.0f}\n"
+                            f"🚀 شتاب رشد (پامپ): +{price_change_5m:.2f}%\n"
+                            f"👥 تعداد خریداران: {buys_5m} نفر در ۵ دقیقه\n"
+                            f"💰 حجم پول ورودی: ${volume_5m:,.0f}\n"
                             f"💧 نقدینگی استخر: ${liquidity:,.0f}\n\n"
                             f"🔗 **لینک مستقیم رصد در DexScreener:**\n"
                             f"https://dexscreener.com/solana/{token_addr}"
                         )
                         send_telegram_msg(alert_msg)
 
-                    # 2. اگر حالت ترکیبی روشن باشد، علاوه بر اعلان، ربات مستقیماً وارد معامله واقعیِ آن ترند می‌شود
+                    # 2. اگر حالت ترکیبی روشن باشد، علاوه بر اعلان، خرید واقعی با تعیین حد سود و ضرر انجام می‌دهد
                     if COMBO_RUNNING and token_addr not in active_positions:
-                        print(f"⏳ [حالت ترکیبی] اقدام برای خرید واقعی توکن ترند {symbol}...")
+                        print(f"⏳ [حالت ترکیبی] اقدام برای خرید واقعی توکن انفجاری {symbol}...")
                         success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                         buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
@@ -355,7 +362,7 @@ def trend_alert_scanner_loop(app):
                         target_sl = price * (1 + (STOP_LOSS / 100))
 
                         combo_msg = (
-                            f"⚡🤖 **خرید خودکار از طریق حالت ترکیبی (ترند)**\n"
+                            f"⚡🤖 **خرید خودکار حالت ترکیبی (ترند انفجاری)**\n"
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
                             f"🪙 توکن: {symbol}\n"
                             f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
@@ -377,10 +384,10 @@ def trend_alert_scanner_loop(app):
             print(f"⚠️ خطای اسکنر ترند: {e}")
         time.sleep(5)
 
-# موتور تریدر خودکار مستقل (خرید و فروش معمولی)
+# موتور خرید و فروش خودکار مستقل (سیگنال معمولی)
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
-    send_telegram_msg("⚡ تریدر خودکار مستقل فعال شد.")
+    send_telegram_msg("⚡ خرید و فروش خودکار مستقل فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -546,7 +553,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_combo":
         COMBO_RUNNING = not COMBO_RUNNING
-        state_txt = "🟢 حالت ترکیبی روشن شد (خرید خودکار از روی ترندها فعال شد)." if COMBO_RUNNING else "🔴 حالت ترکیبی خاموش شد."
+        state_txt = "🟢 حالت ترکیبی روشن شد (خرید از ترندهای انفجاری فعال شد)." if COMBO_RUNNING else "🔴 حالت ترکیبی خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
