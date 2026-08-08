@@ -31,6 +31,7 @@ RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 IS_RUNNING = False          # خرید و فروش خودکار مستقل
 TREND_ALERT_RUNNING = False # اعلان ترند مستقل (فقط هشدار)
 COMBO_RUNNING = False       # حالت ترکیبی (ترندهای انفجاری + خرید واقعی + هشدار)
+GOLDEN_OPTION = False       # گزینه طلایی (فیلتر حداکثری سود و دقت بالا)
 
 BUY_AMOUNT_SOL = 0.005
 
@@ -124,7 +125,9 @@ def is_token_safe(token_mint):
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            if risk_score > 5000:
+            # اگر گزینه طلایی روشن باشد، حساسیت بررسی امنیت بسیار بالا می‌رود
+            max_score = 1000 if GOLDEN_OPTION else 5000
+            if risk_score > max_score:
                 return False
         return True
     except Exception:
@@ -355,7 +358,7 @@ def check_positions_loop():
         time.sleep(2)
 
 def trend_alert_scanner_loop(app):
-    global TREND_ALERT_RUNNING, COMBO_RUNNING, TREND_TAKE_PROFIT, TREND_STOP_LOSS, TREND_MIN_VOLUME_5M, MIN_BUYS_5M
+    global TREND_ALERT_RUNNING, COMBO_RUNNING, TREND_TAKE_PROFIT, TREND_STOP_LOSS, TREND_MIN_VOLUME_5M, MIN_BUYS_5M, GOLDEN_OPTION
     while True:
         if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
             time.sleep(2)
@@ -380,9 +383,15 @@ def trend_alert_scanner_loop(app):
                 buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                if (price_change_5m >= TREND_MIN_CHANGE_5M and 
+                # اگر گزینه طلایی روشن باشد، فیلترها دو برابر سخت‌گیرانه‌تر می‌شوند تا احتمال سود به بالاترین حد برسد
+                req_liquidity = MIN_LIQUIDITY * 2 if GOLDEN_OPTION else MIN_LIQUIDITY
+                req_volume = TREND_MIN_VOLUME_5M * 1.5 if GOLDEN_OPTION else TREND_MIN_VOLUME_5M
+                req_change = TREND_MIN_CHANGE_5M * 1.2 if GOLDEN_OPTION else TREND_MIN_CHANGE_5M
+
+                if (price_change_5m >= req_change and 
                     buys_5m >= MIN_BUYS_5M and 
-                    volume_5m >= TREND_MIN_VOLUME_5M and 
+                    volume_5m >= req_volume and 
+                    liquidity >= req_liquidity and
                     price > 0 and 
                     is_token_safe(token_addr)):
                     
@@ -441,7 +450,7 @@ def trend_alert_scanner_loop(app):
         time.sleep(5)
 
 def auto_trader_loop(app):
-    global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
+    global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M, GOLDEN_OPTION
     send_telegram_msg("⚡ خرید و فروش خودکار مستقل فعال شد.")
 
     while True:
@@ -470,8 +479,11 @@ def auto_trader_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                if (liquidity >= MIN_LIQUIDITY and 
-                    volume_5m >= MIN_VOLUME_5M and 
+                req_liquidity = MIN_LIQUIDITY * 2 if GOLDEN_OPTION else MIN_LIQUIDITY
+                req_volume = MIN_VOLUME_5M * 1.5 if GOLDEN_OPTION else MIN_VOLUME_5M
+
+                if (liquidity >= req_liquidity and 
+                    volume_5m >= req_volume and 
                     price_change_5m >= MIN_PRICE_CHANGE_5M and 
                     price > 0 and
                     is_token_safe(token_addr)):
@@ -533,8 +545,10 @@ def get_main_keyboard():
     trader_status = "🟢 خرید و فروش: روشن" if IS_RUNNING else "🔴 خرید و فروش: خاموش"
     trend_status = "🟢 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
     combo_status = "🟢 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
+    golden_status = "🌟 گزینه طلایی (حداکثر سود): روشن" if GOLDEN_OPTION else "⭐ گزینه طلایی (حداکثر سود): خاموش"
     
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
         [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
          InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
@@ -562,14 +576,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, AWAITING_STATE
+    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, AWAITING_STATE
     query = update.callback_query
     try:
         await query.answer()
     except Exception:
         pass
 
-    if query.data == "toggle_combo":
+    if query.data == "toggle_golden":
+        GOLDEN_OPTION = not GOLDEN_OPTION
+        state_txt = "🌟 گزینه طلایی (فیلتر حداکثر سود و دقت بالا) روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
+        try:
+            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
+        except Exception:
+            send_telegram_msg(state_txt)
+
+    elif query.data == "toggle_combo":
         COMBO_RUNNING = not COMBO_RUNNING
         state_txt = "🟢 حالت ترکیبی روشن شد." if COMBO_RUNNING else "🔴 حالت ترکیبی خاموش شد."
         try:
@@ -598,6 +620,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_sol_bal = get_sol_balance()
         status_text = (
             f"📊 وضعیت کامل سیستم:\n\n"
+            f"🌟 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
             f"🔹 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'} (سود: +{TREND_TAKE_PROFIT}% | ضرر: {TREND_STOP_LOSS}%)\n"
             f"🔹 خرید و فروش خودکار: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'} (سود: +{TAKE_PROFIT}% | ضرر: {STOP_LOSS}%)\n"
             f"🔹 اعلان ترند: {'🟢 روشن' if TREND_ALERT_RUNNING else '🔴 خاموش'}\n"
