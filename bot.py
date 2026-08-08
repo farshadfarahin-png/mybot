@@ -10,11 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
-from solders.hash import Hash
-from solders.instruction import Instruction, AccountMeta
-from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
-from solders.system_program import create_account, CreateAccountParams
 
 # تنظیمات کلیدی محیطی
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
@@ -25,8 +21,6 @@ RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d
 SOL_MINT = "So11111111111111111111111111111111111111112"
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
-SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
-RENT_SYSVAR = Pubkey.from_string("SysvarRent11111111111111111111111111111111")
 
 IS_RUNNING = False          
 TREND_ALERT_RUNNING = False 
@@ -125,7 +119,7 @@ def is_token_safe(token_mint):
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            if risk_score > 4000:  # سطح استاندارد و منطقی برای رد کردن توکن‌های کاملاً اسکم
+            if risk_score > 4000:
                 return False
         return True
     except Exception:
