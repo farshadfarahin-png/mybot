@@ -208,9 +208,9 @@ def execute_real_buy(token_mint, amount_sol):
         swap_tx_b64 = swap_res["swapTransaction"]
         raw_tx = base64.b64decode(swap_tx_b64)
         
-        # اصلاح قطعی ساختار امضا برای جلوگیری از خطای Verification
+        # استفاده از bytes(txn.message) بدون خطای متد serialize
         txn = VersionedTransaction.from_bytes(raw_tx)
-        signature = sender_keypair.sign_message(txn.message.serialize())
+        signature = sender_keypair.sign_message(bytes(txn.message))
         signed_txn = VersionedTransaction.populate(txn.message, [signature])
         serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
@@ -282,7 +282,7 @@ def execute_real_sell(token_mint, token_amount):
         raw_tx = base64.b64decode(swap_tx_b64)
         
         txn = VersionedTransaction.from_bytes(raw_tx)
-        signature = sender_keypair.sign_message(txn.message.serialize())
+        signature = sender_keypair.sign_message(bytes(txn.message))
         signed_txn = VersionedTransaction.populate(txn.message, [signature])
         serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
@@ -857,7 +857,6 @@ if __name__ == "__main__":
     golden_thread.start()
 
     pos_thread = Thread(target=check_positions_loop)
-    pos_thread.daemon = Test = True
     pos_thread.daemon = True
     pos_thread.start()
 
