@@ -10,11 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
-from solders.hash import Hash
-from solders.instruction import Instruction, AccountMeta
-from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
-from solders.system_program import create_account, CreateAccountParams
 
 # تنظیمات کلیدی محیطی
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
@@ -23,10 +19,6 @@ PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
 
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 SOL_MINT = "So11111111111111111111111111111111111111112"
-TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
-SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
-RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
 IS_RUNNING = False          
 TREND_ALERT_RUNNING = False 
@@ -52,6 +44,7 @@ MIN_BUYS_5M = 50
 AWAITING_STATE = None 
 processed_tokens = set()
 trend_alerted_tokens = set()
+combo_processed_tokens = set()
 golden_processed_tokens = set()
 active_positions = {}
 
@@ -117,7 +110,7 @@ def get_token_balance(token_mint):
                     if amount > 0:
                         return amount
         except Exception as e:
-            print(f"⚠️ خطا در استعلام موجودی توکن (تلاش {attempt+1}): {e}")
+            print(f"⚠️ خطا در استعلام موجودی توکن: {e}")
         time.sleep(2)
     return 0
 
@@ -188,7 +181,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.3)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای دریافت قیمت از صرافی (احتمالاً نقدینگی کافی نیست)"
+        return False, "خطای دریافت قیمت از صرافی (نقدینگی یا مسیر صرافی)"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -214,8 +207,10 @@ def execute_real_buy(token_mint, amount_sol):
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
         raw_tx = base64.b64decode(swap_tx_b64)
+        
+        # اصلاح قطعی ساختار امضا برای جلوگیری از خطای Verification
         txn = VersionedTransaction.from_bytes(raw_tx)
-        signature = sender_keypair.sign_message(bytes(txn.message))
+        signature = sender_keypair.sign_message(txn.message.serialize())
         signed_txn = VersionedTransaction.populate(txn.message, [signature])
         serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
@@ -285,8 +280,9 @@ def execute_real_sell(token_mint, token_amount):
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
         raw_tx = base64.b64decode(swap_tx_b64)
+        
         txn = VersionedTransaction.from_bytes(raw_tx)
-        signature = sender_keypair.sign_message(bytes(txn.message))
+        signature = sender_keypair.sign_message(txn.message.serialize())
         signed_txn = VersionedTransaction.populate(txn.message, [signature])
         serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
@@ -448,7 +444,7 @@ def trend_alert_scanner_loop(app):
             for token_addr in tokens[:30]:
                 if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
                     break
-                if not token_addr or token_addr in trend_alerted_tokens:
+                if not token_addr:
                     continue
 
                 pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
@@ -469,9 +465,8 @@ def trend_alert_scanner_loop(app):
                     price > 0 and 
                     is_token_safe(token_addr)):
                     
-                    trend_alerted_tokens.add(token_addr)
-                    
-                    if TREND_ALERT_RUNNING:
+                    if TREND_ALERT_RUNNING and token_addr not in trend_alerted_tokens:
+                        trend_alerted_tokens.add(token_addr)
                         alert_msg = (
                             f"🔥 اعلان ترند بازار (هشدار سریع) 🚀\n\n"
                             f"🪙 نام توکن: {symbol}\n"
@@ -484,7 +479,8 @@ def trend_alert_scanner_loop(app):
                         )
                         send_telegram_msg(alert_msg)
 
-                    if COMBO_RUNNING and token_addr not in active_positions:
+                    if COMBO_RUNNING and token_addr not in combo_processed_tokens and token_addr not in active_positions:
+                        combo_processed_tokens.add(token_addr)
                         print(f"⏳ [حالت ترکیبی] خرید توکن ترند {symbol}...")
                         success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                         if not success:
@@ -861,6 +857,7 @@ if __name__ == "__main__":
     golden_thread.start()
 
     pos_thread = Thread(target=check_positions_loop)
+    pos_thread.daemon = Test = True
     pos_thread.daemon = True
     pos_thread.start()
 
