@@ -31,7 +31,7 @@ RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 IS_RUNNING = False          # خرید و فروش خودکار مستقل
 TREND_ALERT_RUNNING = False # اعلان ترند مستقل (فقط هشدار)
 COMBO_RUNNING = False       # حالت ترکیبی (ترندهای انفجاری + خرید واقعی + هشدار)
-GOLDEN_OPTION = False       # گزینه طلایی (فیلتر حداکثری سود و دقت بالا)
+GOLDEN_OPTION = False       # گزینه طلایی (موتور مستقل خرید و فروش با دقت بالا)
 
 BUY_AMOUNT_SOL = 0.005
 
@@ -52,6 +52,7 @@ MIN_BUYS_5M = 50
 AWAITING_STATE = None 
 processed_tokens = set()
 trend_alerted_tokens = set()
+golden_processed_tokens = set()
 active_positions = {}
 
 def send_telegram_msg(text):
@@ -118,15 +119,14 @@ def get_token_balance(token_mint):
         print(f"⚠️ خطا در استعلام موجودی توکن: {e}")
     return 0
 
-def is_token_safe(token_mint):
+def is_token_safe(token_mint, strict=False):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
         res = requests.get(url, timeout=4)
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            # اگر گزینه طلایی روشن باشد، حساسیت بررسی امنیت بسیار بالا می‌رود
-            max_score = 1000 if GOLDEN_OPTION else 5000
+            max_score = 1000 if strict else 5000
             if risk_score > max_score:
                 return False
         return True
@@ -357,8 +357,82 @@ def check_positions_loop():
             print(f"⚠️ خطای حلقه بررسی پوزیشن‌ها: {e}")
         time.sleep(2)
 
+def golden_engine_loop(app):
+    """موتور مستقل گزینه طلایی (خرید و فروش واقعی با دقت بالا برای دستیابی به بالاترین میزان موفقیت)"""
+    global GOLDEN_OPTION, BUY_AMOUNT_SOL
+    while True:
+        if not GOLDEN_OPTION:
+            time.sleep(3)
+            continue
+        try:
+            tokens = get_real_market_trending_tokens()
+            for token_addr in tokens[:30]:
+                if not GOLDEN_OPTION:
+                    break
+                if not token_addr or token_addr in golden_processed_tokens or token_addr in active_positions:
+                    continue
+
+                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
+                if not pair_res.get('pairs'):
+                    continue
+
+                pair = pair_res['pairs'][0]
+                price = float(pair.get('priceUsd', 0))
+                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
+                volume_5m = float(pair.get('volume', {}).get('m5', 0))
+                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
+                buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
+                symbol = pair.get('baseToken', {}).get('symbol', 'GOLD')
+
+                if (price_change_5m >= 15.0 and 
+                    buys_5m >= 60 and 
+                    volume_5m >= 50000 and 
+                    liquidity >= 60000 and 
+                    price > 0 and 
+                    is_token_safe(token_addr, strict=True)):
+                    
+                    golden_processed_tokens.add(token_addr)
+                    print(f"🌟 [گزینه طلایی] خرید واقعی توکن {symbol}...")
+                    
+                    success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
+                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+
+                    tp_val = 35.0
+                    sl_val = -10.0
+                    target_tp = price * (1 + (tp_val / 100))
+                    target_sl = price * (1 + (sl_val / 100))
+
+                    golden_msg = (
+                        f"🌟🔥 خرید گزینه طلایی (سود بالا / ریسک کنترل‌شده)\n"
+                        f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                        f"🪙 توکن: {symbol}\n"
+                        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                        f"💵 نقطه ورود: ${price:.8f}\n"
+                        f"💰 مقدار: SOL {BUY_AMOUNT_SOL}\n"
+                        f"🎯 تارگت سود (+{tp_val}%): ${target_tp:.8f}\n"
+                        f"🛑 حد ضرر ({sl_val}%): ${target_sl:.8f}\n\n"
+                        f"📊 آمار بازار:\n"
+                        f"🔹 رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                        f"🔹 حجم: ${volume_5m:,.0f} | نقدینگی: ${liquidity:,.0f}\n\n"
+                        f"🔗 لینک‌ها:\n"
+                        f"🔍 Solscan\n{solscan_link}\n"
+                        f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                    )
+                    if success:
+                        active_positions[token_addr] = {
+                            "entry_price": price,
+                            "symbol": symbol,
+                            "tp": tp_val,
+                            "sl": sl_val
+                        }
+                    send_telegram_msg(golden_msg)
+        except Exception as e:
+            print(f"⚠️ خطای موتور گزینه طلایی: {e}")
+        time.sleep(5)
+
 def trend_alert_scanner_loop(app):
-    global TREND_ALERT_RUNNING, COMBO_RUNNING, TREND_TAKE_PROFIT, TREND_STOP_LOSS, TREND_MIN_VOLUME_5M, MIN_BUYS_5M, GOLDEN_OPTION
+    global TREND_ALERT_RUNNING, COMBO_RUNNING, TREND_TAKE_PROFIT, TREND_STOP_LOSS, TREND_MIN_VOLUME_5M, MIN_BUYS_5M
     while True:
         if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
             time.sleep(2)
@@ -383,15 +457,9 @@ def trend_alert_scanner_loop(app):
                 buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                # اگر گزینه طلایی روشن باشد، فیلترها دو برابر سخت‌گیرانه‌تر می‌شوند تا احتمال سود به بالاترین حد برسد
-                req_liquidity = MIN_LIQUIDITY * 2 if GOLDEN_OPTION else MIN_LIQUIDITY
-                req_volume = TREND_MIN_VOLUME_5M * 1.5 if GOLDEN_OPTION else TREND_MIN_VOLUME_5M
-                req_change = TREND_MIN_CHANGE_5M * 1.2 if GOLDEN_OPTION else TREND_MIN_CHANGE_5M
-
-                if (price_change_5m >= req_change and 
+                if (price_change_5m >= TREND_MIN_CHANGE_5M and 
                     buys_5m >= MIN_BUYS_5M and 
-                    volume_5m >= req_volume and 
-                    liquidity >= req_liquidity and
+                    volume_5m >= TREND_MIN_VOLUME_5M and 
                     price > 0 and 
                     is_token_safe(token_addr)):
                     
@@ -450,7 +518,7 @@ def trend_alert_scanner_loop(app):
         time.sleep(5)
 
 def auto_trader_loop(app):
-    global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M, GOLDEN_OPTION
+    global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     send_telegram_msg("⚡ خرید و فروش خودکار مستقل فعال شد.")
 
     while True:
@@ -479,11 +547,8 @@ def auto_trader_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                req_liquidity = MIN_LIQUIDITY * 2 if GOLDEN_OPTION else MIN_LIQUIDITY
-                req_volume = MIN_VOLUME_5M * 1.5 if GOLDEN_OPTION else MIN_VOLUME_5M
-
-                if (liquidity >= req_liquidity and 
-                    volume_5m >= req_volume and 
+                if (liquidity >= MIN_LIQUIDITY and 
+                    volume_5m >= MIN_VOLUME_5M and 
                     price_change_5m >= MIN_PRICE_CHANGE_5M and 
                     price > 0 and
                     is_token_safe(token_addr)):
@@ -545,7 +610,7 @@ def get_main_keyboard():
     trader_status = "🟢 خرید و فروش: روشن" if IS_RUNNING else "🔴 خرید و فروش: خاموش"
     trend_status = "🟢 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
     combo_status = "🟢 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
-    golden_status = "🌟 گزینه طلایی (حداکثر سود): روشن" if GOLDEN_OPTION else "⭐ گزینه طلایی (حداکثر سود): خاموش"
+    golden_status = "🌟 گزینه طلایی: روشن" if GOLDEN_OPTION else "⭐ گزینه طلایی: خاموش"
     
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
@@ -585,7 +650,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
-        state_txt = "🌟 گزینه طلایی (فیلتر حداکثر سود و دقت بالا) روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
+        state_txt = "🌟 گزینه طلایی (خرید و فروش خودکار) روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -620,7 +685,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_sol_bal = get_sol_balance()
         status_text = (
             f"📊 وضعیت کامل سیستم:\n\n"
-            f"🌟 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
+            f"🌟 گزینه طلایی (خرید و فروش): {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
             f"🔹 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'} (سود: +{TREND_TAKE_PROFIT}% | ضرر: {TREND_STOP_LOSS}%)\n"
             f"🔹 خرید و فروش خودکار: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'} (سود: +{TAKE_PROFIT}% | ضرر: {STOP_LOSS}%)\n"
             f"🔹 اعلان ترند: {'🟢 روشن' if TREND_ALERT_RUNNING else '🔴 خاموش'}\n"
@@ -779,6 +844,10 @@ if __name__ == "__main__":
     trend_thread = Thread(target=trend_alert_scanner_loop, args=(app,))
     trend_thread.daemon = True
     trend_thread.start()
+
+    golden_thread = Thread(target=golden_engine_loop, args=(app,))
+    golden_thread.daemon = True
+    golden_thread.start()
 
     pos_thread = Thread(target=check_positions_loop)
     pos_thread.daemon = True
