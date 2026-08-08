@@ -28,10 +28,10 @@ ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8kn
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
 RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
-IS_RUNNING = False          # خرید و فروش خودکار مستقل
-TREND_ALERT_RUNNING = False # اعلان ترند مستقل (فقط هشدار)
-COMBO_RUNNING = False       # حالت ترکیبی (ترندهای انفجاری + خرید واقعی + هشدار)
-GOLDEN_OPTION = False       # گزینه طلایی (موتور مستقل خرید و فروش با دقت بالا)
+IS_RUNNING = False          
+TREND_ALERT_RUNNING = False 
+COMBO_RUNNING = False       
+GOLDEN_OPTION = False       
 
 BUY_AMOUNT_SOL = 0.005
 
@@ -96,27 +96,29 @@ def get_sol_balance():
         return 0.0
 
 def get_token_balance(token_mint):
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                WALLET_PUBKEY,
-                {"mint": token_mint},
-                {"encoding": "jsonParsed"}
-            ]
-        }
-        res = requests.post(RPC_URL, json=payload, timeout=8).json()
-        accounts = res.get("result", {}).get("value", [])
-        if accounts:
-            for acc in accounts:
-                info = acc["account"]["data"]["parsed"]["info"]
-                amount = int(info["tokenAmount"]["amount"])
-                if amount > 0:
-                    return amount
-    except Exception as e:
-        print(f"⚠️ خطا در استعلام موجودی توکن: {e}")
+    for attempt in range(4):
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    WALLET_PUBKEY,
+                    {"mint": token_mint},
+                    {"encoding": "jsonParsed"}
+                ]
+            }
+            res = requests.post(RPC_URL, json=payload, timeout=8).json()
+            accounts = res.get("result", {}).get("value", [])
+            if accounts:
+                for acc in accounts:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    amount = int(info["tokenAmount"]["amount"])
+                    if amount > 0:
+                        return amount
+        except Exception as e:
+            print(f"⚠️ خطا در استعلام موجودی توکن (تلاش {attempt+1}): {e}")
+        time.sleep(2)
     return 0
 
 def is_token_safe(token_mint, strict=False):
@@ -172,7 +174,7 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=500"
     
     quote_res = None
     for attempt in range(2):
@@ -221,10 +223,10 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=12).json()
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
@@ -244,7 +246,7 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=300"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=500"
     quote_res = None
     for attempt in range(2):
         try:
@@ -292,10 +294,10 @@ def execute_real_sell(token_mint, token_amount):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=12).json()
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
@@ -358,7 +360,6 @@ def check_positions_loop():
         time.sleep(2)
 
 def golden_engine_loop(app):
-    """موتور مستقل گزینه طلایی (خرید و فروش واقعی با دقت بالا برای دستیابی به بالاترین میزان موفقیت)"""
     global GOLDEN_OPTION, BUY_AMOUNT_SOL
     while True:
         if not GOLDEN_OPTION:
@@ -395,8 +396,12 @@ def golden_engine_loop(app):
                     print(f"🌟 [گزینه طلایی] خرید واقعی توکن {symbol}...")
                     
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
-                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+                    if not success:
+                        print(f"❌ خرید گزینه طلایی ناموفق بود: {result_info}")
+                        continue
+
+                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
+                    solscan_link = f"https://solscan.io/tx/{result_info}"
 
                     tp_val = 35.0
                     sl_val = -10.0
@@ -419,13 +424,12 @@ def golden_engine_loop(app):
                         f"🔍 Solscan\n{solscan_link}\n"
                         f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                     )
-                    if success:
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": tp_val,
-                            "sl": sl_val
-                        }
+                    active_positions[token_addr] = {
+                        "entry_price": price,
+                        "symbol": symbol,
+                        "tp": tp_val,
+                        "sl": sl_val
+                    }
                     send_telegram_msg(golden_msg)
         except Exception as e:
             print(f"⚠️ خطای موتور گزینه طلایی: {e}")
@@ -481,9 +485,12 @@ def trend_alert_scanner_loop(app):
                     if COMBO_RUNNING and token_addr not in active_positions:
                         print(f"⏳ [حالت ترکیبی] خرید توکن ترند {symbol}...")
                         success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
+                        if not success:
+                            print(f"❌ خرید ترکیبی ناموفق بود: {result_info}")
+                            continue
                         
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
-                        solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
+                        solscan_link = f"https://solscan.io/tx/{result_info}"
 
                         target_tp = price * (1 + (TREND_TAKE_PROFIT / 100))
                         target_sl = price * (1 + (TREND_STOP_LOSS / 100))
@@ -505,13 +512,12 @@ def trend_alert_scanner_loop(app):
                             f"🔍 Solscan\n{solscan_link}\n"
                             f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                         )
-                        if success:
-                            active_positions[token_addr] = {
-                                "entry_price": price,
-                                "symbol": symbol,
-                                "tp": TREND_TAKE_PROFIT,
-                                "sl": TREND_STOP_LOSS
-                            }
+                        active_positions[token_addr] = {
+                            "entry_price": price,
+                            "symbol": symbol,
+                            "tp": TREND_TAKE_PROFIT,
+                            "sl": TREND_STOP_LOSS
+                        }
                         send_telegram_msg(combo_msg)
         except Exception as e:
             print(f"⚠️ خطای اسکنر ترند: {e}")
@@ -557,9 +563,12 @@ def auto_trader_loop(app):
                     
                     print(f"⏳ خرید سیگنال معمولی {symbol}...")
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
+                    if not success:
+                        print(f"❌ خرید سیگنال معمولی ناموفق بود: {result_info}")
+                        continue
                     
-                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
+                    solscan_link = f"https://solscan.io/tx/{result_info}"
 
                     target_tp = price * (1 + (TAKE_PROFIT / 100))
                     target_sl = price * (1 + (STOP_LOSS / 100))
@@ -582,14 +591,12 @@ def auto_trader_loop(app):
                         f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                     )
                     
-                    if success:
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": TAKE_PROFIT,
-                            "sl": STOP_LOSS
-                        }
-
+                    active_positions[token_addr] = {
+                        "entry_price": price,
+                        "symbol": symbol,
+                        "tp": TAKE_PROFIT,
+                        "sl": STOP_LOSS
+                    }
                     send_telegram_msg(msg)
         except Exception as e:
             print(f"⚠️ خطای حلقه تریدر معمولی: {e}")
@@ -621,14 +628,12 @@ def get_main_keyboard():
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
         [InlineKeyboardButton(f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume")],
         
-        # تنظیمات سیگنال معمولی
         [InlineKeyboardButton(f"🔵 [سیگنال] تارگت: +{TAKE_PROFIT}%", callback_data="menu_tp"),
          InlineKeyboardButton(f"🔵 [سیگنال] ضرر: {STOP_LOSS}%", callback_data="menu_sl")],
         [InlineKeyboardButton(f"🔵 نقدینگی: ${MIN_LIQUIDITY}", callback_data="menu_liq"),
          InlineKeyboardButton(f"🔵 حجم ۵دقیقه: ${MIN_VOLUME_5M}", callback_data="menu_vol5m")],
         [InlineKeyboardButton(f"🔵 رشد ۵دقیقه: +{MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
         
-        # تنظیمات ترند و حالت ترکیبی
         [InlineKeyboardButton(f"🔥 [ترند] سود: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
          InlineKeyboardButton(f"🔥 [ترند] ضرر: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
     ])
@@ -650,7 +655,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
-        state_txt = "🌟 گزینه طلایی (خرید و فروش خودکار) روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
+        state_txt = "🌟 گزینه طلایی (خرید و فروش واقعی) روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -853,5 +858,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 ربات هوشمند سولانا استارت شد.")
+    print("🚀 ربات واقعی خرید و فروش سولانا استارت شد.")
     app.run_polling()
