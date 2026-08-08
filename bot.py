@@ -111,8 +111,7 @@ def get_token_balance(token_mint):
         accounts = res.get("result", {}).get("value", [])
         if accounts:
             for acc in accounts:
-
-info = acc["account"]["data"]["parsed"]["info"]
+                info = acc["account"]["data"]["parsed"]["info"]
                 amount = int(info["tokenAmount"]["amount"])
                 if amount > 0:
                     return amount
@@ -227,7 +226,7 @@ def execute_real_buy(token_mint, amount_sol):
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
 
-if "result" in tx_res:
+        if "result" in tx_res:
             return True, tx_res["result"]
         else:
             err_details = tx_res.get('error', {}).get('message', 'ریجکت توسط شبکه')
@@ -334,7 +333,7 @@ def check_positions_loop():
                             else:
                                 success, sell_res_info = False, "موجودی توکن در ولت یافت نشد"
 
-sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
+                            sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
                             
                             exit_msg = (
@@ -360,7 +359,6 @@ sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({se
         time.sleep(2)
 
 def golden_engine_loop(app):
-    """موتور مستقل گزینه طلایی (خرید و فروش واقعی با دقت بالا برای دستیابی به بالاترین میزان موفقیت)"""
     global GOLDEN_OPTION, BUY_AMOUNT_SOL
     while True:
         if not GOLDEN_OPTION:
@@ -408,8 +406,7 @@ def golden_engine_loop(app):
                     golden_msg = (
                         f"🌟🔥 خرید گزینه طلایی (سود بالا / ریسک کنترل‌شده)\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
-
-f"🪙 توکن: {symbol}\n"
+                        f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
                         f"💵 نقطه ورود: ${price:.8f}\n"
                         f"💰 مقدار: SOL {BUY_AMOUNT_SOL}\n"
@@ -488,7 +485,7 @@ def trend_alert_scanner_loop(app):
                         buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
-target_tp = price * (1 + (TREND_TAKE_PROFIT / 100))
+                        target_tp = price * (1 + (TREND_TAKE_PROFIT / 100))
                         target_sl = price * (1 + (TREND_STOP_LOSS / 100))
 
                         combo_msg = (
@@ -567,7 +564,7 @@ def auto_trader_loop(app):
                     target_tp = price * (1 + (TAKE_PROFIT / 100))
                     target_sl = price * (1 + (STOP_LOSS / 100))
 
-msg = (
+                    msg = (
                         f"⚡🔥 سیگنال خرید خودکار (سود {TAKE_PROFIT}% / ضرر {STOP_LOSS}%)\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
@@ -599,7 +596,7 @@ msg = (
 
         time.sleep(1)
 
-web_app = Flask(name)
+web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
@@ -624,14 +621,12 @@ def get_main_keyboard():
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
         [InlineKeyboardButton(f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume")],
         
-        # تنظیمات سیگنال معمولی
         [InlineKeyboardButton(f"🔵 [سیگنال] تارگت: +{TAKE_PROFIT}%", callback_data="menu_tp"),
          InlineKeyboardButton(f"🔵 [سیگنال] ضرر: {STOP_LOSS}%", callback_data="menu_sl")],
         [InlineKeyboardButton(f"🔵 نقدینگی: ${MIN_LIQUIDITY}", callback_data="menu_liq"),
          InlineKeyboardButton(f"🔵 حجم ۵دقیقه: ${MIN_VOLUME_5M}", callback_data="menu_vol5m")],
         [InlineKeyboardButton(f"🔵 رشد ۵دقیقه: +{MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
         
-        # تنظیمات ترند و حالت ترکیبی
         [InlineKeyboardButton(f"🔥 [ترند] سود: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
          InlineKeyboardButton(f"🔥 [ترند] ضرر: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
     ])
@@ -651,7 +646,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-if query.data == "toggle_golden":
+    if query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
         state_txt = "🌟 گزینه طلایی (خرید و فروش خودکار) روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
         try:
@@ -733,7 +728,7 @@ if query.data == "toggle_golden":
         except Exception:
             send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
 
-elif query.data == "menu_liq":
+    elif query.data == "menu_liq":
         AWAITING_STATE = "liq"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
@@ -810,8 +805,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 MIN_VOLUME_5M = val
                 msg = f"✅ حجم ۵ دقیقه به ${MIN_VOLUME_5M} تغییر یافت."
             elif AWAITING_STATE == "chg5m":
-
-MIN_PRICE_CHANGE_5M = val
+                MIN_PRICE_CHANGE_5M = val
                 msg = f"✅ رشد ۵ دقیقه به +{MIN_PRICE_CHANGE_5M}% تغییر یافت."
             elif AWAITING_STATE == "trend_tp":
                 if val <= 0: raise ValueError()
@@ -830,7 +824,7 @@ MIN_PRICE_CHANGE_5M = val
     else:
         await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
 
-if name == "main":
+if __name__ == "__main__":
     web_thread = Thread(target=run_web)
     web_thread.daemon = True
     web_thread.start()
