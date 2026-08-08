@@ -26,27 +26,28 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
-RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
+RENT_SYSVAR = Pubkey.from_string("SysvarRent11111111111111111111111111111111")
 
-IS_RUNNING = False          # خرید و فروش خودکار مستقل
-TREND_ALERT_RUNNING = False # اعلان ترند مستقل (فقط هشدار)
-COMBO_RUNNING = False       # حالت ترکیبی (ترندهای انفجاری + خرید واقعی + هشدار)
+IS_RUNNING = False          
+TREND_ALERT_RUNNING = False 
+COMBO_RUNNING = False       
 
 BUY_AMOUNT_SOL = 0.005
+MAX_ALLOWED_BUY_SOL = 0.01  # 🛡️ قفل امنیتی سخت‌گیرانه برای محافظت از ولت
 
-# تنظیمات سیگنال معمولی
+# تنظیمات سیگنال معمولی (متعادل برای حفظ تعداد سیگنال و سوددهی)
 TAKE_PROFIT = 30.0
-STOP_LOSS = -12.0
+STOP_LOSS = -10.0
 MIN_LIQUIDITY = 35000       
-MIN_VOLUME_5M = 5000       
-MIN_PRICE_CHANGE_5M = 5.0  
+MIN_VOLUME_5M = 8000       
+MIN_PRICE_CHANGE_5M = 3.0  
 
-# تنظیمات ترند / حالت ترکیبی
-TREND_TAKE_PROFIT = 60.0
-TREND_STOP_LOSS = -15.0
-TREND_MIN_VOLUME_5M = 40000  
-TREND_MIN_CHANGE_5M = 15.0   
-MIN_BUYS_5M = 50             
+# تنظیمات ترند / حالت ترکیبی (بهینه برای شکار پامپ‌های واقعی بدون از دست رفتن موقعیت‌ها)
+TREND_TAKE_PROFIT = 50.0
+TREND_STOP_LOSS = -12.0
+TREND_MIN_VOLUME_5M = 35000  
+TREND_MIN_CHANGE_5M = 12.0   
+MIN_BUYS_5M = 40             
 
 AWAITING_STATE = None 
 processed_tokens = set()
@@ -124,7 +125,7 @@ def is_token_safe(token_mint):
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            if risk_score > 5000:
+            if risk_score > 4000:  # سطح استاندارد و منطقی برای رد کردن توکن‌های کاملاً اسکم
                 return False
         return True
     except Exception:
@@ -134,7 +135,7 @@ def get_real_market_trending_tokens():
     tokens = []
     try:
         url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
-        res = requests.get(url_boost, timeout=4).json()
+        res = requests.get(url_boost, timeout=3).json()
         if isinstance(res, list):
             for t in res:
                 if t.get('chainId') == 'solana':
@@ -146,7 +147,7 @@ def get_real_market_trending_tokens():
 
     try:
         latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-        res_latest = requests.get(latest_url, timeout=4).json()
+        res_latest = requests.get(latest_url, timeout=3).json()
         for p in res_latest.get("pairs", []):
             if p.get("chainId") == "solana":
                 addr = p.get("baseToken", {}).get("address")
@@ -161,6 +162,9 @@ def execute_real_buy(token_mint, amount_sol):
     if not WALLET_PUBKEY:
         return False, "کلید عمومی ولت نامعتبر است"
 
+    if amount_sol > MAX_ALLOWED_BUY_SOL:
+        return False, "مبلغ خرید بالاتر از سقف امنیتی است"
+
     lamports = int(amount_sol * 1_000_000_000)
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -174,13 +178,13 @@ def execute_real_buy(token_mint, amount_sol):
     quote_res = None
     for attempt in range(2):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=5)
+            res = requests.get(quote_url, headers=headers, timeout=4)
             if res.status_code == 200:
                 quote_res = res.json()
                 break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if not quote_res or "error" in quote_res:
         return False, "خطای دریافت قیمت از صرافی"
@@ -195,13 +199,13 @@ def execute_real_buy(token_mint, amount_sol):
     swap_res = None
     for attempt in range(2):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=5)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=4)
             if res.status_code == 200:
                 swap_res = res.json()
                 break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "تراکنش سواپ توسط صرافی رد شد"
@@ -221,7 +225,7 @@ def execute_real_buy(token_mint, amount_sol):
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=8).json()
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
@@ -245,13 +249,13 @@ def execute_real_sell(token_mint, token_amount):
     quote_res = None
     for attempt in range(2):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=5)
+            res = requests.get(quote_url, headers=headers, timeout=4)
             if res.status_code == 200:
                 quote_res = res.json()
                 break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if not quote_res or "error" in quote_res:
         return False, "خطای دریافت قیمت فروش از صرافی"
@@ -266,13 +270,13 @@ def execute_real_sell(token_mint, token_amount):
     swap_res = None
     for attempt in range(2):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=5)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=4)
             if res.status_code == 200:
                 swap_res = res.json()
                 break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "تراکنش فروش توسط صرافی رد شد"
@@ -292,7 +296,7 @@ def execute_real_sell(token_mint, token_amount):
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=8).json()
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
@@ -307,7 +311,7 @@ def check_positions_loop():
             tokens_to_close = []
             for token_addr, pos in list(active_positions.items()):
                 try:
-                    pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
+                    pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
                     if not pair_res.get('pairs'):
                         continue
                     pair = pair_res['pairs'][0]
@@ -352,104 +356,108 @@ def check_positions_loop():
                 active_positions.pop(t_addr, None)
         except Exception as e:
             print(f"⚠️ خطای حلقه بررسی پوزیشن‌ها: {e}")
-        time.sleep(2)
+        time.sleep(1)
 
 def trend_alert_scanner_loop(app):
     global TREND_ALERT_RUNNING, COMBO_RUNNING, TREND_TAKE_PROFIT, TREND_STOP_LOSS, TREND_MIN_VOLUME_5M, MIN_BUYS_5M
     while True:
-        if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
-            time.sleep(2)
-            continue
         try:
+            if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
+                time.sleep(2)
+                continue
+            
             tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:30]:
+            for token_addr in tokens[:25]:
                 if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
                     break
                 if not token_addr or token_addr in trend_alerted_tokens:
                     continue
 
-                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
-                if not pair_res.get('pairs'):
-                    continue
+                try:
+                    pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
+                    if not pair_res.get('pairs'):
+                        continue
 
-                pair = pair_res['pairs'][0]
-                price = float(pair.get('priceUsd', 0))
-                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-                volume_5m = float(pair.get('volume', {}).get('m5', 0))
-                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-                buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
-                symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
+                    pair = pair_res['pairs'][0]
+                    price = float(pair.get('priceUsd', 0))
+                    liquidity = float(pair.get('liquidity', {}).get('usd', 0))
+                    volume_5m = float(pair.get('volume', {}).get('m5', 0))
+                    price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
+                    buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
+                    symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                if (price_change_5m >= TREND_MIN_CHANGE_5M and 
-                    buys_5m >= MIN_BUYS_5M and 
-                    volume_5m >= TREND_MIN_VOLUME_5M and 
-                    price > 0 and 
-                    is_token_safe(token_addr)):
-                    
-                    trend_alerted_tokens.add(token_addr)
-                    
-                    if TREND_ALERT_RUNNING:
-                        alert_msg = (
-                            f"🔥 **اعلان ترند بازار (هشدار سریع)** 🚀\n\n"
-                            f"🪙 نام توکن: **{symbol}**\n"
-                            f"📍 آدرس قرارداد (کپی با یک کلیک):\n`{token_addr}`\n\n"
-                            f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
-                            f"📈 پامپ رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                            f"📊 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
-                            f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 https://dexscreener.com/solana/{token_addr}"
-                        )
-                        send_telegram_msg(alert_msg)
-
-                    if COMBO_RUNNING and token_addr not in active_positions:
-                        print(f"⏳ [حالت ترکیبی] خرید توکن ترند {symbol}...")
-                        success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
+                    if (price_change_5m >= TREND_MIN_CHANGE_5M and 
+                        buys_5m >= MIN_BUYS_5M and 
+                        volume_5m >= TREND_MIN_VOLUME_5M and 
+                        price > 0 and 
+                        is_token_safe(token_addr)):
                         
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
-                        solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+                        trend_alerted_tokens.add(token_addr)
+                        
+                        if TREND_ALERT_RUNNING:
+                            alert_msg = (
+                                f"🔥 اعلان ترند بازار (هشدار سریع) 🚀\n\n"
+                                f"🪙 نام توکن: {symbol}\n"
+                                f"📍 آدرس قرارداد (کپی با یک کلیک):\n{token_addr}\n\n"
+                                f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
+                                f"📈 پامپ رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                                f"📊 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
+                                f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
+                                f"🔗 https://dexscreener.com/solana/{token_addr}"
+                            )
+                            send_telegram_msg(alert_msg)
 
-                        target_tp = price * (1 + (TREND_TAKE_PROFIT / 100))
-                        target_sl = price * (1 + (TREND_STOP_LOSS / 100))
+                        if COMBO_RUNNING and token_addr not in active_positions:
+                            print(f"⏳ [حالت ترکیبی] خرید توکن ترند {symbol}...")
+                            success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
+                            
+                            buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                            solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
-                        combo_msg = (
-                            f"⚡🔥 **خرید ترکیبی ترند (سود {TREND_TAKE_PROFIT}% / ضرر {TREND_STOP_LOSS}%)**\n"
-                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                            f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
-                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                            f"💰 مقدار خرید: SOL {BUY_AMOUNT_SOL}\n"
-                            f"🎯 تارگت سود (+{TREND_TAKE_PROFIT}%): ${target_tp:.8f}\n"
-                            f"🛑 حد ضرر ({TREND_STOP_LOSS}%): ${target_sl:.8f}\n\n"
-                            f"📊 آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های توکن:\n"
-                            f"🔍 Solscan\n{solscan_link}\n"
-                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
-                        )
-                        if success:
-                            active_positions[token_addr] = {
-                                "entry_price": price,
-                                "symbol": symbol,
-                                "tp": TREND_TAKE_PROFIT,
-                                "sl": TREND_STOP_LOSS
-                            }
-                        send_telegram_msg(combo_msg)
+                            target_tp = price * (1 + (TREND_TAKE_PROFIT / 100))
+                            target_sl = price * (1 + (TREND_STOP_LOSS / 100))
+
+                            combo_msg = (
+                                f"⚡🔥 خرید ترکیبی ترند (سود {TREND_TAKE_PROFIT}% / ضرر {TREND_STOP_LOSS}%)\n"
+                                f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                                f"🪙 توکن: {symbol}\n"
+                                f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                                f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                                f"💰 مقدار خرید: SOL {BUY_AMOUNT_SOL}\n"
+                                f"🎯 تارگت سود (+{TREND_TAKE_PROFIT}%): ${target_tp:.8f}\n"
+                                f"🛑 حد ضرر ({TREND_STOP_LOSS}%): ${target_sl:.8f}\n\n"
+                                f"📊 آمار لحظه‌ای بازار:\n"
+                                f"🔹 روند ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                                f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                                f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                                f"🔗 لینک‌های توکن:\n"
+                                f"🔍 Solscan\n{solscan_link}\n"
+                                f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                            )
+                            if success:
+                                active_positions[token_addr] = {
+                                    "entry_price": price,
+                                    "symbol": symbol,
+                                    "tp": TREND_TAKE_PROFIT,
+                                    "sl": TREND_STOP_LOSS
+                                }
+                            send_telegram_msg(combo_msg)
+                except Exception as token_err:
+                    print(f"⚠️ خطا در بررسی توکن ترند: {token_err}")
         except Exception as e:
-            print(f"⚠️ خطای اسکنر ترند: {e}")
-        time.sleep(5)
+            print(f"⚠️ خطای کلی اسکنر ترند: {e}")
+        time.sleep(1)
 
 def auto_trader_loop(app):
     global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
     send_telegram_msg("⚡ خرید و فروش خودکار مستقل فعال شد.")
 
     while True:
-        if not IS_RUNNING:
-            time.sleep(1)
-            continue
-
         try:
+            if not IS_RUNNING:
+                time.sleep(1)
+                continue
+
             solana_tokens = get_real_market_trending_tokens()
 
             for token_addr in solana_tokens[:30]:
@@ -459,61 +467,64 @@ def auto_trader_loop(app):
                 if not token_addr or token_addr in processed_tokens or token_addr in active_positions:
                     continue
 
-                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
-                if not pair_res.get('pairs'):
-                    continue
+                try:
+                    pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
+                    if not pair_res.get('pairs'):
+                        continue
 
-                pair = pair_res['pairs'][0]
-                price = float(pair.get('priceUsd', 0))
-                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-                volume_5m = float(pair.get('volume', {}).get('m5', 0))
-                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-                symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
+                    pair = pair_res['pairs'][0]
+                    price = float(pair.get('priceUsd', 0))
+                    liquidity = float(pair.get('liquidity', {}).get('usd', 0))
+                    volume_5m = float(pair.get('volume', {}).get('m5', 0))
+                    price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
+                    symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                if (liquidity >= MIN_LIQUIDITY and 
-                    volume_5m >= MIN_VOLUME_5M and 
-                    price_change_5m >= MIN_PRICE_CHANGE_5M and 
-                    price > 0 and
-                    is_token_safe(token_addr)):
-                    
-                    processed_tokens.add(token_addr)
-                    
-                    print(f"⏳ خرید سیگنال معمولی {symbol}...")
-                    success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
-                    
-                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+                    if (liquidity >= MIN_LIQUIDITY and 
+                        volume_5m >= MIN_VOLUME_5M and 
+                        price_change_5m >= MIN_PRICE_CHANGE_5M and 
+                        price > 0 and
+                        is_token_safe(token_addr)):
+                        
+                        processed_tokens.add(token_addr)
+                        
+                        print(f"⏳ خرید سیگنال معمولی {symbol}...")
+                        success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
+                        
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
-                    target_tp = price * (1 + (TAKE_PROFIT / 100))
-                    target_sl = price * (1 + (STOP_LOSS / 100))
+                        target_tp = price * (1 + (TAKE_PROFIT / 100))
+                        target_sl = price * (1 + (STOP_LOSS / 100))
 
-                    msg = (
-                        f"⚡🔥 **سیگنال خرید خودکار (سود {TAKE_PROFIT}% / ضرر {STOP_LOSS}%)**\n"
-                        f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                        f"🪙 توکن: {symbol}\n"
-                        f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
-                        f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                        f"💰 مقدار خرید: SOL {BUY_AMOUNT_SOL}\n"
-                        f"🎯 تارگت سود (+{TAKE_PROFIT}%): ${target_tp:.8f}\n"
-                        f"🛑 حد ضرر ({STOP_LOSS}%): ${target_sl:.8f}\n\n"
-                        f"📊 آمار لحظه‌ای بازار:\n"
-                        f"🔹 روند ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                        f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                        f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                        f"🔗 لینک‌های توکن:\n"
-                        f"🔍 Solscan\n{solscan_link}\n"
-                        f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
-                    )
-                    
-                    if success:
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": TAKE_PROFIT,
-                            "sl": STOP_LOSS
-                        }
+                        msg = (
+                            f"⚡🔥 سیگنال خرید خودکار (سود {TAKE_PROFIT}% / ضرر {STOP_LOSS}%)\n"
+                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                            f"💰 مقدار خرید: SOL {BUY_AMOUNT_SOL}\n"
+                            f"🎯 تارگت سود (+{TAKE_PROFIT}%): ${target_tp:.8f}\n"
+                            f"🛑 حد ضرر ({STOP_LOSS}%): ${target_sl:.8f}\n\n"
+                            f"📊 آمار لحظه‌ای بازار:\n"
+                            f"🔹 روند ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                            f"🔗 لینک‌های توکن:\n"
+                            f"🔍 Solscan\n{solscan_link}\n"
+                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                        )
+                        
+                        if success:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": TAKE_PROFIT,
+                                "sl": STOP_LOSS
+                            }
 
-                    send_telegram_msg(msg)
+                        send_telegram_msg(msg)
+                except Exception as t_err:
+                    print(f"⚠️ خطا در پردازش توکن معمولی: {t_err}")
         except Exception as e:
             print(f"⚠️ خطای حلقه تریدر معمولی: {e}")
 
@@ -542,14 +553,12 @@ def get_main_keyboard():
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
         [InlineKeyboardButton(f"⚙️ حجم معامله: {BUY_AMOUNT_SOL} SOL", callback_data="menu_volume")],
         
-        # تنظیمات سیگنال معمولی
         [InlineKeyboardButton(f"🔵 [سیگنال] تارگت: +{TAKE_PROFIT}%", callback_data="menu_tp"),
          InlineKeyboardButton(f"🔵 [سیگنال] ضرر: {STOP_LOSS}%", callback_data="menu_sl")],
         [InlineKeyboardButton(f"🔵 نقدینگی: ${MIN_LIQUIDITY}", callback_data="menu_liq"),
          InlineKeyboardButton(f"🔵 حجم ۵دقیقه: ${MIN_VOLUME_5M}", callback_data="menu_vol5m")],
         [InlineKeyboardButton(f"🔵 رشد ۵دقیقه: +{MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
         
-        # تنظیمات ترند و حالت ترکیبی
         [InlineKeyboardButton(f"🔥 [ترند] سود: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
          InlineKeyboardButton(f"🔥 [ترند] ضرر: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
     ])
@@ -638,7 +647,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_STATE = "sl"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"🛑 حد ضرر سیگنال فعلی: {STOP_LOSS}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 12-):", reply_markup=cancel_kb)
+            await query.edit_message_text(f"🛑 حد ضرر سیگنال فعلی: {STOP_LOSS}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 10-):", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
 
@@ -678,7 +687,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         AWAITING_STATE = "trend_sl"
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"🔥 [ترند] ضرر فعلی: {TREND_STOP_LOSS}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 15-):", reply_markup=cancel_kb)
+            await query.edit_message_text(f"🔥 [ترند] ضرر فعلی: {TREND_STOP_LOSS}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 12-):", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
             
@@ -700,7 +709,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             val = float(text_input)
             
             if AWAITING_STATE == "volume":
-                if val <= 0: raise ValueError()
+                if val <= 0 or val > MAX_ALLOWED_BUY_SOL: raise ValueError()
                 BUY_AMOUNT_SOL = val
                 msg = f"✅ حجم خرید به {BUY_AMOUNT_SOL} SOL تغییر یافت."
             elif AWAITING_STATE == "tp":
@@ -734,7 +743,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             AWAITING_STATE = None
             await update.message.reply_text(msg, reply_markup=get_main_keyboard())
         except ValueError:
-            await update.message.reply_text("❌ عدد نامعتبر است. مجدد وارد کنید:")
+            await update.message.reply_text("❌ عدد نامعتبر یا بیشتر از سقف مجاز امنیتی است. مجدد وارد کنید:")
     else:
         await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
 
