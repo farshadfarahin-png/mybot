@@ -188,7 +188,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.3)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای دریافت قیمت از صرافی"
+        return False, "خطای دریافت قیمت از صرافی (احتمالاً نقدینگی کافی نیست)"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -397,7 +397,9 @@ def golden_engine_loop(app):
                     
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     if not success:
-                        print(f"❌ خرید گزینه طلایی ناموفق بود: {result_info}")
+                        err_report = f"❌ [خطای خرید گزینه طلایی] توکن {symbol}\nعلت: {result_info}"
+                        print(err_report)
+                        send_telegram_msg(err_report)
                         continue
 
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
@@ -486,7 +488,9 @@ def trend_alert_scanner_loop(app):
                         print(f"⏳ [حالت ترکیبی] خرید توکن ترند {symbol}...")
                         success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                         if not success:
-                            print(f"❌ خرید ترکیبی ناموفق بود: {result_info}")
+                            err_report = f"❌ [خطای خرید حالت ترکیبی] توکن {symbol}\nعلت: {result_info}"
+                            print(err_report)
+                            send_telegram_msg(err_report)
                             continue
                         
                         buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
@@ -564,7 +568,9 @@ def auto_trader_loop(app):
                     print(f"⏳ خرید سیگنال معمولی {symbol}...")
                     success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                     if not success:
-                        print(f"❌ خرید سیگنال معمولی ناموفق بود: {result_info}")
+                        err_report = f"❌ [خطای خرید سیگنال معمولی] توکن {symbol}\nعلت: {result_info}"
+                        print(err_report)
+                        send_telegram_msg(err_report)
                         continue
                     
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
@@ -655,7 +661,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
-        state_txt = "🌟 گزینه طلایی (خرید و فروش واقعی) روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
+        state_txt = "🌟 گزینه طلایی روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -690,7 +696,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_sol_bal = get_sol_balance()
         status_text = (
             f"📊 وضعیت کامل سیستم:\n\n"
-            f"🌟 گزینه طلایی (خرید و فروش): {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
+            f"🌟 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
             f"🔹 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'} (سود: +{TREND_TAKE_PROFIT}% | ضرر: {TREND_STOP_LOSS}%)\n"
             f"🔹 خرید و فروش خودکار: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'} (سود: +{TAKE_PROFIT}% | ضرر: {STOP_LOSS}%)\n"
             f"🔹 اعلان ترند: {'🟢 روشن' if TREND_ALERT_RUNNING else '🔴 خاموش'}\n"
