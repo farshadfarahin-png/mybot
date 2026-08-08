@@ -26,7 +26,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
-RENT_SYSVAR = Pubkey.from_string("SysvarRent11111111111111111111111111111111")
+RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
 IS_RUNNING = False          # خرید و فروش خودکار مستقل
 TREND_ALERT_RUNNING = False # اعلان ترند مستقل (فقط هشدار)
