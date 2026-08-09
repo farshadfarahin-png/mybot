@@ -373,89 +373,27 @@ def check_positions_loop():
             print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(2)
 
-def golden_engine_loop(app):
-    global GOLDEN_OPTION, GOLDEN_BUY_AMOUNT_SOL, GOLDEN_TAKE_PROFIT, GOLDEN_STOP_LOSS, GOLDEN_MIN_LIQUIDITY, GOLDEN_MIN_VOLUME_5M, GOLDEN_MIN_CHANGE_5M, GOLDEN_MIN_BUYS_5M
+def unified_market_scanner_loop(app):
+    global GOLDEN_OPTION, COMBO_RUNNING, IS_RUNNING, TREND_ALERT_RUNNING
+    global GOLDEN_BUY_AMOUNT_SOL, GOLDEN_TAKE_PROFIT, GOLDEN_STOP_LOSS, GOLDEN_MIN_LIQUIDITY, GOLDEN_MIN_VOLUME_5M, GOLDEN_MIN_CHANGE_5M, GOLDEN_MIN_BUYS_5M
+    global COMBO_BUY_AMOUNT_SOL, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS, COMBO_MIN_LIQUIDITY, COMBO_MIN_VOLUME_5M, COMBO_MIN_CHANGE_5M
+    global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, FIRE_MIN_LIQUIDITY, FIRE_MIN_VOLUME_5M, FIRE_MIN_PRICE_CHANGE_5M
+    global TREND_MIN_LIQUIDITY, TREND_MIN_VOLUME_5M, TREND_MIN_CHANGE_5M, MIN_BUYS_5M
+
+    send_telegram_msg("⚡ موتور پردازش و اسکن بازار با سیستم اولویت‌بندی فعال شد.")
+
     while True:
-        if not GOLDEN_OPTION:
-            time.sleep(3)
-            continue
-        try:
-            tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:30]:
-                if not GOLDEN_OPTION:
-                    break
-                if not token_addr or token_addr in golden_processed_tokens or token_addr in active_positions:
-                    continue
-
-                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
-                if not pair_res.get('pairs'):
-                    continue
-
-                pair = pair_res['pairs'][0]
-                price = float(pair.get('priceUsd', 0))
-                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-                volume_5m = float(pair.get('volume', {}).get('m5', 0))
-                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-                buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
-                symbol = pair.get('baseToken', {}).get('symbol', 'GOLD')
-
-                if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
-                    buys_5m >= GOLDEN_MIN_BUYS_5M and 
-                    volume_5m >= GOLDEN_MIN_VOLUME_5M and 
-                    liquidity >= GOLDEN_MIN_LIQUIDITY and 
-                    price > 0 and 
-                    is_token_safe(token_addr, strict=True)):
-                    
-                    golden_processed_tokens.add(token_addr)
-                    success, result_info = execute_real_buy(token_addr, GOLDEN_BUY_AMOUNT_SOL)
-                    
-                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
-
-                    target_tp_val = price * (1 + (GOLDEN_TAKE_PROFIT / 100))
-                    target_sl_val = price * (1 + (GOLDEN_STOP_LOSS / 100))
-
-                    golden_msg = (
-                        f"🚀🔥 خرید گزینه طلایی (سود {GOLDEN_TAKE_PROFIT}% / ضرر {GOLDEN_STOP_LOSS}%)\n"
-                        f"📌 وضعیت خرید: {buy_status_str}اسپم\n\n"
-                        f"🪙 توکن: {symbol}\n"
-                        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                        f"💵 نقطه ورود دقیق: {price:.8f}$\n"
-                        f"💰 مقدار خرید: SOL {GOLDEN_BUY_AMOUNT_SOL}\n"
-                        f"🎯 تارگت سود {target_tp_val:.8f}$ (+%{GOLDEN_TAKE_PROFIT}):\n"
-                        f"🛑 حد ضرر {target_sl_val:.8f}$ (%{GOLDEN_STOP_LOSS}):\n\n"
-                        f"📊 آمار لحظه‌ای بازار:\n"
-                        f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                        f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                        f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                        f"🔗 لینک‌های توکن:\n"
-                        f"🔍 Solscan\n{solscan_link}\n"
-                        f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
-                    )
-                    if success:
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": GOLDEN_TAKE_PROFIT,
-                            "sl": GOLDEN_STOP_LOSS
-                        }
-                    send_telegram_msg(golden_msg)
-        except Exception as e:
-            print(f"⚠️ خطای گزینه طلایی: {e}")
-        time.sleep(5)
-
-def trend_alert_scanner_loop(app):
-    global TREND_ALERT_RUNNING, COMBO_RUNNING, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS, COMBO_MIN_VOLUME_5M, MIN_BUYS_5M, GOLDEN_OPTION, COMBO_BUY_AMOUNT_SOL, COMBO_MIN_LIQUIDITY
-    while True:
-        if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
+        if not (GOLDEN_OPTION or COMBO_RUNNING or IS_RUNNING or TREND_ALERT_RUNNING):
             time.sleep(2)
             continue
+
         try:
             tokens = get_real_market_trending_tokens()
             for token_addr in tokens[:30]:
-                if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
-                    break
-                if not token_addr or token_addr in trend_alerted_tokens:
+                if not token_addr:
+                    continue
+
+                if token_addr in active_positions:
                     continue
 
                 pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
@@ -470,29 +408,66 @@ def trend_alert_scanner_loop(app):
                 buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
-                if (price_change_5m >= TREND_MIN_CHANGE_5M and 
-                    buys_5m >= MIN_BUYS_5M and 
-                    volume_5m >= TREND_MIN_VOLUME_5M and 
-                    liquidity >= TREND_MIN_LIQUIDITY and
-                    price > 0 and 
-                    is_token_safe(token_addr)):
-                    
-                    trend_alerted_tokens.add(token_addr)
-                    
-                    if TREND_ALERT_RUNNING:
-                        alert_msg = (
-                            f"🚨 اعلان ترند بازار (هشدار آژیر)\n\n"
-                            f"🪙 نام توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
-                            f"📈 پامپ رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                            f"📊 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
-                            f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 https://dexscreener.com/solana/{token_addr}"
-                        )
-                        send_telegram_msg(alert_msg)
+                if price <= 0:
+                    continue
 
-                    if COMBO_RUNNING and token_addr not in active_positions:
+                # اولویت اول: گزینه طلایی (🚀)
+                if GOLDEN_OPTION and token_addr not in golden_processed_tokens:
+                    if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
+                        buys_5m >= GOLDEN_MIN_BUYS_5M and 
+                        volume_5m >= GOLDEN_MIN_VOLUME_5M and 
+                        liquidity >= GOLDEN_MIN_LIQUIDITY and 
+                        is_token_safe(token_addr, strict=True)):
+                        
+                        golden_processed_tokens.add(token_addr)
+                        processed_tokens.add(token_addr)
+                        trend_alerted_tokens.add(token_addr)
+
+                        success, result_info = execute_real_buy(token_addr, GOLDEN_BUY_AMOUNT_SOL)
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+
+                        target_tp_val = price * (1 + (GOLDEN_TAKE_PROFIT / 100))
+                        target_sl_val = price * (1 + (GOLDEN_STOP_LOSS / 100))
+
+                        golden_msg = (
+                            f"🚀🔥 خرید گزینه طلایی (سود {GOLDEN_TAKE_PROFIT}% / ضرر {GOLDEN_STOP_LOSS}%)\n"
+                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                            f"💵 نقطه ورود دقیق: {price:.8f}$\n"
+                            f"💰 مقدار خرید: SOL {GOLDEN_BUY_AMOUNT_SOL}\n"
+                            f"🎯 تارگت سود {target_tp_val:.8f}$ (+%{GOLDEN_TAKE_PROFIT}):\n"
+                            f"🛑 حد ضرر {target_sl_val:.8f}$ (%{GOLDEN_STOP_LOSS}):\n\n"
+                            f"📊 آمار لحظه‌ای بازار:\n"
+                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
+                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                            f"🔗 لینک‌های توکن:\n"
+                            f"🔍 Solscan\n{solscan_link}\n"
+                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                        )
+                        if success:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": GOLDEN_TAKE_PROFIT,
+                                "sl": GOLDEN_STOP_LOSS
+                            }
+                        send_telegram_msg(golden_msg)
+                        continue
+
+                # اولویت دوم: حالت ترکیبی (🚨)
+                if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
+                    if (price_change_5m >= COMBO_MIN_CHANGE_5M and 
+                        buys_5m >= MIN_BUYS_5M and 
+                        volume_5m >= COMBO_MIN_VOLUME_5M and 
+                        liquidity >= COMBO_MIN_LIQUIDITY and
+                        is_token_safe(token_addr)):
+                        
+                        trend_alerted_tokens.add(token_addr)
+                        processed_tokens.add(token_addr)
+
                         success, result_info = execute_real_buy(token_addr, COMBO_BUY_AMOUNT_SOL)
                         buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
@@ -525,86 +500,76 @@ def trend_alert_scanner_loop(app):
                                 "sl": COMBO_STOP_LOSS
                             }
                         send_telegram_msg(combo_msg)
+                        continue
+
+                # اولویت سوم: اعلان ترند (بدون خرید)
+                if TREND_ALERT_RUNNING and token_addr not in trend_alerted_tokens:
+                    if (price_change_5m >= TREND_MIN_CHANGE_5M and 
+                        buys_5m >= MIN_BUYS_5M and 
+                        volume_5m >= TREND_MIN_VOLUME_5M and 
+                        liquidity >= TREND_MIN_LIQUIDITY and
+                        is_token_safe(token_addr)):
+                        
+                        trend_alerted_tokens.add(token_addr)
+                        alert_msg = (
+                            f"🚨 اعلان ترند بازار (هشدار آژیر)\n\n"
+                            f"🪙 نام توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                            f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
+                            f"📈 پامپ رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
+                            f"📊 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
+                            f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
+                            f"🔗 https://dexscreener.com/solana/{token_addr}"
+                        )
+                        send_telegram_msg(alert_msg)
+
+                # اولویت چهارم: خرید و فروش معمولی (🔥)
+                if IS_RUNNING and token_addr not in processed_tokens:
+                    if (liquidity >= FIRE_MIN_LIQUIDITY and 
+                        volume_5m >= FIRE_MIN_VOLUME_5M and 
+                        price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M and 
+                        is_token_safe(token_addr)):
+                        
+                        processed_tokens.add(token_addr)
+                        success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
+                        
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+
+                        target_tp_val = price * (1 + (FIRE_TAKE_PROFIT / 100))
+                        target_sl_val = price * (1 + (FIRE_STOP_LOSS / 100))
+
+                        msg = (
+                            f"🔥 سیگنال خرید خودکار (سود {FIRE_TAKE_PROFIT}% / ضرر {FIRE_STOP_LOSS}%)\n"
+                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                            f"💵 نقطه ورود دقیق: {price:.8f}$\n"
+                            f"💰 مقدار خرید: SOL {FIRE_BUY_AMOUNT_SOL}\n"
+                            f"🎯 تارگت سود {target_tp_val:.8f}$ (+%{FIRE_TAKE_PROFIT}):\n"
+                            f"🛑 حد ضرر {target_sl_val:.8f}$ (%{FIRE_STOP_LOSS}):\n\n"
+                            f"📊 آمار لحظه‌ای بازار:\n"
+                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
+                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                            f"🔗 لینک‌های توکن:\n"
+                            f"🔍 Solscan\n{solscan_link}\n"
+                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                        )
+                        
+                        if success:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": FIRE_TAKE_PROFIT,
+                                "sl": FIRE_STOP_LOSS
+                            }
+                        send_telegram_msg(msg)
+
         except Exception as e:
-            print(f"⚠️ خطای ترند: {e}")
-        time.sleep(5)
+            print(f"⚠️ خطای موتور پردازش بازار: {e}")
 
-def auto_trader_loop(app):
-    global IS_RUNNING, FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, FIRE_MIN_LIQUIDITY, FIRE_MIN_VOLUME_5M, FIRE_MIN_PRICE_CHANGE_5M
-    send_telegram_msg("🔥 خرید و فروش خودکار مستقل فعال شد.")
-
-    while True:
-        if not IS_RUNNING:
-            time.sleep(1)
-            continue
-
-        try:
-            solana_tokens = get_real_market_trending_tokens()
-
-            for token_addr in solana_tokens[:30]:
-                if not IS_RUNNING:
-                    break
-
-                if not token_addr or token_addr in processed_tokens or token_addr in active_positions:
-                    continue
-
-                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
-                if not pair_res.get('pairs'):
-                    continue
-
-                pair = pair_res['pairs'][0]
-                price = float(pair.get('priceUsd', 0))
-                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-                volume_5m = float(pair.get('volume', {}).get('m5', 0))
-                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-                symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
-
-                if (liquidity >= FIRE_MIN_LIQUIDITY and 
-                    volume_5m >= FIRE_MIN_VOLUME_5M and 
-                    price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M and 
-                    price > 0 and
-                    is_token_safe(token_addr)):
-                    
-                    processed_tokens.add(token_addr)
-                    success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
-                    
-                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
-
-                    target_tp_val = price * (1 + (FIRE_TAKE_PROFIT / 100))
-                    target_sl_val = price * (1 + (FIRE_STOP_LOSS / 100))
-
-                    msg = (
-                        f"🔥 سیگنال خرید خودکار (سود {FIRE_TAKE_PROFIT}% / ضرر {FIRE_STOP_LOSS}%)\n"
-                        f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                        f"🪙 توکن: {symbol}\n"
-                        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                        f"💵 نقطه ورود دقیق: {price:.8f}$\n"
-                        f"💰 مقدار خرید: SOL {FIRE_BUY_AMOUNT_SOL}\n"
-                        f"🎯 تارگت سود {target_tp_val:.8f}$ (+%{FIRE_TAKE_PROFIT}):\n"
-                        f"🛑 حد ضرر {target_sl_val:.8f}$ (%{FIRE_STOP_LOSS}):\n\n"
-                        f"📊 آمار لحظه‌ای بازار:\n"
-                        f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                        f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                        f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                        f"🔗 لینک‌های توکن:\n"
-                        f"🔍 Solscan\n{solscan_link}\n"
-                        f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
-                    )
-                    
-                    if success:
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": FIRE_TAKE_PROFIT,
-                            "sl": FIRE_STOP_LOSS
-                        }
-
-                    send_telegram_msg(msg)
-        except Exception as e:
-            print(f"⚠️ خطای تریدر معمولی: {e}")
-
-        time.sleep(1)
+        time.sleep(2)
 
 web_app = Flask(__name__)
 
@@ -889,17 +854,9 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    trader_thread = Thread(target=auto_trader_loop, args=(app,))
-    trader_thread.daemon = True
-    trader_thread.start()
-
-    trend_thread = Thread(target=trend_alert_scanner_loop, args=(app,))
-    trend_thread.daemon = True
-    trend_thread.start()
-
-    golden_thread = Thread(target=golden_engine_loop, args=(app,))
-    golden_thread.daemon = True
-    golden_thread.start()
+    unified_thread = Thread(target=unified_market_scanner_loop, args=(app,))
+    unified_thread.daemon = True
+    unified_thread.start()
 
     pos_thread = Thread(target=check_positions_loop)
     pos_thread.daemon = True
