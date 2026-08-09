@@ -172,8 +172,8 @@ def execute_real_buy(token_mint, amount_sol):
         return False, "کلید عمومی ولت نامعتبر است"
 
     current_sol = get_sol_balance()
-    if current_sol < (amount_sol + 0.002):
-        return False, f"موجودی سولانا ناکافی ({current_sol:.4f} SOL)"
+    if current_sol < (amount_sol + 0.0025):
+        return False, f"موجودی ناکافی ({current_sol:.4f} SOL)"
 
     lamports = int(amount_sol * 1_000_000_000)
     headers = {
@@ -205,7 +205,7 @@ def execute_real_buy(token_mint, amount_sol):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": "auto"
+        "prioritizationFeeLamports": 100000
     }
     
     swap_res = None
@@ -259,7 +259,7 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=500"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=700"
     quote_res = None
     for attempt in range(3):
         try:
@@ -280,7 +280,7 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": "auto"
+        "prioritizationFeeLamports": 100000
     }
     
     swap_res = None
