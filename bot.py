@@ -33,8 +33,6 @@ TREND_ALERT_RUNNING = False # اعلان ترند مستقل (فقط هشدار)
 COMBO_RUNNING = False       # حالت ترکیبی (ترندهای انفجاری + خرید واقعی + هشدار)
 GOLDEN_OPTION = False       # گزینه طلایی (موتور مستقل خرید و فروش با دقت بالا)
 
-BUY_AMOUNT_SOL = 0.005
-
 # تنظیمات اختصاصی بخش خرید و فروش (آتیش 🔥)
 FIRE_BUY_AMOUNT_SOL = 0.005
 FIRE_TAKE_PROFIT = 30.0
@@ -637,12 +635,43 @@ def run_web():
     web_app.run(host="0.0.0.0", port=port)
 
 def get_main_keyboard():
-    # تعیین ایموجی‌های حرکتی دینامیک بر اساس وضعیت روشن/خاموش بودن کلیدها
     golden_status = "🚀 گزینه طلایی: روشن" if GOLDEN_OPTION else "⭐ گزینه طلایی: خاموش"
     combo_status = "🚨 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
     trader_status = "🔥 خرید و فروش: روشن" if IS_RUNNING else "🔴 خرید و فروش: خاموش"
     trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
     
+    # تعیین اینکه کدام تنظیمات (آتیش 🔥، آژیر 🚨، یا موشک 🚀) روی دکمه‌ها نمایش داده شود
+    if GOLDEN_OPTION:
+        cur_emoji = "🚀"
+        cur_vol = GOLDEN_BUY_AMOUNT_SOL
+        cur_tp = GOLDEN_TAKE_PROFIT
+        cur_sl = GOLDEN_STOP_LOSS
+        cur_liq = GOLDEN_MIN_LIQUIDITY
+        cur_vol5m = GOLDEN_MIN_VOLUME_5M
+        cur_chg5m = GOLDEN_MIN_CHANGE_5M
+        trend_tp = GOLDEN_TAKE_PROFIT
+        trend_sl = GOLDEN_STOP_LOSS
+    elif COMBO_RUNNING or TREND_ALERT_RUNNING:
+        cur_emoji = "🚨"
+        cur_vol = ALERT_BUY_AMOUNT_SOL
+        cur_tp = TREND_TAKE_PROFIT
+        cur_sl = TREND_STOP_LOSS
+        cur_liq = TREND_MIN_LIQUIDITY
+        cur_vol5m = TREND_MIN_VOLUME_5M
+        cur_chg5m = TREND_MIN_CHANGE_5M
+        trend_tp = TREND_TAKE_PROFIT
+        trend_sl = TREND_STOP_LOSS
+    else:
+        cur_emoji = "🔥"
+        cur_vol = FIRE_BUY_AMOUNT_SOL
+        cur_tp = FIRE_TAKE_PROFIT
+        cur_sl = FIRE_STOP_LOSS
+        cur_liq = FIRE_MIN_LIQUIDITY
+        cur_vol5m = FIRE_MIN_VOLUME_5M
+        cur_chg5m = FIRE_MIN_PRICE_CHANGE_5M
+        trend_tp = TREND_TAKE_PROFIT
+        trend_sl = TREND_STOP_LOSS
+
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
@@ -651,17 +680,16 @@ def get_main_keyboard():
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
         
-        # پوسته دینامیک بسته به اینکه کدام حالت (آتیش 🔥، آژیر 🚨، یا موشک 🚀) فعال است یا پیش‌فرض آتش
-        [InlineKeyboardButton(f"⚙️ حجم معامله: {FIRE_BUY_AMOUNT_SOL if not GOLDEN_OPTION and not COMBO_RUNNING else (GOLDEN_BUY_AMOUNT_SOL if GOLDEN_OPTION else ALERT_BUY_AMOUNT_SOL)} SOL", callback_data="menu_volume")],
+        [InlineKeyboardButton(f"⚙️ حجم معامله: {cur_vol} SOL", callback_data="menu_volume")],
         
-        [InlineKeyboardButton(f"🔵 [سیگنال] تارگت: +{FIRE_TAKE_PROFIT}%", callback_data="menu_tp"),
-         InlineKeyboardButton(f"🔵 [سیگنال] ضرر: {FIRE_STOP_LOSS}%", callback_data="menu_sl")],
-        [InlineKeyboardButton(f"🔵 نقدینگی: ${FIRE_MIN_LIQUIDITY}", callback_data="menu_liq"),
-         InlineKeyboardButton(f"🔵 حجم ۵دقیقه: ${FIRE_MIN_VOLUME_5M}", callback_data="menu_vol5m")],
-        [InlineKeyboardButton(f"🔵 رشد ۵دقیقه: +{FIRE_MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
+        [InlineKeyboardButton(f"{cur_emoji} [سیگنال] تارگت: +{cur_tp}%", callback_data="menu_tp"),
+         InlineKeyboardButton(f"{cur_emoji} [سیگنال] ضرر: {cur_sl}%", callback_data="menu_sl")],
+        [InlineKeyboardButton(f"{cur_emoji} نقدینگی: ${cur_liq}", callback_data="menu_liq"),
+         InlineKeyboardButton(f"{cur_emoji} حجم ۵دقیقه: ${cur_vol5m}", callback_data="menu_vol5m")],
+        [InlineKeyboardButton(f"{cur_emoji} رشد ۵دقیقه: +{cur_chg5m}%", callback_data="menu_chg5m")],
         
-        [InlineKeyboardButton(f"🔥 [ترند] سود: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
-         InlineKeyboardButton(f"🔥 [ترند] ضرر: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
+        [InlineKeyboardButton(f"{cur_emoji} [ترند] سود: +{trend_tp}%", callback_data="menu_trend_tp"),
+         InlineKeyboardButton(f"{cur_emoji} [ترند] ضرر: {trend_sl}%", callback_data="menu_trend_sl")]
     ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -892,7 +920,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             val = float(text_input)
             
-            # مدیریت مقادیر خرید و فروش (🔥 آتشین)
             if AWAITING_STATE == "fire_volume":
                 if val <= 0: raise ValueError()
                 FIRE_BUY_AMOUNT_SOL = val
@@ -916,7 +943,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 FIRE_MIN_PRICE_CHANGE_5M = val
                 msg = f"🔥 رشد ۵ دقیقه بخش خرید و فروش به +{FIRE_MIN_PRICE_CHANGE_5M}% تغییر یافت."
 
-            # مدیریت مقادیر ترند و ترکیبی (🚨 آژیر دار)
             elif AWAITING_STATE == "trend_volume":
                 if val <= 0: raise ValueError()
                 ALERT_BUY_AMOUNT_SOL = val
@@ -940,7 +966,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 TREND_MIN_CHANGE_5M = val
                 msg = f"🚨 رشد ۵ دقیقه ترند/ترکیبی به +{TREND_MIN_CHANGE_5M}% تغییر یافت."
 
-            # مدیریت مقادیر گزینه طلایی (🚀 موشکی)
             elif AWAITING_STATE == "golden_volume":
                 if val <= 0: raise ValueError()
                 GOLDEN_BUY_AMOUNT_SOL = val
