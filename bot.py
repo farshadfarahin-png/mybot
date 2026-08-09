@@ -10,11 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
-from solders.hash import Hash
-from solders.instruction import Instruction, AccountMeta
-from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
-from solders.system_program import create_account, CreateAccountParams
 
 # تنظیمات کلیدی محیطی
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
@@ -23,17 +19,13 @@ PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
 
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
 SOL_MINT = "So11111111111111111111111111111111111111112"
-TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
-SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
-RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
 IS_RUNNING = False          
 TREND_ALERT_RUNNING = False 
 COMBO_RUNNING = False       
 GOLDEN_OPTION = False       
 
-# تنظیمات بخش خرید و فروش (🔥)
+# تنظیمات بخش خرید و فروش (🟠 نارنجی)
 FIRE_BUY_AMOUNT_SOL = 0.005
 FIRE_TAKE_PROFIT = 30.0
 FIRE_STOP_LOSS = -12.0
@@ -41,7 +33,7 @@ FIRE_MIN_LIQUIDITY = 35000
 FIRE_MIN_VOLUME_5M = 5000       
 FIRE_MIN_PRICE_CHANGE_5M = 5.0  
 
-# تنظیمات بخش ترکیبی (🚨)
+# تنظیمات بخش ترکیبی (🔴 قرمز)
 COMBO_BUY_AMOUNT_SOL = 0.005
 COMBO_TAKE_PROFIT = 20.0
 COMBO_STOP_LOSS = -5.0
@@ -49,13 +41,13 @@ COMBO_MIN_LIQUIDITY = 40000
 COMBO_MIN_VOLUME_5M = 60000  
 COMBO_MIN_CHANGE_5M = 25.0   
 
-# تنظیمات بخش اعلان ترند (🚨)
+# تنظیمات بخش اعلان ترند (🔴 قرمز)
 TREND_MIN_LIQUIDITY = 40000
 TREND_MIN_VOLUME_5M = 60000  
 TREND_MIN_CHANGE_5M = 25.0   
 MIN_BUYS_5M = 80             
 
-# تنظیمات بخش گزینه طلایی (🚀)
+# تنظیمات بخش گزینه طلایی (🟡 زرد)
 GOLDEN_BUY_AMOUNT_SOL = 0.005
 GOLDEN_TAKE_PROFIT = 25.0
 GOLDEN_STOP_LOSS = -5.0
@@ -181,7 +173,7 @@ def execute_real_buy(token_mint, amount_sol):
 
     current_sol = get_sol_balance()
     if current_sol < (amount_sol + 0.002):
-        return False, f"موجودی سولانا ناکافی ({current_sol:.4f} SOL). حداقل {amount_sol + 0.002} نیاز است."
+        return False, f"موجودی سولانا ناکافی ({current_sol:.4f} SOL)"
 
     lamports = int(amount_sol * 1_000_000_000)
     headers = {
@@ -206,8 +198,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.3)
 
     if not quote_res or "error" in quote_res:
-        err_msg = quote_res.get("error", "خطای نامشخص") if quote_res else "خطای ارتباط با صرافی"
-        return False, f"خطای کوت: {err_msg}"
+        return False, "خطای کوت صرافی"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -230,7 +221,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.3)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "تراکنش سواپ توسط صرافی رد شد"
+        return False, "تراکنش سواپ رد شد"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -282,7 +273,7 @@ def execute_real_sell(token_mint, token_amount):
         time.sleep(0.3)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای دریافت قیمت فروش از صرافی"
+        return False, "خطای دریافت قیمت فروش"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -305,7 +296,7 @@ def execute_real_sell(token_mint, token_amount):
         time.sleep(0.3)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "تراکنش فروش توسط صرافی رد شد"
+        return False, "فروش رد شد"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -357,7 +348,7 @@ def check_positions_loop():
                             if token_balance > 0:
                                 success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             else:
-                                success, sell_res_info = False, "موجودی توکن در ولت یافت نشد"
+                                success, sell_res_info = False, "موجودی یافت نشد"
 
                             sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
@@ -365,23 +356,21 @@ def check_positions_loop():
                             exit_msg = (
                                 f"🔴 فروش خودکار ({reason})\n\n"
                                 f"🪙 توکن: {symbol}\n"
-                                f"📌 وضعیت فروش: {sell_status_str}\n"
+                                f"📌 وضعیت: {sell_status_str}\n"
                                 f"📍 آدرس:\n{token_addr}\n\n"
                                 f"📉 قیمت خروج: ${current_price:.8f}\n"
                                 f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
-                                f"🔗 لینک‌های اختصاصی توکن:\n"
-                                f"🔍 تراکنش در Solscan\n{solscan_link}\n"
-                                f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                                f"🔗 تراکنش Solscan:\n{solscan_link}"
                             )
                             send_telegram_msg(exit_msg)
                             tokens_to_close.append(token_addr)
                 except Exception as inner_e:
-                    print(f"⚠️ خطا در بررسی پوزیشن {token_addr}: {inner_e}")
+                    print(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
 
             for t_addr in tokens_to_close:
                 active_positions.pop(t_addr, None)
         except Exception as e:
-            print(f"⚠️ خطای حلقه بررسی پوزیشن‌ها: {e}")
+            print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(2)
 
 def golden_engine_loop(app):
@@ -418,30 +407,21 @@ def golden_engine_loop(app):
                     is_token_safe(token_addr, strict=True)):
                     
                     golden_processed_tokens.add(token_addr)
-                    print(f"🚀 [گزینه طلایی] خرید واقعی توکن {symbol}...")
-                    
                     success, result_info = execute_real_buy(token_addr, GOLDEN_BUY_AMOUNT_SOL)
-                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                    buy_status_str = "موفق ✅" if success else f"خطا ❌"
                     solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                     target_tp = price * (1 + (GOLDEN_TAKE_PROFIT / 100))
                     target_sl = price * (1 + (GOLDEN_STOP_LOSS / 100))
 
                     golden_msg = (
-                        f"🚀🔥 خرید گزینه طلایی (موتور موشکی / دقت بالا)\n"
-                        f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                        f"🟡🚀 خرید گزینه طلایی\n"
+                        f"📌 وضعیت: {buy_status_str}\n"
                         f"🪙 توکن: {symbol}\n"
-                        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                        f"💵 نقطه ورود: ${price:.8f}\n"
-                        f"💰 مقدار: SOL {GOLDEN_BUY_AMOUNT_SOL}\n"
-                        f"🎯 تارگت سود (+{GOLDEN_TAKE_PROFIT}%): ${target_tp:.8f}\n"
-                        f"🛑 حد ضرر ({GOLDEN_STOP_LOSS}%): ${target_sl:.8f}\n\n"
-                        f"📊 آمار بازار:\n"
-                        f"🔹 رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                        f"🔹 حجم: ${volume_5m:,.0f} | نقدینگی: ${liquidity:,.0f}\n\n"
-                        f"🔗 لینک‌ها:\n"
-                        f"🔍 Solscan\n{solscan_link}\n"
-                        f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                        f"📍 {token_addr}\n"
+                        f"💵 ورود: ${price:.8f}\n"
+                        f"🎯 تارگت: ${target_tp:.8f} | 🛑 ضرر: ${target_sl:.8f}\n"
+                        f"🔗 {solscan_link}"
                     )
                     if success:
                         active_positions[token_addr] = {
@@ -452,7 +432,7 @@ def golden_engine_loop(app):
                         }
                     send_telegram_msg(golden_msg)
         except Exception as e:
-            print(f"⚠️ خطای موتور گزینه طلایی: {e}")
+            print(f"⚠️ خطای گزینه طلایی: {e}")
         time.sleep(5)
 
 def trend_alert_scanner_loop(app):
@@ -492,43 +472,25 @@ def trend_alert_scanner_loop(app):
                     
                     if TREND_ALERT_RUNNING:
                         alert_msg = (
-                            f"🚨 اعلان ترند بازار (هشدار آژیر)\n\n"
-                            f"🪙 نام توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 قیمت لحظه‌ای: ${price:.8f}\n"
-                            f"📈 پامپ رشد ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                            f"📊 حجم معاملاتی ۵ دقیقه: ${volume_5m:,.0f}\n"
-                            f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
+                            f"🔴🚨 اعلان ترند بازار\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 {token_addr}\n"
+                            f"💵 قیمت: ${price:.8f} | رشد ۵دقیقه: +{price_change_5m:.2f}%\n"
                             f"🔗 https://dexscreener.com/solana/{token_addr}"
                         )
                         send_telegram_msg(alert_msg)
 
-                    if COMBO_RUNning_check := COMBO_RUNNING and token_addr not in active_positions:
-                        print(f"⏳ [حالت ترکیبی] خرید توکن ترند {symbol}...")
+                    if COMBO_RUNNING and token_addr not in active_positions:
                         success, result_info = execute_real_buy(token_addr, COMBO_BUY_AMOUNT_SOL)
-                        
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        buy_status_str = "موفق ✅" if success else "خطا ❌"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
-                        target_tp = price * (1 + (COMBO_TAKE_PROFIT / 100))
-                        target_sl = price * (1 + (COMBO_STOP_LOSS / 100))
-
                         combo_msg = (
-                            f"🚨 خرید ترکیبی ترند (سود {COMBO_TAKE_PROFIT}% / ضرر {COMBO_STOP_LOSS}%)\n"
-                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🔴 خرید ترکیبی ترند\n"
+                            f"📌 وضعیت: {buy_status_str}\n"
                             f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                            f"💰 مقدار خرید: SOL {COMBO_BUY_AMOUNT_SOL}\n"
-                            f"🎯 تارگت سود (+{COMBO_TAKE_PROFIT}%): ${target_tp:.8f}\n"
-                            f"🛑 حد ضرر ({COMBO_STOP_LOSS}%): ${target_sl:.8f}\n\n"
-                            f"📊 آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های توکن:\n"
-                            f"🔍 Solscan\n{solscan_link}\n"
-                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                            f"📍 {token_addr}\n"
+                            f"🔗 {solscan_link}"
                         )
                         if success:
                             active_positions[token_addr] = {
@@ -539,12 +501,12 @@ def trend_alert_scanner_loop(app):
                             }
                         send_telegram_msg(combo_msg)
         except Exception as e:
-            print(f"⚠️ خطای اسکنر ترند: {e}")
+            print(f"⚠️ خطای ترند: {e}")
         time.sleep(5)
 
 def auto_trader_loop(app):
     global IS_RUNNING, FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, FIRE_MIN_LIQUIDITY, FIRE_MIN_VOLUME_5M, FIRE_MIN_PRICE_CHANGE_5M
-    send_telegram_msg("🔥 خرید و فروش خودکار مستقل فعال شد.")
+    send_telegram_msg("🟠 خرید و فروش خودکار مستقل فعال شد.")
 
     while True:
         if not IS_RUNNING:
@@ -579,32 +541,16 @@ def auto_trader_loop(app):
                     is_token_safe(token_addr)):
                     
                     processed_tokens.add(token_addr)
-                    
-                    print(f"⏳ خرید سیگنال معمولی {symbol}...")
                     success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
-                    
-                    buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                    buy_status_str = "موفق ✅" if success else "خطا ❌"
                     solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
-                    target_tp = price * (1 + (FIRE_TAKE_PROFIT / 100))
-                    target_sl = price * (1 + (FIRE_STOP_LOSS / 100))
-
                     msg = (
-                        f"🔥 سیگنال خرید خودکار (سود {FIRE_TAKE_PROFIT}% / ضرر {FIRE_STOP_LOSS}%)\n"
-                        f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                        f"🟠 سیگنال خرید خودکار\n"
+                        f"📌 وضعیت: {buy_status_str}\n"
                         f"🪙 توکن: {symbol}\n"
-                        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                        f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                        f"💰 مقدار خرید: SOL {FIRE_BUY_AMOUNT_SOL}\n"
-                        f"🎯 تارگت سود (+{FIRE_TAKE_PROFIT}%): ${target_tp:.8f}\n"
-                        f"🛑 حد ضرر ({FIRE_STOP_LOSS}%): ${target_sl:.8f}\n\n"
-                        f"📊 آمار لحظه‌ای بازار:\n"
-                        f"🔹 روند ۵ دقیقه: +{price_change_5m:.2f}%\n"
-                        f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                        f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                        f"🔗 لینک‌های توکن:\n"
-                        f"🔍 Solscan\n{solscan_link}\n"
-                        f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                        f"📍 {token_addr}\n"
+                        f"🔗 {solscan_link}"
                     )
                     
                     if success:
@@ -617,7 +563,7 @@ def auto_trader_loop(app):
 
                     send_telegram_msg(msg)
         except Exception as e:
-            print(f"⚠️ خطای حلقه تریدر معمولی: {e}")
+            print(f"⚠️ خطای تریدر معمولی: {e}")
 
         time.sleep(1)
 
@@ -631,11 +577,12 @@ def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
 
+# --- سیستم کیبورد شیشه‌ای رنگی و داینامیک ---
 def get_main_keyboard():
-    golden_status = "🚀 گزینه طلایی: روشن" if GOLDEN_OPTION else "⭐ گزینه طلایی: خاموش"
-    combo_status = "🚨 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
-    trader_status = "🔥💥 خرید و فروش: در حال سوختن" if IS_RUNNING else "🔥 خرید و فروش: خاموش"
-    trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
+    golden_status = "🟡 🚀 گزینه طلایی: روشن" if GOLDEN_OPTION else "⭐ گزینه طلایی: خاموش"
+    combo_status = "🔴 🚨 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
+    trader_status = "🟠 🔥 خرید و فروش: در حال سوختن" if IS_RUNNING else "🟠 خرید و فروش: خاموش"
+    trend_status = "🔴 🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
 
     keyboard = [
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
@@ -646,52 +593,52 @@ def get_main_keyboard():
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")]
     ]
 
-    # ۱. اگر گزینه طلایی روشن باشد -> دکمه‌های شیشه‌ای موشک 🚀 اضافه می‌شود
+    # ۱. گزینه طلایی (زرد 🟡)
     if GOLDEN_OPTION:
-        keyboard.append([InlineKeyboardButton(f"⚙️ حجم معامله (طلایی): {GOLDEN_BUY_AMOUNT_SOL} SOL", callback_data="menu_g_vol")])
+        keyboard.append([InlineKeyboardButton(f"🟡 ⚙️ حجم معامله (طلایی): {GOLDEN_BUY_AMOUNT_SOL} SOL", callback_data="menu_g_vol")])
         keyboard.append([
-            InlineKeyboardButton(f"🚀 [طلایی] تارگت: +{GOLDEN_TAKE_PROFIT}%", callback_data="menu_g_tp"),
-            InlineKeyboardButton(f"🚀 [طلایی] ضرر: {GOLDEN_STOP_LOSS}%", callback_data="menu_g_sl")
+            InlineKeyboardButton(f"🟡 🚀 [طلایی] تارگت: +{GOLDEN_TAKE_PROFIT}%", callback_data="menu_g_tp"),
+            InlineKeyboardButton(f"🟡 🚀 [طلایی] ضرر: {GOLDEN_STOP_LOSS}%", callback_data="menu_g_sl")
         ])
         keyboard.append([
-            InlineKeyboardButton(f"🚀 نقدینگی: ${GOLDEN_MIN_LIQUIDITY}", callback_data="menu_g_liq"),
-            InlineKeyboardButton(f"🚀 حجم ۵دقیقه: ${GOLDEN_MIN_VOLUME_5M}", callback_data="menu_g_vol5m")
+            InlineKeyboardButton(f"🟡 🚀 نقدینگی: ${GOLDEN_MIN_LIQUIDITY}", callback_data="menu_g_liq"),
+            InlineKeyboardButton(f"🟡 🚀 حجم ۵دقیقه: ${GOLDEN_MIN_VOLUME_5M}", callback_data="menu_g_vol5m")
         ])
-        keyboard.append([InlineKeyboardButton(f"🚀 رشد ۵دقیقه: +{GOLDEN_MIN_CHANGE_5M}%", callback_data="menu_g_chg5m")])
+        keyboard.append([InlineKeyboardButton(f"🟡 🚀 رشد ۵دقیقه: +{GOLDEN_MIN_CHANGE_5M}%", callback_data="menu_g_chg5m")])
 
-    # ۲. اگر خرید و فروش روشن باشد -> دکمه‌های شیشه‌ای آتشین 🔥 اضافه می‌شود
+    # ۲. خرید و فروش (نارنجی 🟠)
     if IS_RUNNING:
-        keyboard.append([InlineKeyboardButton(f"⚙️ حجم معامله (خریدوفروش): {FIRE_BUY_AMOUNT_SOL} SOL", callback_data="menu_f_vol")])
+        keyboard.append([InlineKeyboardButton(f"🟠 ⚙️ حجم معامله (خریدوفروش): {FIRE_BUY_AMOUNT_SOL} SOL", callback_data="menu_f_vol")])
         keyboard.append([
-            InlineKeyboardButton(f"🔥 [سیگنال] تارگت: +{FIRE_TAKE_PROFIT}%", callback_data="menu_f_tp"),
-            InlineKeyboardButton(f"🔥 [سیگنال] ضرر: {FIRE_STOP_LOSS}%", callback_data="menu_f_sl")
+            InlineKeyboardButton(f"🟠 🔥 [سیگنال] تارگت: +{FIRE_TAKE_PROFIT}%", callback_data="menu_f_tp"),
+            InlineKeyboardButton(f"🟠 🔥 [سیگنال] ضرر: {FIRE_STOP_LOSS}%", callback_data="menu_f_sl")
         ])
         keyboard.append([
-            InlineKeyboardButton(f"🔥 نقدینگی: ${FIRE_MIN_LIQUIDITY}", callback_data="menu_f_liq"),
-            InlineKeyboardButton(f"🔥 حجم ۵دقیقه: ${FIRE_MIN_VOLUME_5M}", callback_data="menu_f_vol5m")
+            InlineKeyboardButton(f"🟠 🔥 نقدینگی: ${FIRE_MIN_LIQUIDITY}", callback_data="menu_f_liq"),
+            InlineKeyboardButton(f"🟠 🔥 حجم ۵دقیقه: ${FIRE_MIN_VOLUME_5M}", callback_data="menu_f_vol5m")
         ])
-        keyboard.append([InlineKeyboardButton(f"🔥 رشد ۵دقیقه: +{FIRE_MIN_PRICE_CHANGE_5M}%", callback_data="menu_f_chg5m")])
+        keyboard.append([InlineKeyboardButton(f"🟠 🔥 رشد ۵دقیقه: +{FIRE_MIN_PRICE_CHANGE_5M}%", callback_data="menu_f_chg5m")])
 
-    # ۳. اگر حالت ترکیبی روشن باشد -> دکمه‌های شیشه‌ای ترکیبی 🚨 اضافه می‌شود
+    # ۳. حالت ترکیبی (قرمز 🔴)
     if COMBO_RUNNING:
-        keyboard.append([InlineKeyboardButton(f"⚙️ حجم معامله (ترکیبی): {COMBO_BUY_AMOUNT_SOL} SOL", callback_data="menu_c_vol")])
+        keyboard.append([InlineKeyboardButton(f"🔴 ⚙️ حجم معامله (ترکیبی): {COMBO_BUY_AMOUNT_SOL} SOL", callback_data="menu_c_vol")])
         keyboard.append([
-            InlineKeyboardButton(f"🚨 [ترکیبی] سود: +{COMBO_TAKE_PROFIT}%", callback_data="menu_c_tp"),
-            InlineKeyboardButton(f"🚨 [ترکیبی] ضرر: {COMBO_STOP_LOSS}%", callback_data="menu_c_sl")
+            InlineKeyboardButton(f"🔴 🚨 [ترکیبی] سود: +{COMBO_TAKE_PROFIT}%", callback_data="menu_c_tp"),
+            InlineKeyboardButton(f"🔴 🚨 [ترکیبی] ضرر: {COMBO_STOP_LOSS}%", callback_data="menu_c_sl")
         ])
         keyboard.append([
-            InlineKeyboardButton(f"🚨 نقدینگی ترکیبی: ${COMBO_MIN_LIQUIDITY}", callback_data="menu_c_liq"),
-            InlineKeyboardButton(f"🚨 حجم ۵دقیقه ترکیبی: ${COMBO_MIN_VOLUME_5M}", callback_data="menu_c_vol5m")
+            InlineKeyboardButton(f"🔴 🚨 نقدینگی ترکیبی: ${COMBO_MIN_LIQUIDITY}", callback_data="menu_c_liq"),
+            InlineKeyboardButton(f"🔴 🚨 حجم ۵دقیقه ترکیبی: ${COMBO_MIN_VOLUME_5M}", callback_data="menu_c_vol5m")
         ])
-        keyboard.append([InlineKeyboardButton(f"🚨 رشد ۵دقیقه ترکیبی: +{COMBO_MIN_CHANGE_5M}%", callback_data="menu_c_chg5m")])
+        keyboard.append([InlineKeyboardButton(f"🔴 🚨 رشد ۵دقیقه ترکیبی: +{COMBO_MIN_CHANGE_5M}%", callback_data="menu_c_chg5m")])
 
-    # ۴. اگر اعلان ترند روشن باشد -> دکمه‌های شیشه‌ای ترند 🚨 اضافه می‌شود
+    # ۴. اعلان ترند (قرمز 🔴)
     if TREND_ALERT_RUNNING:
         keyboard.append([
-            InlineKeyboardButton(f"🚨 [ترند] نقدینگی: ${TREND_MIN_LIQUIDITY}", callback_data="menu_t_liq"),
-            InlineKeyboardButton(f"🚨 [ترند] حجم ۵دقیقه: ${TREND_MIN_VOLUME_5M}", callback_data="menu_t_vol5m")
+            InlineKeyboardButton(f"🔴 🚨 [ترند] نقدینگی: ${TREND_MIN_LIQUIDITY}", callback_data="menu_t_liq"),
+            InlineKeyboardButton(f"🔴 🚨 [ترند] حجم ۵دقیقه: ${TREND_MIN_VOLUME_5M}", callback_data="menu_t_vol5m")
         ])
-        keyboard.append([InlineKeyboardButton(f"🚨 [ترند] رشد ۵دقیقه: +{TREND_MIN_CHANGE_5M}%", callback_data="menu_t_chg5m")])
+        keyboard.append([InlineKeyboardButton(f"🔴 🚨 [ترند] رشد ۵دقیقه: +{TREND_MIN_CHANGE_5M}%", callback_data="menu_t_chg5m")])
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -712,7 +659,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
-        state_txt = "🚀 گزینه طلایی روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
+        state_txt = "🟡 گزینه طلایی روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -720,7 +667,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "toggle_combo":
         COMBO_RUNNING = not COMBO_RUNNING
-        state_txt = "🚨 حالت ترکیبی روشن شد." if COMBO_RUNNING else "🔴 حالت ترکیبی خاموش شد."
+        state_txt = "🔴 حالت ترکیبی روشن شد." if COMBO_RUNNING else "🔴 حالت ترکیبی خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -728,7 +675,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "toggle_trader":
         IS_RUNNING = not IS_RUNNING
-        state_txt = "🔥💥 خرید و فروش خودکار روشن شد." if IS_RUNNING else "🔥 خرید و فروش خودکار خاموش شد."
+        state_txt = "🟠 خرید و فروش خودکار روشن شد." if IS_RUNNING else "🟠 خرید و فروش خودکار خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -736,7 +683,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     elif query.data == "toggle_trend":
         TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
-        state_txt = "🚨 اعلان ترند روشن شد." if TREND_ALERT_RUNNING else "🔴 اعلان ترند خاموش شد."
+        state_txt = "🔴 اعلان ترند روشن شد." if TREND_ALERT_RUNNING else "🔴 اعلان ترند خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -747,10 +694,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_sol_bal = get_sol_balance()
         status_text = (
             f"📊 وضعیت کامل سیستم:\n\n"
-            f"🚀 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
-            f"🚨 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'}\n"
-            f"🔥 خرید و فروش: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'}\n"
-            f"🚨 اعلان ترند: {'🟢 روشن' if TREND_ALERT_RUNNING else '🔴 خاموش'}\n"
+            f"🟡 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
+            f"🔴 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'}\n"
+            f"🟠 خرید و فروش: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'}\n"
+            f"🔴 اعلان ترند: {'🟢 روشن' if TREND_ALERT_RUNNING else '🔴 خاموش'}\n"
             f"💰 موجودی ولت: {current_sol_bal:.4f} SOL\n"
             f"🔑 ولت متصل: {pub_display}"
         )
@@ -767,75 +714,75 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             send_telegram_msg(balance_text)
 
-    # تنظیمات گزینه طلایی 🚀
+    # تنظیمات گزینه طلایی 🟡
     elif query.data == "menu_g_vol":
-        AWAITING_STATE, cur_val, prefix = "g_vol", GOLDEN_BUY_AMOUNT_SOL, "🚀 [طلایی] حجم معامله"
+        AWAITING_STATE, cur_val, prefix = "g_vol", GOLDEN_BUY_AMOUNT_SOL, "🟡 [طلایی] حجم معامله"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_tp":
-        AWAITING_STATE, cur_val, prefix = "g_tp", GOLDEN_TAKE_PROFIT, "🚀 [طلایی] تارگت سود"
+        AWAITING_STATE, cur_val, prefix = "g_tp", GOLDEN_TAKE_PROFIT, "🟡 [طلایی] تارگت سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_sl":
-        AWAITING_STATE, cur_val, prefix = "g_sl", GOLDEN_STOP_LOSS, "🚀 [طلایی] حد ضرر"
+        AWAITING_STATE, cur_val, prefix = "g_sl", GOLDEN_STOP_LOSS, "🟡 [طلایی] حد ضرر"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_liq":
-        AWAITING_STATE, cur_val, prefix = "g_liq", GOLDEN_MIN_LIQUIDITY, "🚀 [طلایی] نقدینگی"
+        AWAITING_STATE, cur_val, prefix = "g_liq", GOLDEN_MIN_LIQUIDITY, "🟡 [طلایی] نقدینگی"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_vol5m":
-        AWAITING_STATE, cur_val, prefix = "g_vol5m", GOLDEN_MIN_VOLUME_5M, "🚀 [طلایی] حجم ۵ دقیقه"
+        AWAITING_STATE, cur_val, prefix = "g_vol5m", GOLDEN_MIN_VOLUME_5M, "🟡 [طلایی] حجم ۵ دقیقه"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_chg5m":
-        AWAITING_STATE, cur_val, prefix = "g_chg5m", GOLDEN_MIN_CHANGE_5M, "🚀 [طلایی] رشد ۵ دقیقه"
+        AWAITING_STATE, cur_val, prefix = "g_chg5m", GOLDEN_MIN_CHANGE_5M, "🟡 [طلایی] رشد ۵ دقیقه"
         await prompt_input(query, prefix, cur_val)
 
-    # تنظیمات خرید و فروش 🔥
+    # تنظیمات خرید و فروش 🟠
     elif query.data == "menu_f_vol":
-        AWAITING_STATE, cur_val, prefix = "f_vol", FIRE_BUY_AMOUNT_SOL, "🔥 [خریدوفروش] حجم معامله"
+        AWAITING_STATE, cur_val, prefix = "f_vol", FIRE_BUY_AMOUNT_SOL, "🟠 [خریدوفروش] حجم معامله"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_f_tp":
-        AWAITING_STATE, cur_val, prefix = "f_tp", FIRE_TAKE_PROFIT, "🔥 [خریدوفروش] تارگت سود"
+        AWAITING_STATE, cur_val, prefix = "f_tp", FIRE_TAKE_PROFIT, "🟠 [خریدوفروش] تارگت سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_f_sl":
-        AWAITING_STATE, cur_val, prefix = "f_sl", FIRE_STOP_LOSS, "🔥 [خریدوفروش] حد ضرر"
+        AWAITING_STATE, cur_val, prefix = "f_sl", FIRE_STOP_LOSS, "🟠 [خریدوفروش] حد ضرر"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_f_liq":
-        AWAITING_STATE, cur_val, prefix = "f_liq", FIRE_MIN_LIQUIDITY, "🔥 [خریدوفروش] نقدینگی"
+        AWAITING_STATE, cur_val, prefix = "f_liq", FIRE_MIN_LIQUIDITY, "🟠 [خریدوفروش] نقدینگی"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_f_vol5m":
-        AWAITING_STATE, cur_val, prefix = "f_vol5m", FIRE_MIN_VOLUME_5M, "🔥 [خریدوفروش] حجم ۵ دقیقه"
+        AWAITING_STATE, cur_val, prefix = "f_vol5m", FIRE_MIN_VOLUME_5M, "🟠 [خریدوفروش] حجم ۵ دقیقه"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_f_chg5m":
-        AWAITING_STATE, cur_val, prefix = "f_chg5m", FIRE_MIN_PRICE_CHANGE_5M, "🔥 [خریدوفروش] رشد ۵ دقیقه"
+        AWAITING_STATE, cur_val, prefix = "f_chg5m", FIRE_MIN_PRICE_CHANGE_5M, "🟠 [خریدوفروش] رشد ۵ دقیقه"
         await prompt_input(query, prefix, cur_val)
 
-    # تنظیمات ترکیبی 🚨
+    # تنظیمات ترکیبی 🔴
     elif query.data == "menu_c_vol":
-        AWAITING_STATE, cur_val, prefix = "c_vol", COMBO_BUY_AMOUNT_SOL, "🚨 [ترکیبی] حجم معامله"
+        AWAITING_STATE, cur_val, prefix = "c_vol", COMBO_BUY_AMOUNT_SOL, "🔴 [ترکیبی] حجم معامله"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_tp":
-        AWAITING_STATE, cur_val, prefix = "c_tp", COMBO_TAKE_PROFIT, "🚨 [ترکیبی] سود"
+        AWAITING_STATE, cur_val, prefix = "c_tp", COMBO_TAKE_PROFIT, "🔴 [ترکیبی] سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_sl":
-        AWAITING_STATE, cur_val, prefix = "c_sl", COMBO_STOP_LOSS, "🚨 [ترکیبی] ضرر"
+        AWAITING_STATE, cur_val, prefix = "c_sl", COMBO_STOP_LOSS, "🔴 [ترکیبی] ضرر"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_liq":
-        AWAITING_STATE, cur_val, prefix = "c_liq", COMBO_MIN_LIQUIDITY, "🚨 [ترکیبی] نقدینگی"
+        AWAITING_STATE, cur_val, prefix = "c_liq", COMBO_MIN_LIQUIDITY, "🔴 [ترکیبی] نقدینگی"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_vol5m":
-        AWAITING_STATE, cur_val, prefix = "c_vol5m", COMBO_MIN_VOLUME_5M, "🚨 [ترکیبی] حجم ۵ دقیقه"
+        AWAITING_STATE, cur_val, prefix = "c_vol5m", COMBO_MIN_VOLUME_5M, "🔴 [ترکیبی] حجم ۵ دقیقه"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_chg5m":
-        AWAITING_STATE, cur_val, prefix = "c_chg5m", COMBO_MIN_CHANGE_5M, "🚨 [ترکیبی] رشد ۵ دقیقه"
+        AWAITING_STATE, cur_val, prefix = "c_chg5m", COMBO_MIN_CHANGE_5M, "🔴 [ترکیبی] رشد ۵ دقیقه"
         await prompt_input(query, prefix, cur_val)
 
-    # تنظیمات اعلان ترند 🚨
+    # تنظیمات اعلان ترند 🔴
     elif query.data == "menu_t_liq":
-        AWAITING_STATE, cur_val, prefix = "t_liq", TREND_MIN_LIQUIDITY, "🚨 [ترند] نقدینگی"
+        AWAITING_STATE, cur_val, prefix = "t_liq", TREND_MIN_LIQUIDITY, "🔴 [ترند] نقدینگی"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_t_vol5m":
-        AWAITING_STATE, cur_val, prefix = "t_vol5m", TREND_MIN_VOLUME_5M, "🚨 [ترند] حجم ۵ دقیقه"
+        AWAITING_STATE, cur_val, prefix = "t_vol5m", TREND_MIN_VOLUME_5M, "🔴 [ترند] حجم ۵ دقیقه"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_t_chg5m":
-        AWAITING_STATE, cur_val, prefix = "t_chg5m", TREND_MIN_CHANGE_5M, "🚨 [ترند] رشد ۵ دقیقه"
+        AWAITING_STATE, cur_val, prefix = "t_chg5m", TREND_MIN_CHANGE_5M, "🔴 [ترند] رشد ۵ دقیقه"
         await prompt_input(query, prefix, cur_val)
             
     elif query.data == "cancel_input":
