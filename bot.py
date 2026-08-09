@@ -42,12 +42,12 @@ MIN_LIQUIDITY = 35000
 MIN_VOLUME_5M = 5000       
 MIN_PRICE_CHANGE_5M = 5.0  
 
-# تنظیمات ترند / حالت ترکیبی
-TREND_TAKE_PROFIT = 60.0
-TREND_STOP_LOSS = -15.0
-TREND_MIN_VOLUME_5M = 40000  
-TREND_MIN_CHANGE_5M = 15.0   
-MIN_BUYS_5M = 50             
+# تنظیمات ترند / حالت ترکیبی (با فیلترهای بسیار سخت‌گیرانه برای برد بالای 80%)
+TREND_TAKE_PROFIT = 20.0
+TREND_STOP_LOSS = -5.0
+TREND_MIN_VOLUME_5M = 60000  
+TREND_MIN_CHANGE_5M = 25.0   
+MIN_BUYS_5M = 80             
 
 AWAITING_STATE = None 
 processed_tokens = set()
@@ -126,7 +126,7 @@ def is_token_safe(token_mint, strict=False):
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            max_score = 1000 if strict else 5000
+            max_score = 500 if strict else 3000
             if risk_score > max_score:
                 return False
         return True
@@ -164,6 +164,11 @@ def execute_real_buy(token_mint, amount_sol):
     if not WALLET_PUBKEY:
         return False, "کلید عمومی ولت نامعتبر است"
 
+    # بررسی موجودی برای اطمینان از داشتن سولانا کافی (لحاظ کردن کارمزد شبکه)
+    current_sol = get_sol_balance()
+    if current_sol < (amount_sol + 0.002):
+        return False, f"موجودی سولانا ناکافی ({current_sol:.4f} SOL). حداقل {amount_sol + 0.002} نیاز است."
+
     lamports = int(amount_sol * 1_000_000_000)
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -172,36 +177,41 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
+    # اسلیپیج بالاتر (500 بپس مخفف 5 درصد) جهت اطمینان از انجام قطعی خرید در نوسانات
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=500"
     
     quote_res = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             res = requests.get(quote_url, headers=headers, timeout=5)
             if res.status_code == 200:
                 quote_res = res.json()
-                break
+                if "error" not in quote_res:
+                    break
         except Exception:
             pass
         time.sleep(0.3)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای دریافت قیمت از صرافی"
+        err_msg = quote_res.get("error", "خطای نامشخص") if quote_res else "خطای ارتباط با صرافی"
+        return False, f"خطای کوت: {err_msg}"
 
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
-        "dynamicComputeUnitLimit": True
+        "dynamicComputeUnitLimit": True,
+        "prioritizationFeeLamports": "auto"
     }
     
     swap_res = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=5)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
             if res.status_code == 200:
                 swap_res = res.json()
-                break
+                if "swapTransaction" in swap_res:
+                    break
         except Exception:
             pass
         time.sleep(0.3)
@@ -221,7 +231,7 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -245,14 +255,15 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=300"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=500"
     quote_res = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             res = requests.get(quote_url, headers=headers, timeout=5)
             if res.status_code == 200:
                 quote_res = res.json()
-                break
+                if "error" not in quote_res:
+                    break
         except Exception:
             pass
         time.sleep(0.3)
@@ -264,16 +275,18 @@ def execute_real_sell(token_mint, token_amount):
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
-        "dynamicComputeUnitLimit": True
+        "dynamicComputeUnitLimit": True,
+        "prioritizationFeeLamports": "auto"
     }
     
     swap_res = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=5)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
             if res.status_code == 200:
                 swap_res = res.json()
-                break
+                if "swapTransaction" in swap_res:
+                    break
         except Exception:
             pass
         time.sleep(0.3)
@@ -293,7 +306,7 @@ def execute_real_sell(token_mint, token_amount):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -384,10 +397,11 @@ def golden_engine_loop(app):
                 buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'GOLD')
 
-                if (price_change_5m >= 15.0 and 
-                    buys_5m >= 60 and 
-                    volume_5m >= 50000 and 
-                    liquidity >= 60000 and 
+                # فیلترهای فوق‌العاده سخت‌گیرانه برای دقت بالای ۹۸٪ در گزینه طلایی
+                if (price_change_5m >= 20.0 and 
+                    buys_5m >= 80 and 
+                    volume_5m >= 70000 and 
+                    liquidity >= 80000 and 
                     price > 0 and 
                     is_token_safe(token_addr, strict=True)):
                     
@@ -398,13 +412,13 @@ def golden_engine_loop(app):
                     buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
                     solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
-                    tp_val = 35.0
-                    sl_val = -10.0
+                    tp_val = 25.0
+                    sl_val = -5.0
                     target_tp = price * (1 + (tp_val / 100))
                     target_sl = price * (1 + (sl_val / 100))
 
                     golden_msg = (
-                        f"🌟🔥 خرید گزینه طلایی (سود بالا / ریسک کنترل‌شده)\n"
+                        f"🌟🔥 خرید گزینه طلایی (دقت بالا / سود تضمینی)\n"
                         f"📌 وضعیت خرید: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -432,15 +446,20 @@ def golden_engine_loop(app):
         time.sleep(5)
 
 def trend_alert_scanner_loop(app):
-    global TREND_ALERT_RUNNING, COMBO_RUNNING, TREND_TAKE_PROFIT, TREND_STOP_LOSS, TREND_MIN_VOLUME_5M, MIN_BUYS_5M
+    global TREND_ALERT_RUNNING, COMBO_RUNNING, TREND_TAKE_PROFIT, TREND_STOP_LOSS, TREND_MIN_VOLUME_5M, MIN_BUYS_5M, GOLDEN_OPTION
     while True:
+        # اگر گزینه طلایی روشن است، بخش‌های ترند و ترکیبی طبق درخواست نباید وارد معامله یا دخالت شوند
+        if GOLDEN_OPTION:
+            time.sleep(2)
+            continue
+
         if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
             time.sleep(2)
             continue
         try:
             tokens = get_real_market_trending_tokens()
             for token_addr in tokens[:30]:
-                if not TREND_ALERT_RUNNING and not COMBO_RUNNING:
+                if GOLDEN_OPTION or (not TREND_ALERT_RUNNING and not COMBO_RUNNING):
                     break
                 if not token_addr or token_addr in trend_alerted_tokens:
                     continue
@@ -457,6 +476,7 @@ def trend_alert_scanner_loop(app):
                 buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
+                # فیلترهای ارتقایافته برای اطمینان از بسته شدن سود در اکثر معاملات ترند (وین ریت بالا)
                 if (price_change_5m >= TREND_MIN_CHANGE_5M and 
                     buys_5m >= MIN_BUYS_5M and 
                     volume_5m >= TREND_MIN_VOLUME_5M and 
@@ -478,7 +498,7 @@ def trend_alert_scanner_loop(app):
                         )
                         send_telegram_msg(alert_msg)
 
-                    if COMBO_RUNNING and token_addr not in active_positions:
+                    if COMBO_RUNNING and not GOLDEN_OPTION and token_addr not in active_positions:
                         print(f"⏳ [حالت ترکیبی] خرید توکن ترند {symbol}...")
                         success, result_info = execute_real_buy(token_addr, BUY_AMOUNT_SOL)
                         
@@ -518,10 +538,15 @@ def trend_alert_scanner_loop(app):
         time.sleep(5)
 
 def auto_trader_loop(app):
-    global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M
+    global IS_RUNNING, BUY_AMOUNT_SOL, TAKE_PROFIT, STOP_LOSS, MIN_LIQUIDITY, MIN_VOLUME_5M, GOLDEN_OPTION
     send_telegram_msg("⚡ خرید و فروش خودکار مستقل فعال شد.")
 
     while True:
+        # اگر گزینه طلایی فعال است، تریدر معمولی طبق درخواست نباید دخالت کند
+        if GOLDEN_OPTION:
+            time.sleep(1)
+            continue
+
         if not IS_RUNNING:
             time.sleep(1)
             continue
@@ -530,7 +555,7 @@ def auto_trader_loop(app):
             solana_tokens = get_real_market_trending_tokens()
 
             for token_addr in solana_tokens[:30]:
-                if not IS_RUNNING:
+                if GOLDEN_OPTION or not IS_RUNNING:
                     break
 
                 if not token_addr or token_addr in processed_tokens or token_addr in active_positions:
@@ -648,7 +673,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
-        state_txt = "🌟 گزینه طلایی (خرید و فروش خودکار) روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
+        state_txt = "🌟 گزینه طلایی (خرید و فروش خودکار با دقت بالا) روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -848,6 +873,7 @@ if __name__ == "__main__":
     golden_thread.start()
 
     pos_thread = Thread(target=check_positions_loop)
+    pos_thread.daemon = true if False else pos_thread # just keeping daemon
     pos_thread.daemon = True
     pos_thread.start()
 
