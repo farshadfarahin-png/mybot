@@ -103,27 +103,29 @@ def get_sol_balance():
         return 0.0
 
 def get_token_balance(token_mint):
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                WALLET_PUBKEY,
-                {"mint": token_mint},
-                {"encoding": "jsonParsed"}
-            ]
-        }
-        res = requests.post(RPC_URL, json=payload, timeout=8).json()
-        accounts = res.get("result", {}).get("value", [])
-        if accounts:
-            for acc in accounts:
-                info = acc["account"]["data"]["parsed"]["info"]
-                amount = int(info["tokenAmount"]["amount"])
-                if amount > 0:
-                    return amount
-    except Exception as e:
-        print(f"⚠️ خطا در استعلام موجودی توکن: {e}")
+    for attempt in range(3):
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    WALLET_PUBKEY,
+                    {"mint": token_mint},
+                    {"encoding": "jsonParsed"}
+                ]
+            }
+            res = requests.post(RPC_URL, json=payload, timeout=8).json()
+            accounts = res.get("result", {}).get("value", [])
+            if accounts:
+                for acc in accounts:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    amount = int(info["tokenAmount"]["amount"])
+                    if amount > 0:
+                        return amount
+        except Exception as e:
+            print(f"⚠️ خطا در استعلام موجودی توکن (تلاش {attempt+1}): {e}")
+        time.sleep(1.5)
     return 0
 
 def is_token_safe(token_mint, strict=False):
@@ -348,7 +350,7 @@ def check_positions_loop():
                             if token_balance > 0:
                                 success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             else:
-                                success, sell_res_info = False, "موجودی یافت نشد"
+                                success, sell_res_info = False, "موجودی در ولت یافت نشد (تأخیر شبکه یا عدم واریز)"
 
                             sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
