@@ -637,37 +637,59 @@ def run_web():
 def get_main_keyboard():
     golden_status = "🚀 گزینه طلایی: روشن" if GOLDEN_OPTION else "⭐ گزینه طلایی: خاموش"
     combo_status = "🚨 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
-    trader_status = "🔥 خرید و فروش: روشن" if IS_RUNNING else "🔴 خرید و فروش: خاموش"
+    
+    # دکمه روشن/خاموش خرید و فروش متحرک و آتشین 🔥 (حرکت و افکت سوختن با ایموجی‌های آتش)
+    if IS_RUNNING:
+        trader_status = "🔥💥 خرید و فروش: در حال سوختن (روشن)"
+    else:
+        trader_status = "🔥 خرید و فروش: خاموش"
+
     trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
     
-    # تفکیک دقیق مقادیر هر بخش برای نمایش روی دکمه‌های مجزای خودشون
     vol_display = (
         GOLDEN_BUY_AMOUNT_SOL if GOLDEN_OPTION else 
         (ALERT_BUY_AMOUNT_SOL if (COMBO_RUNNING or TREND_ALERT_RUNNING) else FIRE_BUY_AMOUNT_SOL)
     )
 
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
-        [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
-        [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
-         InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
-        [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-         InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
-        
-        # حجم کلی معامله فعال
-        [InlineKeyboardButton(f"⚙️ حجم معامله: {vol_display} SOL", callback_data="menu_volume")],
-        
-        # دکمه‌های بالایی مختص خرید و فروش (🔥)
-        [InlineKeyboardButton(f"🔥 [سیگنال] تارگت: +{FIRE_TAKE_PROFIT}%", callback_data="menu_tp"),
-         InlineKeyboardButton(f"🔥 [سیگنال] ضرر: {FIRE_STOP_LOSS}%", callback_data="menu_sl")],
-        [InlineKeyboardButton(f"🔥 نقدینگی: ${FIRE_MIN_LIQUIDITY}", callback_data="menu_liq"),
-         InlineKeyboardButton(f"🔥 حجم ۵دقیقه: ${FIRE_MIN_VOLUME_5M}", callback_data="menu_vol5m")],
-        [InlineKeyboardButton(f"🔥 رشد ۵دقیقه: +{FIRE_MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
-        
-        # دکمه‌های پایینی مختص ترند و ترکیبی (🚨)
-        [InlineKeyboardButton(f"🚨 [ترند] سود: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
-         InlineKeyboardButton(f"🚨 [ترند] ضرر: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
-    ])
+    if GOLDEN_OPTION:
+        # منوی گزینه طلایی کاملاً با موشک 🚀
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
+            [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
+            [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
+             InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
+            [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
+             InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
+            [InlineKeyboardButton(f"⚙️ حجم معامله (طلایی): {vol_display} SOL", callback_data="menu_volume")],
+            [InlineKeyboardButton(f"🚀 [طلایی] تارگت: +{GOLDEN_TAKE_PROFIT}%", callback_data="menu_tp"),
+             InlineKeyboardButton(f"🚀 [طلایی] ضرر: {GOLDEN_STOP_LOSS}%", callback_data="menu_sl")],
+            [InlineKeyboardButton(f"🚀 نقدینگی: ${GOLDEN_MIN_LIQUIDITY}", callback_data="menu_liq"),
+             InlineKeyboardButton(f"🚀 حجم ۵دقیقه: ${GOLDEN_MIN_VOLUME_5M}", callback_data="menu_vol5m")],
+            [InlineKeyboardButton(f"🚀 رشد ۵دقیقه: +{GOLDEN_MIN_CHANGE_5M}%", callback_data="menu_chg5m")]
+        ])
+    else:
+        # منوی اصلی: دکمه خرید و فروش آتشین + تنظیمات سیگنال معمولی بدون آیکون‌های اضافی + ترند فقط با سود و ضرر آژیر 🚨
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
+            [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
+            [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
+             InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
+            [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
+             InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
+            
+            [InlineKeyboardButton(f"⚙️ حجم معامله: {vol_display} SOL", callback_data="menu_volume")],
+            
+            # دکمه‌های خرید و فروش معمولی (بدون ایموجی اضافی روی متن کلیدها طبق درخواست)
+            [InlineKeyboardButton(f"[سیگنال] تارگت: +{FIRE_TAKE_PROFIT}%", callback_data="menu_tp"),
+             InlineKeyboardButton(f"[سیگنال] ضرر: {FIRE_STOP_LOSS}%", callback_data="menu_sl")],
+            [InlineKeyboardButton(f"نقدینگی: ${FIRE_MIN_LIQUIDITY}", callback_data="menu_liq"),
+             InlineKeyboardButton(f"حجم ۵دقیقه: ${FIRE_MIN_VOLUME_5M}", callback_data="menu_vol5m")],
+            [InlineKeyboardButton(f"رشد ۵دقیقه: +{FIRE_MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
+            
+            # بخش ترند و ترکیبی (فقط جزییات سود و ضرر با آژیر 🚨)
+            [InlineKeyboardButton(f"🚨 [ترند] سود: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
+             InlineKeyboardButton(f"🚨 [ترند] ضرر: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
+        ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
@@ -702,7 +724,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "toggle_trader":
         IS_RUNNING = not IS_RUNNING
-        state_txt = "🔥 خرید و فروش خودکار (حالت آتشین) روشن شد." if IS_RUNNING else "🔴 خرید و فروش خودکار خاموش شد."
+        state_txt = "🔥💥 خرید و فروش خودکار (حالت سوزان و فعال) روشن شد." if IS_RUNNING else "🔥 خرید و فروش خودکار خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -763,7 +785,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_tp":
         AWAITING_STATE = "fire_tp"
         cur_val = FIRE_TAKE_PROFIT
-        prefix = "🔥 [خرید و فروش]"
+        prefix = "[خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
@@ -774,7 +796,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_sl":
         AWAITING_STATE = "fire_sl"
         cur_val = FIRE_STOP_LOSS
-        prefix = "🔥 [خرید و فروش]"
+        prefix = "[خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
@@ -785,7 +807,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_liq":
         AWAITING_STATE = "fire_liq"
         cur_val = FIRE_MIN_LIQUIDITY
-        prefix = "🔥 [خرید و فروش]"
+        prefix = "[خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
@@ -796,7 +818,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_vol5m":
         AWAITING_STATE = "fire_vol5m"
         cur_val = FIRE_MIN_VOLUME_5M
-        prefix = "🔥 [خرید و فروش]"
+        prefix = "[خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
@@ -807,7 +829,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_chg5m":
         AWAITING_STATE = "fire_chg5m"
         cur_val = FIRE_MIN_PRICE_CHANGE_5M
-        prefix = "🔥 [خرید و فروش]"
+        prefix = "[خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
