@@ -28,10 +28,10 @@ ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8kn
 SYS_PROG_ID = Pubkey.from_string("11111111111111111111111111111111")
 RENT_SYSVAR = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
-IS_RUNNING = False          # خرید و فروش خودکار مستقل
-TREND_ALERT_RUNNING = False # اعلان ترند مستقل (فقط هشدار)
-COMBO_RUNNING = False       # حالت ترکیبی (ترندهای انفجاری + خرید واقعی + هشدار)
-GOLDEN_OPTION = False       # گزینه طلایی (موتور مستقل خرید و فروش با دقت بالا)
+IS_RUNNING = False          
+TREND_ALERT_RUNNING = False 
+COMBO_RUNNING = False       
+GOLDEN_OPTION = False       
 
 # تنظیمات اختصاصی بخش خرید و فروش (آتیش 🔥)
 FIRE_BUY_AMOUNT_SOL = 0.005
@@ -640,37 +640,11 @@ def get_main_keyboard():
     trader_status = "🔥 خرید و فروش: روشن" if IS_RUNNING else "🔴 خرید و فروش: خاموش"
     trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
     
-    # تعیین اینکه کدام تنظیمات (آتیش 🔥، آژیر 🚨، یا موشک 🚀) روی دکمه‌ها نمایش داده شود
-    if GOLDEN_OPTION:
-        cur_emoji = "🚀"
-        cur_vol = GOLDEN_BUY_AMOUNT_SOL
-        cur_tp = GOLDEN_TAKE_PROFIT
-        cur_sl = GOLDEN_STOP_LOSS
-        cur_liq = GOLDEN_MIN_LIQUIDITY
-        cur_vol5m = GOLDEN_MIN_VOLUME_5M
-        cur_chg5m = GOLDEN_MIN_CHANGE_5M
-        trend_tp = GOLDEN_TAKE_PROFIT
-        trend_sl = GOLDEN_STOP_LOSS
-    elif COMBO_RUNNING or TREND_ALERT_RUNNING:
-        cur_emoji = "🚨"
-        cur_vol = ALERT_BUY_AMOUNT_SOL
-        cur_tp = TREND_TAKE_PROFIT
-        cur_sl = TREND_STOP_LOSS
-        cur_liq = TREND_MIN_LIQUIDITY
-        cur_vol5m = TREND_MIN_VOLUME_5M
-        cur_chg5m = TREND_MIN_CHANGE_5M
-        trend_tp = TREND_TAKE_PROFIT
-        trend_sl = TREND_STOP_LOSS
-    else:
-        cur_emoji = "🔥"
-        cur_vol = FIRE_BUY_AMOUNT_SOL
-        cur_tp = FIRE_TAKE_PROFIT
-        cur_sl = FIRE_STOP_LOSS
-        cur_liq = FIRE_MIN_LIQUIDITY
-        cur_vol5m = FIRE_MIN_VOLUME_5M
-        cur_chg5m = FIRE_MIN_PRICE_CHANGE_5M
-        trend_tp = TREND_TAKE_PROFIT
-        trend_sl = TREND_STOP_LOSS
+    # تفکیک دقیق مقادیر هر بخش برای نمایش روی دکمه‌های مجزای خودشون
+    vol_display = (
+        GOLDEN_BUY_AMOUNT_SOL if GOLDEN_OPTION else 
+        (ALERT_BUY_AMOUNT_SOL if (COMBO_RUNNING or TREND_ALERT_RUNNING) else FIRE_BUY_AMOUNT_SOL)
+    )
 
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
@@ -680,16 +654,19 @@ def get_main_keyboard():
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
         
-        [InlineKeyboardButton(f"⚙️ حجم معامله: {cur_vol} SOL", callback_data="menu_volume")],
+        # حجم کلی معامله فعال
+        [InlineKeyboardButton(f"⚙️ حجم معامله: {vol_display} SOL", callback_data="menu_volume")],
         
-        [InlineKeyboardButton(f"{cur_emoji} [سیگنال] تارگت: +{cur_tp}%", callback_data="menu_tp"),
-         InlineKeyboardButton(f"{cur_emoji} [سیگنال] ضرر: {cur_sl}%", callback_data="menu_sl")],
-        [InlineKeyboardButton(f"{cur_emoji} نقدینگی: ${cur_liq}", callback_data="menu_liq"),
-         InlineKeyboardButton(f"{cur_emoji} حجم ۵دقیقه: ${cur_vol5m}", callback_data="menu_vol5m")],
-        [InlineKeyboardButton(f"{cur_emoji} رشد ۵دقیقه: +{cur_chg5m}%", callback_data="menu_chg5m")],
+        # دکمه‌های بالایی مختص خرید و فروش (🔥)
+        [InlineKeyboardButton(f"🔥 [سیگنال] تارگت: +{FIRE_TAKE_PROFIT}%", callback_data="menu_tp"),
+         InlineKeyboardButton(f"🔥 [سیگنال] ضرر: {FIRE_STOP_LOSS}%", callback_data="menu_sl")],
+        [InlineKeyboardButton(f"🔥 نقدینگی: ${FIRE_MIN_LIQUIDITY}", callback_data="menu_liq"),
+         InlineKeyboardButton(f"🔥 حجم ۵دقیقه: ${FIRE_MIN_VOLUME_5M}", callback_data="menu_vol5m")],
+        [InlineKeyboardButton(f"🔥 رشد ۵دقیقه: +{FIRE_MIN_PRICE_CHANGE_5M}%", callback_data="menu_chg5m")],
         
-        [InlineKeyboardButton(f"{cur_emoji} [ترند] سود: +{trend_tp}%", callback_data="menu_trend_tp"),
-         InlineKeyboardButton(f"{cur_emoji} [ترند] ضرر: {trend_sl}%", callback_data="menu_trend_sl")]
+        # دکمه‌های پایینی مختص ترند و ترکیبی (🚨)
+        [InlineKeyboardButton(f"🚨 [ترند] سود: +{TREND_TAKE_PROFIT}%", callback_data="menu_trend_tp"),
+         InlineKeyboardButton(f"🚨 [ترند] ضرر: {TREND_STOP_LOSS}%", callback_data="menu_trend_sl")]
     ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -784,18 +761,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg("لطفاً حجم جدید را تایپ کنید:")
 
     elif query.data == "menu_tp":
-        if GOLDEN_OPTION:
-            AWAITING_STATE = "golden_tp"
-            cur_val = GOLDEN_TAKE_PROFIT
-            prefix = "🚀 [گزینه طلایی]"
-        elif COMBO_RUNNING or TREND_ALERT_RUNNING:
-            AWAITING_STATE = "trend_tp_val"
-            cur_val = TREND_TAKE_PROFIT
-            prefix = "🚨 [ترند/ترکیبی]"
-        else:
-            AWAITING_STATE = "fire_tp"
-            cur_val = FIRE_TAKE_PROFIT
-            prefix = "🔥 [خرید و فروش]"
+        AWAITING_STATE = "fire_tp"
+        cur_val = FIRE_TAKE_PROFIT
+        prefix = "🔥 [خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
@@ -804,38 +772,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
 
     elif query.data == "menu_sl":
-        if GOLDEN_OPTION:
-            AWAITING_STATE = "golden_sl"
-            cur_val = GOLDEN_STOP_LOSS
-            prefix = "🚀 [گزینه طلایی]"
-        elif COMBO_RUNNING or TREND_ALERT_RUNNING:
-            AWAITING_STATE = "trend_sl_val"
-            cur_val = TREND_STOP_LOSS
-            prefix = "🚨 [ترند/ترکیبی]"
-        else:
-            AWAITING_STATE = "fire_sl"
-            cur_val = FIRE_STOP_LOSS
-            prefix = "🔥 [خرید و فروش]"
+        AWAITING_STATE = "fire_sl"
+        cur_val = FIRE_STOP_LOSS
+        prefix = "🔥 [خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
-            await query.edit_message_text(f"{prefix} حد ضرر فعلی: {cur_val}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 5-):", reply_markup=cancel_kb)
+            await query.edit_message_text(f"{prefix} حد ضرر فعلی: {cur_val}%\nلطفاً مقدار جدید را تایپ کنید (مثلاً 12-):", reply_markup=cancel_kb)
         except Exception:
             send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
 
     elif query.data == "menu_liq":
-        if GOLDEN_OPTION:
-            AWAITING_STATE = "golden_liq"
-            cur_val = GOLDEN_MIN_LIQUIDITY
-            prefix = "🚀 [گزینه طلایی]"
-        elif COMBO_RUNNING or TREND_ALERT_RUNNING:
-            AWAITING_STATE = "trend_liq"
-            cur_val = TREND_MIN_LIQUIDITY
-            prefix = "🚨 [ترند/ترکیبی]"
-        else:
-            AWAITING_STATE = "fire_liq"
-            cur_val = FIRE_MIN_LIQUIDITY
-            prefix = "🔥 [خرید و فروش]"
+        AWAITING_STATE = "fire_liq"
+        cur_val = FIRE_MIN_LIQUIDITY
+        prefix = "🔥 [خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
@@ -844,18 +794,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
 
     elif query.data == "menu_vol5m":
-        if GOLDEN_OPTION:
-            AWAITING_STATE = "golden_vol5m"
-            cur_val = GOLDEN_MIN_VOLUME_5M
-            prefix = "🚀 [گزینه طلایی]"
-        elif COMBO_RUNNING or TREND_ALERT_RUNNING:
-            AWAITING_STATE = "trend_vol5m"
-            cur_val = TREND_MIN_VOLUME_5M
-            prefix = "🚨 [ترند/ترکیبی]"
-        else:
-            AWAITING_STATE = "fire_vol5m"
-            cur_val = FIRE_MIN_VOLUME_5M
-            prefix = "🔥 [خرید و فروش]"
+        AWAITING_STATE = "fire_vol5m"
+        cur_val = FIRE_MIN_VOLUME_5M
+        prefix = "🔥 [خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
@@ -864,18 +805,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
 
     elif query.data == "menu_chg5m":
-        if GOLDEN_OPTION:
-            AWAITING_STATE = "golden_chg5m"
-            cur_val = GOLDEN_MIN_CHANGE_5M
-            prefix = "🚀 [گزینه طلایی]"
-        elif COMBO_RUNNING or TREND_ALERT_RUNNING:
-            AWAITING_STATE = "trend_chg5m"
-            cur_val = TREND_MIN_CHANGE_5M
-            prefix = "🚨 [ترند/ترکیبی]"
-        else:
-            AWAITING_STATE = "fire_chg5m"
-            cur_val = FIRE_MIN_PRICE_CHANGE_5M
-            prefix = "🔥 [خرید و فروش]"
+        AWAITING_STATE = "fire_chg5m"
+        cur_val = FIRE_MIN_PRICE_CHANGE_5M
+        prefix = "🔥 [خرید و فروش]"
 
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
         try:
