@@ -185,15 +185,15 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    # مسیرهای کوت چندگانه برای جلوگیری از خطای توکن‌های پامپ‌فان (مشابه معماری ربات‌های ترید حرفه‌ای)
+    # مدیریت مسیرهای کوت چندگانه شامل حالت پامپ‌فان و صرافی‌های دکس
     quote_endpoints = [
-        f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=4000&onlyDirectRoutes=false",
-        f"https://lite.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=4000&onlyDirectRoutes=false"
+        f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=5000&onlyDirectRoutes=false",
+        f"https://lite.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=5000&onlyDirectRoutes=false"
     ]
     
     quote_res = None
     for url in quote_endpoints:
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 res = requests.get(url, headers=headers, timeout=5)
                 if res.status_code == 200:
@@ -215,7 +215,7 @@ def execute_real_buy(token_mint, amount_sol):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 2000000
+        "prioritizationFeeLamports": 3000000
     }
     
     swap_res = None
@@ -225,7 +225,7 @@ def execute_real_buy(token_mint, amount_sol):
     ]
     
     for url in swap_endpoints:
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 res = requests.post(url, json=swap_payload, headers=headers, timeout=6)
                 if res.status_code == 200:
@@ -279,13 +279,13 @@ def execute_real_sell(token_mint, token_amount):
     }
 
     quote_endpoints = [
-        f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=4500&onlyDirectRoutes=false",
-        f"https://lite.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=4500&onlyDirectRoutes=false"
+        f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=5000&onlyDirectRoutes=false",
+        f"https://lite.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=5000&onlyDirectRoutes=false"
     ]
     
     quote_res = None
     for url in quote_endpoints:
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 res = requests.get(url, headers=headers, timeout=5)
                 if res.status_code == 200:
@@ -307,7 +307,7 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 2000000
+        "prioritizationFeeLamports": 3000000
     }
     
     swap_res = None
@@ -317,7 +317,7 @@ def execute_real_sell(token_mint, token_amount):
     ]
     
     for url in swap_endpoints:
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 res = requests.post(url, json=swap_payload, headers=headers, timeout=6)
                 if res.status_code == 200:
