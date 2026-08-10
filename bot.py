@@ -185,46 +185,59 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    # استفاده از نسخه ۶ ژوپیتر با فعال‌سازی تمام مسیرهای نقدینگی و اسلیپیج بهینه برای خرید آنی
-    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=2000&onlyDirectRoutes=false"
+    # لیست اندپوینت‌های جایگزین و پشتیبان ژوپیتر برای دور زدن خطای کوت توکن‌های جدید
+    quote_endpoints = [
+        f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=3000&onlyDirectRoutes=false",
+        f"https://lite.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=3000&onlyDirectRoutes=false"
+    ]
     
     quote_res = None
-    for attempt in range(4):
-        try:
-            res = requests.get(quote_url, headers=headers, timeout=6)
-            if res.status_code == 200:
-                data = res.json()
-                if "error" not in data:
-                    quote_res = data
-                    break
-        except Exception:
-            pass
-        time.sleep(0.4)
+    for url in quote_endpoints:
+        for attempt in range(3):
+            try:
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200:
+                    data = res.json()
+                    if "error" not in data and "outAmount" in data:
+                        quote_res = data
+                        break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        if quote_res:
+            break
 
     if not quote_res:
         return False, "خطای دریافت کوت خرید"
 
-    # اعمال پکیج سواپ با بالاترین اولویت کارمزد (شبیه به ربات‌های تروجان) برای ثبت قطعی در بلاک
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 1000000
+        "prioritizationFeeLamports": 1500000
     }
     
     swap_res = None
-    for attempt in range(4):
-        try:
-            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                if "swapTransaction" in data:
-                    swap_res = data
-                    break
-        except Exception:
-            pass
-        time.sleep(0.4)
+    swap_endpoints = [
+        "https://quote-api.jup.ag/v6/swap",
+        "https://lite.jup.ag/v6/swap"
+    ]
+    
+    for url in swap_endpoints:
+        for attempt in range(3):
+            try:
+                res = requests.post(url, json=swap_payload, headers=headers, timeout=6)
+                if res.status_code == 200:
+                    data = res.json()
+                    if "swapTransaction" in data:
+                        swap_res = data
+                        break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        if swap_res:
+            break
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "ساخت تراکنش خرید رد شد"
@@ -265,20 +278,26 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=2500&onlyDirectRoutes=false"
+    quote_endpoints = [
+        f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=3500&onlyDirectRoutes=false",
+        f"https://lite.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=3500&onlyDirectRoutes=false"
+    ]
     
     quote_res = None
-    for attempt in range(4):
-        try:
-            res = requests.get(quote_url, headers=headers, timeout=6)
-            if res.status_code == 200:
-                data = res.json()
-                if "error" not in data:
-                    quote_res = data
-                    break
-        except Exception:
-            pass
-        time.sleep(0.4)
+    for url in quote_endpoints:
+        for attempt in range(3):
+            try:
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200:
+                    data = res.json()
+                    if "error" not in data and "outAmount" in data:
+                        quote_res = data
+                        break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        if quote_res:
+            break
 
     if not quote_res:
         return False, "خطای دریافت کوت فروش"
@@ -288,21 +307,29 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 1000000
+        "prioritizationFeeLamports": 1500000
     }
     
     swap_res = None
-    for attempt in range(4):
-        try:
-            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                if "swapTransaction" in data:
-                    swap_res = data
-                    break
-        except Exception:
-            pass
-        time.sleep(0.4)
+    swap_endpoints = [
+        "https://quote-api.jup.ag/v6/swap",
+        "https://lite.jup.ag/v6/swap"
+    ]
+    
+    for url in swap_endpoints:
+        for attempt in range(3):
+            try:
+                res = requests.post(url, json=swap_payload, headers=headers, timeout=6)
+                if res.status_code == 200:
+                    data = res.json()
+                    if "swapTransaction" in data:
+                        swap_res = data
+                        break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        if swap_res:
+            break
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "ساخت تراکنش فروش رد شد"
