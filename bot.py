@@ -185,10 +185,10 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    # لیست اندپوینت‌های جایگزین و پشتیبان ژوپیتر برای دور زدن خطای کوت توکن‌های جدید
+    # مسیرهای کوت چندگانه برای جلوگیری از خطای توکن‌های پامپ‌فان (مشابه معماری ربات‌های ترید حرفه‌ای)
     quote_endpoints = [
-        f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=3000&onlyDirectRoutes=false",
-        f"https://lite.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=3000&onlyDirectRoutes=false"
+        f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=4000&onlyDirectRoutes=false",
+        f"https://lite.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=4000&onlyDirectRoutes=false"
     ]
     
     quote_res = None
@@ -215,7 +215,7 @@ def execute_real_buy(token_mint, amount_sol):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 1500000
+        "prioritizationFeeLamports": 2000000
     }
     
     swap_res = None
@@ -279,8 +279,8 @@ def execute_real_sell(token_mint, token_amount):
     }
 
     quote_endpoints = [
-        f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=3500&onlyDirectRoutes=false",
-        f"https://lite.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=3500&onlyDirectRoutes=false"
+        f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=4500&onlyDirectRoutes=false",
+        f"https://lite.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=4500&onlyDirectRoutes=false"
     ]
     
     quote_res = None
@@ -307,7 +307,7 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 1500000
+        "prioritizationFeeLamports": 2000000
     }
     
     swap_res = None
