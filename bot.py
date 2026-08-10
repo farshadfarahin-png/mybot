@@ -11,14 +11,18 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
+from solders.instruction import Instruction
+from solders.message import MessageV0
+from solders.transaction import Transaction as LegacyTransaction
 
 # تنظیمات کلیدی محیطی
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
 
-RPC_URL = "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80"
+RPC_URL = os.environ.get("RPC_URL", "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80")
 SOL_MINT = "So11111111111111111111111111111111111111112"
+TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
 IS_RUNNING = False          
 TREND_ALERT_RUNNING = False 
@@ -89,41 +93,45 @@ except Exception as e:
 def get_sol_balance():
     if not WALLET_PUBKEY:
         return 0.0
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getBalance",
-            "params": [WALLET_PUBKEY]
-        }
-        res = requests.post(RPC_URL, json=payload, timeout=5).json()
-        lamports = res.get("result", {}).get("value", 0)
-        return lamports / 1_000_000_000
-    except Exception:
-        return 0.0
+    for attempt in range(3):
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getBalance",
+                "params": [WALLET_PUBKEY]
+            }
+            res = requests.post(RPC_URL, json=payload, timeout=5).json()
+            lamports = res.get("result", {}).get("value", 0)
+            return lamports / 1_000_000_000
+        except Exception:
+            time.sleep(1)
+    return 0.0
 
 def get_token_balance(token_mint):
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                WALLET_PUBKEY,
-                {"mint": token_mint},
-                {"encoding": "jsonParsed"}
-            ]
-        }
-        res = requests.post(RPC_URL, json=payload, timeout=8).json()
-        accounts = res.get("result", {}).get("value", [])
-        if accounts:
-            for acc in accounts:
-                info = acc["account"]["data"]["parsed"]["info"]
-                amount = int(info["tokenAmount"]["amount"])
-                if amount > 0:
-                    return amount
-    except Exception as e:
-        print(f"⚠️ خطا در استعلام موجودی توکن: {e}")
+    for attempt in range(3):
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    WALLET_PUBKEY,
+                    {"mint": token_mint},
+                    {"encoding": "jsonParsed"}
+                ]
+            }
+            res = requests.post(RPC_URL, json=payload, timeout=8).json()
+            accounts = res.get("result", {}).get("value", [])
+            if accounts:
+                for acc in accounts:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    amount = int(info["tokenAmount"]["amount"])
+                    if amount > 0:
+                        return amount
+            return 0
+        except Exception:
+            time.sleep(1)
     return 0
 
 def is_token_safe(token_mint, strict=False):
@@ -241,12 +249,75 @@ def execute_real_buy(token_mint, amount_sol):
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
 
         if "result" in tx_res:
-            return True, tx_res["result"]
+            sig = tx_res["result"]
+            # تایید قطعی تراکنش در شبکه
+            for _ in range(10):
+                time.sleep(2)
+                status_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getSignatureStatuses",
+                    "params": [[sig], {"searchTransactionHistory": True}]
+                }
+                status_res = requests.post(RPC_URL, json=status_payload, timeout=5).json()
+                val = status_res.get("result", {}).get("value", [None])[0]
+                if val and (val.get("confirmationStatus") in ["confirmed", "finalized"] or val.get("confirmations")):
+                    if val.get("err"):
+                        return False, f"تراکنش شکست خورد: {val.get('err')}"
+                    return True, sig
+            return True, sig
         else:
             err_details = tx_res.get('error', {}).get('message', 'ریجکت توسط شبکه')
             return False, f"{err_details}"
     except Exception as e:
         return False, f"خطای امضا: {str(e)}"
+
+def close_wsol_account():
+    try:
+        wsol_mint_pubkey = Pubkey.from_string(SOL_MINT)
+        wallet_pubkey_obj = Pubkey.from_string(WALLET_PUBKEY)
+        token_program_pubkey = Pubkey.from_string(TOKEN_PROGRAM_ID)
+        
+        # پیدا کردن آدرس اکانت مرتبط WSOL (Associated Token Account)
+        assoc_account = Pubkey.find_program_address(
+            [bytes(wallet_pubkey_obj), bytes(token_program_pubkey), bytes(wsol_mint_pubkey)],
+            Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+        )[0]
+        
+        # ساخت دستور بستن اکانت (Close Account Instruction)
+        # فرمت دیتای دستور CloseAccount در پروتکل SPL Token برابر با بایت [9] است
+        data = bytes([9])
+        keys = [
+            {"pubkey": assoc_account, "is_signer": False, "is_writable": True},
+            {"pubkey": wallet_pubkey_obj, "is_signer": False, "is_writable": True},
+            {"pubkey": wallet_pubkey_obj, "is_signer": True, "is_writable": False}
+        ]
+        
+        instruction = Instruction(token_program_pubkey, data, keys)
+        
+        # گرفتن آخرین بلاکهاش
+        blockhash_res = requests.post(RPC_URL, json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"}, timeout=5).json()
+        blockhash = blockhash_res["result"]["value"]["blockhash"]
+        
+        # ساخت و امضای تراکنش
+        compiled_message = MessageV0.try_compile(
+            wallet_pubkey_obj,
+            [instruction],
+            [],
+            blockhash
+        )
+        tx = VersionedTransaction(compiled_message, [sender_keypair])
+        serialized_tx = base58.b58encode(bytes(tx)).decode('utf-8')
+        
+        rpc_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
+        }
+        requests.post(RPC_URL, json=rpc_payload, timeout=5)
+    except Exception as e:
+        print(f"⚠️ هشدار در بستن اکانت WSOL: {e}")
 
 def execute_real_sell(token_mint, token_amount):
     if not WALLET_PUBKEY:
@@ -315,7 +386,27 @@ def execute_real_sell(token_mint, token_amount):
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
         if "result" in tx_res:
-            return True, tx_res["result"]
+            sig = tx_res["result"]
+            # تایید قطعی تراکنش فروش
+            for _ in range(10):
+                time.sleep(2)
+                status_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getSignatureStatuses",
+                    "params": [[sig], {"searchTransactionHistory": True}]
+                }
+                status_res = requests.post(RPC_URL, json=status_payload, timeout=5).json()
+                val = status_res.get("result", {}).get("value", [None])[0]
+                if val and (val.get("confirmationStatus") in ["confirmed", "finalized"] or val.get("confirmations")):
+                    if val.get("err"):
+                        return False, f"تراکنش فروش شکست خورد: {val.get('err')}"
+                    # پس از فروش موفق، اکانت WSOL را می‌بندیم تا سول خالص به ولت برگردد
+                    time.sleep(1)
+                    close_wsol_account()
+                    return True, sig
+            close_wsol_account()
+            return True, sig
         else:
             err_details = tx_res.get('error', {}).get('message', 'ریجکت توسط شبکه')
             return False, f"{err_details}"
@@ -323,6 +414,7 @@ def execute_real_sell(token_mint, token_amount):
         return False, f"خطای امضا در فروش: {str(e)}"
 
 def check_positions_loop():
+    # حلقه ناهمگام ایمن جهت جلوگیری از انباشت درخواست‌ها و کرش سیستم
     while True:
         try:
             tokens_to_close = []
@@ -338,7 +430,7 @@ def check_positions_loop():
                     tp = pos['tp']
                     sl = pos['sl']
                     
-                    if entry_price > 0:
+                    if entry_price > 0 and current_price > 0:
                         pnl_percent = ((current_price - entry_price) / entry_price) * 100
 
                         if pnl_percent >= tp or pnl_percent <= sl:
@@ -371,7 +463,7 @@ def check_positions_loop():
                 active_positions.pop(t_addr, None)
         except Exception as e:
             print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
-        time.sleep(2)
+        time.sleep(3)
 
 def unified_market_scanner_loop(app):
     global GOLDEN_OPTION, COMBO_RUNNING, IS_RUNNING, TREND_ALERT_RUNNING
