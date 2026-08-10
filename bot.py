@@ -185,7 +185,8 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=1500&onlyDirectRoutes=false"
+    # استفاده از نسخه ۶ ژوپیتر با فعال‌سازی تمام مسیرهای نقدینگی و اسلیپیج بهینه برای خرید آنی
+    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=2000&onlyDirectRoutes=false"
     
     quote_res = None
     for attempt in range(4):
@@ -196,23 +197,20 @@ def execute_real_buy(token_mint, amount_sol):
                 if "error" not in data:
                     quote_res = data
                     break
-                else:
-                    print(f"⚠️ خطای کوت ژوپیتر: {data.get('error')}")
-            else:
-                print(f"⚠️ کد وضعیت کوت: {res.status_code}, متن: {res.text}")
-        except Exception as e:
-            print(f"⚠️ استثنا در دریافت کوت خرید (تلاش {attempt+1}): {e}")
-        time.sleep(0.5)
+        except Exception:
+            pass
+        time.sleep(0.4)
 
     if not quote_res:
         return False, "خطای دریافت کوت خرید"
 
+    # اعمال پکیج سواپ با بالاترین اولویت کارمزد (شبیه به ربات‌های تروجان) برای ثبت قطعی در بلاک
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 600000
+        "prioritizationFeeLamports": 1000000
     }
     
     swap_res = None
@@ -224,13 +222,9 @@ def execute_real_buy(token_mint, amount_sol):
                 if "swapTransaction" in data:
                     swap_res = data
                     break
-                else:
-                    print(f"⚠️ پاسخ سواپ فاقد تراکنش: {data}")
-            else:
-                print(f"⚠️ خطای سرور سواپ: {res.status_code} - {res.text}")
-        except Exception as e:
-            print(f"⚠️ استثنا در ساخت سواپ (تلاش {attempt+1}): {e}")
-        time.sleep(0.5)
+        except Exception:
+            pass
+        time.sleep(0.4)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "ساخت تراکنش خرید رد شد"
@@ -271,7 +265,7 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=2000&onlyDirectRoutes=false"
+    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=2500&onlyDirectRoutes=false"
     
     quote_res = None
     for attempt in range(4):
@@ -284,7 +278,7 @@ def execute_real_sell(token_mint, token_amount):
                     break
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.4)
 
     if not quote_res:
         return False, "خطای دریافت کوت فروش"
@@ -294,7 +288,7 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 600000
+        "prioritizationFeeLamports": 1000000
     }
     
     swap_res = None
@@ -308,7 +302,7 @@ def execute_real_sell(token_mint, token_amount):
                     break
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.4)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "ساخت تراکنش فروش رد شد"
