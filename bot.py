@@ -180,7 +180,7 @@ def execute_real_buy(token_mint, amount_sol):
         return False, "کلید عمومی ولت نامعتبر است"
 
     current_sol = get_sol_balance()
-    if current_sol < (amount_sol + 0.002):
+    if current_sol < (amount_sol + 0.003):
         return False, f"موجودی سولانا ناکافی ({current_sol:.4f} SOL)"
 
     lamports = int(amount_sol * 1_000_000_000)
@@ -191,8 +191,8 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    # افزایش اسلیپیج به ۱۵ درصد (1500) برای جلوگیری از خطای ریجکت شدن توکن‌های نوسانی
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=1500"
+    # استفاده از بالاترین اسلیپیج و باز گذاشتن مسیرها برای توکن‌های پام‌فان
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=2500"
     
     quote_res = None
     for attempt in range(3):
@@ -214,7 +214,7 @@ def execute_real_buy(token_mint, amount_sol):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": "auto"
+        "prioritizationFeeLamports": 500000 # کارمزد اولویت ثابت برای سبقت در تراکنش‌های پام‌فان
     }
     
     swap_res = None
@@ -244,20 +244,23 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 5}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
 
         if "result" in tx_res:
             sig = tx_res["result"]
-            # حلقه انتظار برای نشستن واقعی تراکنش روی شبکه و تایید موجودی توکن در ولت
-            for _ in range(15):
-                time.sleep(2)
-                token_check_bal = get_token_balance(token_mint)
-                if token_check_bal > 0:
+            # حلقه انتظار واقعی بررسی نشستن توکن داخل ولت
+            for _ in range(12):
+                time.sleep(2.5)
+                bal = get_token_balance(token_mint)
+                if bal > 0:
                     return True, sig
-            return True, sig
+            # حتی اگر تاییدیه صسوی هم نیامد ولی هش صادر شد، بار آخر چک میکنیم
+            if get_token_balance(token_mint) > 0:
+                return True, sig
+            return False, "تراکنش فرستاده شد اما توکن به ولت اضافه نشد"
         else:
             err_details = tx_res.get('error', {}).get('message', 'ریجکت توسط شبکه')
             return False, f"{err_details}"
@@ -316,8 +319,7 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    # اسلیپیج فروش روی ۱۵ درصد (1500)
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=1500"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=2500"
     quote_res = None
     for attempt in range(3):
         try:
@@ -338,7 +340,7 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": "auto"
+        "prioritizationFeeLamports": 500000
     }
     
     swap_res = None
@@ -368,7 +370,7 @@ def execute_real_sell(token_mint, token_amount):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 5}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
