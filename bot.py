@@ -181,32 +181,60 @@ def execute_real_buy(token_mint, amount_sol):
         return False, "کلید عمومی ولت نامعتبر است"
 
     current_sol = get_sol_balance()
-    if current_sol < (amount_sol + 0.005):
+    if current_sol < (amount_sol + 0.003):
         return False, f"موجودی سولانا ناکافی ({current_sol:.4f} SOL)"
 
-    # ارتباط مستقیم با اندپوینت خرید اختصاصی توکن‌های پام‌پ‌فان برای خرید واقعی
-    pump_buy_url = "https://pumpportal.fun/api/trade-local"
-    
-    payload = {
-        "publicKey": WALLET_PUBKEY,
-        "action": "buy",
-        "mint": token_mint,
-        "denominatedInSol": "true",
-        "amount": amount_sol,
-        "slippage": 25,
-        "priorityFee": 0.001
+    lamports = int(amount_sol * 1_000_000_000)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Origin": "https://jup.ag",
+        "Referer": "https://jup.ag/"
     }
 
-    try:
-        res = requests.post(pump_buy_url, json=payload, timeout=10)
-        if res.status_code != 200:
-            return False, f"خطای سرور پام‌پ‌فان: {res.text}"
-        
-        tx_data = res.json()
-        if "transaction" not in tx_data:
-            return False, "تراکنش از سوی پام‌پ‌فان دریافت نشد"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=3000"
+    
+    quote_res = None
+    for attempt in range(3):
+        try:
+            res = requests.get(quote_url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                quote_res = res.json()
+                if "error" not in quote_res:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.3)
 
-        raw_tx = base64.b64decode(tx_data["transaction"])
+    if not quote_res or "error" in quote_res:
+        return False, "خطای کوت صرافی"
+
+    swap_payload = {
+        "quoteResponse": quote_res,
+        "userPublicKey": WALLET_PUBKEY,
+        "wrapAndUnwrapSol": True,
+        "dynamicComputeUnitLimit": True,
+        "prioritizationFeeLamports": 2000000
+    }
+    
+    swap_res = None
+    for attempt in range(3):
+        try:
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
+            if res.status_code == 200:
+                swap_res = res.json()
+                if "swapTransaction" in swap_res:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.3)
+
+    if not swap_res or "swapTransaction" not in swap_res:
+        return False, "تراکنش سواپ رد شد"
+
+    try:
+        swap_tx_b64 = swap_res["swapTransaction"]
+        raw_tx = base64.b64decode(swap_tx_b64)
         txn = VersionedTransaction.from_bytes(raw_tx)
         signature = sender_keypair.sign_message(bytes(txn.message))
         signed_txn = VersionedTransaction.populate(txn.message, [signature])
@@ -227,13 +255,12 @@ def execute_real_buy(token_mint, amount_sol):
                 time.sleep(2)
                 if get_token_balance(token_mint) > 0:
                     return True, sig
-            return False, "تراکنش تایید شد ولی موجودی توکن صفر است"
+            return False, "تراکنش تایید شد اما توکن به ولت ننشست"
         else:
             err_details = tx_res.get('error', {}).get('message', 'ریجکت شبکه')
-            return False, f"خطای شبکه: {err_details}"
-            
+            return False, f"{err_details}"
     except Exception as e:
-        return False, f"خطای سیستمی خرید: {str(e)}"
+        return False, f"خطای امضا: {str(e)}"
 
 def close_wsol_account():
     try:
@@ -287,7 +314,7 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=2500"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=3000"
     quote_res = None
     for attempt in range(3):
         try:
@@ -308,7 +335,7 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 500000
+        "prioritizationFeeLamports": 1000000
     }
     
     swap_res = None
