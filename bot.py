@@ -103,7 +103,7 @@ def get_sol_balance():
         return 0.0
 
 def get_token_balance(token_mint):
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             payload = {
                 "jsonrpc": "2.0",
@@ -125,7 +125,7 @@ def get_token_balance(token_mint):
                         return amount
         except Exception as e:
             print(f"⚠️ خطا در استعلام موجودی توکن (تلاش {attempt+1}): {e}")
-        time.sleep(1.5)
+        time.sleep(1)
     return 0
 
 def is_token_safe(token_mint, strict=False):
@@ -188,7 +188,7 @@ def execute_real_buy(token_mint, amount_sol):
     quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=500"
     
     quote_res = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             res = requests.get(quote_url, headers=headers, timeout=5)
             if res.status_code == 200:
@@ -207,11 +207,11 @@ def execute_real_buy(token_mint, amount_sol):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 100000
+        "prioritizationFeeLamports": 200000
     }
     
     swap_res = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
             if res.status_code == 200:
@@ -237,7 +237,7 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 5}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -261,9 +261,9 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=700"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=1000"
     quote_res = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             res = requests.get(quote_url, headers=headers, timeout=5)
             if res.status_code == 200:
@@ -282,11 +282,11 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 100000
+        "prioritizationFeeLamports": 200000
     }
     
     swap_res = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
             if res.status_code == 200:
@@ -312,7 +312,7 @@ def execute_real_sell(token_mint, token_amount):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 5}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -346,7 +346,13 @@ def check_positions_loop():
                         if pnl_percent >= tp or pnl_percent <= sl:
                             reason = "حد سود (TP) فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
 
-                            token_balance = get_token_balance(token_addr)
+                            token_balance = 0
+                            for _ in range(4):
+                                token_balance = get_token_balance(token_addr)
+                                if token_balance > 0:
+                                    break
+                                time.sleep(1.5)
+
                             if token_balance > 0:
                                 success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             else:
