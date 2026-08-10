@@ -103,29 +103,27 @@ def get_sol_balance():
         return 0.0
 
 def get_token_balance(token_mint):
-    for attempt in range(5):
-        try:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getTokenAccountsByOwner",
-                "params": [
-                    WALLET_PUBKEY,
-                    {"mint": token_mint},
-                    {"encoding": "jsonParsed", "commitment": "processed"}
-                ]
-            }
-            res = requests.post(RPC_URL, json=payload, timeout=8).json()
-            accounts = res.get("result", {}).get("value", [])
-            if accounts:
-                for acc in accounts:
-                    info = acc["account"]["data"]["parsed"]["info"]
-                    amount = int(info["tokenAmount"]["amount"])
-                    if amount > 0:
-                        return amount
-        except Exception as e:
-            print(f"⚠️ خطا در استعلام موجودی توکن (تلاش {attempt+1}): {e}")
-        time.sleep(1)
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                WALLET_PUBKEY,
+                {"mint": token_mint},
+                {"encoding": "jsonParsed"}
+            ]
+        }
+        res = requests.post(RPC_URL, json=payload, timeout=8).json()
+        accounts = res.get("result", {}).get("value", [])
+        if accounts:
+            for acc in accounts:
+                info = acc["account"]["data"]["parsed"]["info"]
+                amount = int(info["tokenAmount"]["amount"])
+                if amount > 0:
+                    return amount
+    except Exception as e:
+        print(f"⚠️ خطا در استعلام موجودی توکن: {e}")
     return 0
 
 def is_token_safe(token_mint, strict=False):
@@ -169,79 +167,61 @@ def get_real_market_trending_tokens():
 
     return tokens
 
-# شبیه‌سازی منطق تروجان برای استعلام و سواپ مستقیم بدون خطای کوت پامپ‌فان
 def execute_real_buy(token_mint, amount_sol):
     if not WALLET_PUBKEY:
         return False, "کلید عمومی ولت نامعتبر است"
 
     current_sol = get_sol_balance()
-    if current_sol < (amount_sol + 0.003):
-        return False, f"موجودی ناکافی ({current_sol:.4f} SOL)"
+    if current_sol < (amount_sol + 0.002):
+        return False, f"موجودی سولانا ناکافی ({current_sol:.4f} SOL)"
 
     lamports = int(amount_sol * 1_000_000_000)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
         "Origin": "https://jup.ag",
         "Referer": "https://jup.ag/"
     }
 
-    # استفاده از چند پروکسی روتینگ معتبر مشابه الگوریتم تروجان برای عبور از محدودیت‌های کوت
-    quote_endpoints = [
-        f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=10000&onlyDirectRoutes=false",
-        f"https://lite.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=10000&onlyDirectRoutes=false"
-    ]
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=500"
     
     quote_res = None
-    for url in quote_endpoints:
-        for attempt in range(3):
-            try:
-                res = requests.get(url, headers=headers, timeout=4)
-                if res.status_code == 200:
-                    data = res.json()
-                    if "error" not in data and "outAmount" in data:
-                        quote_res = data
-                        break
-            except Exception:
-                pass
-            time.sleep(0.2)
-        if quote_res:
-            break
+    for attempt in range(3):
+        try:
+            res = requests.get(quote_url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                quote_res = res.json()
+                if "error" not in quote_res:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.3)
 
-    if not quote_res:
-        return False, "خطای دریافت کوت خرید"
+    if not quote_res or "error" in quote_res:
+        return False, "خطای کوت صرافی"
 
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 5000000
+        "prioritizationFeeLamports": "auto"
     }
     
     swap_res = None
-    swap_endpoints = [
-        "https://quote-api.jup.ag/v6/swap",
-        "https://lite.jup.ag/v6/swap"
-    ]
-    
-    for url in swap_endpoints:
-        for attempt in range(3):
-            try:
-                res = requests.post(url, json=swap_payload, headers=headers, timeout=5)
-                if res.status_code == 200:
-                    data = res.json()
-                    if "swapTransaction" in data:
-                        swap_res = data
-                        break
-            except Exception:
-                pass
-            time.sleep(0.2)
-        if swap_res:
-            break
+    for attempt in range(3):
+        try:
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
+            if res.status_code == 200:
+                swap_res = res.json()
+                if "swapTransaction" in swap_res:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.3)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "ساخت تراکنش خرید رد شد"
+        return False, "تراکنش سواپ رد شد"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -255,7 +235,7 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -273,67 +253,50 @@ def execute_real_sell(token_mint, token_amount):
         return False, "کلید عمومی ولت نامعتبر است"
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
         "Origin": "https://jup.ag",
         "Referer": "https://jup.ag/"
     }
 
-    quote_endpoints = [
-        f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=10000&onlyDirectRoutes=false",
-        f"https://lite.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=10000&onlyDirectRoutes=false"
-    ]
-    
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=500"
     quote_res = None
-    for url in quote_endpoints:
-        for attempt in range(3):
-            try:
-                res = requests.get(url, headers=headers, timeout=4)
-                if res.status_code == 200:
-                    data = res.json()
-                    if "error" not in data and "outAmount" in data:
-                        quote_res = data
-                        break
-            except Exception:
-                pass
-            time.sleep(0.2)
-        if quote_res:
-            break
+    for attempt in range(3):
+        try:
+            res = requests.get(quote_url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                quote_res = res.json()
+                if "error" not in quote_res:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.3)
 
-    if not quote_res:
-        return False, "خطای دریافت کوت فروش"
+    if not quote_res or "error" in quote_res:
+        return False, "خطای دریافت قیمت فروش"
 
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 5000000
+        "prioritizationFeeLamports": "auto"
     }
     
     swap_res = None
-    swap_endpoints = [
-        "https://quote-api.jup.ag/v6/swap",
-        "https://lite.jup.ag/v6/swap"
-    ]
-    
-    for url in swap_endpoints:
-        for attempt in range(3):
-            try:
-                res = requests.post(url, json=swap_payload, headers=headers, timeout=5)
-                if res.status_code == 200:
-                    data = res.json()
-                    if "swapTransaction" in data:
-                        swap_res = data
-                        break
-            except Exception:
-                pass
-            time.sleep(0.2)
-        if swap_res:
-            break
+    for attempt in range(3):
+        try:
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
+            if res.status_code == 200:
+                swap_res = res.json()
+                if "swapTransaction" in swap_res:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.3)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "ساخت تراکنش فروش رد شد"
+        return False, "فروش رد شد"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -347,7 +310,7 @@ def execute_real_sell(token_mint, token_amount):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -357,7 +320,7 @@ def execute_real_sell(token_mint, token_amount):
             err_details = tx_res.get('error', {}).get('message', 'ریجکت توسط شبکه')
             return False, f"{err_details}"
     except Exception as e:
-        return False, f"خطای امضای فروش: {str(e)}"
+        return False, f"خطای امضا در فروش: {str(e)}"
 
 def check_positions_loop():
     while True:
@@ -385,7 +348,7 @@ def check_positions_loop():
                             if token_balance > 0:
                                 success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             else:
-                                success, sell_res_info = False, "موجودی در ولت یافت نشد"
+                                success, sell_res_info = False, "موجودی یافت نشد"
 
                             sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
@@ -417,7 +380,7 @@ def unified_market_scanner_loop(app):
     global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, FIRE_MIN_LIQUIDITY, FIRE_MIN_VOLUME_5M, FIRE_MIN_PRICE_CHANGE_5M
     global TREND_MIN_LIQUIDITY, TREND_MIN_VOLUME_5M, TREND_MIN_CHANGE_5M, MIN_BUYS_5M
 
-    send_telegram_msg("⚡ موتور پردازش و اسکن بازار با شبیه‌ساز منطق تروجان فعال شد.")
+    send_telegram_msg("⚡ موتور پردازش و اسکن بازار با سیستم اولویت‌بندی فعال شد.")
 
     while True:
         if not (GOLDEN_OPTION or COMBO_RUNNING or IS_RUNNING or TREND_ALERT_RUNNING):
@@ -456,16 +419,13 @@ def unified_market_scanner_loop(app):
                         liquidity >= GOLDEN_MIN_LIQUIDITY and 
                         is_token_safe(token_addr, strict=True)):
                         
-                        success, result_info = execute_real_buy(token_addr, GOLDEN_BUY_AMOUNT_SOL)
-                        if not success:
-                            continue
-
                         golden_processed_tokens.add(token_addr)
                         processed_tokens.add(token_addr)
                         trend_alerted_tokens.add(token_addr)
 
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
-                        solscan_link = f"https://solscan.io/tx/{result_info}"
+                        success, result_info = execute_real_buy(token_addr, GOLDEN_BUY_AMOUNT_SOL)
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = price * (1 + (GOLDEN_TAKE_PROFIT / 100))
                         target_sl_val = price * (1 + (GOLDEN_STOP_LOSS / 100))
@@ -487,12 +447,13 @@ def unified_market_scanner_loop(app):
                             f"🔍 Solscan\n{solscan_link}\n"
                             f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                         )
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": GOLDEN_TAKE_PROFIT,
-                            "sl": GOLDEN_STOP_LOSS
-                        }
+                        if success:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": GOLDEN_TAKE_PROFIT,
+                                "sl": GOLDEN_STOP_LOSS
+                            }
                         send_telegram_msg(golden_msg)
                         continue
 
@@ -504,15 +465,12 @@ def unified_market_scanner_loop(app):
                         liquidity >= COMBO_MIN_LIQUIDITY and
                         is_token_safe(token_addr)):
                         
-                        success, result_info = execute_real_buy(token_addr, COMBO_BUY_AMOUNT_SOL)
-                        if not success:
-                            continue
-
                         trend_alerted_tokens.add(token_addr)
                         processed_tokens.add(token_addr)
 
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
-                        solscan_link = f"https://solscan.io/tx/{result_info}"
+                        success, result_info = execute_real_buy(token_addr, COMBO_BUY_AMOUNT_SOL)
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = price * (1 + (COMBO_TAKE_PROFIT / 100))
                         target_sl_val = price * (1 + (COMBO_STOP_LOSS / 100))
@@ -534,12 +492,13 @@ def unified_market_scanner_loop(app):
                             f"🔍 Solscan\n{solscan_link}\n"
                             f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                         )
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": COMBO_TAKE_PROFIT,
-                            "sl": COMBO_STOP_LOSS
-                        }
+                        if success:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": COMBO_TAKE_PROFIT,
+                                "sl": COMBO_STOP_LOSS
+                            }
                         send_telegram_msg(combo_msg)
                         continue
 
@@ -571,14 +530,11 @@ def unified_market_scanner_loop(app):
                         price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M and 
                         is_token_safe(token_addr)):
                         
-                        success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
-                        if not success:
-                            continue
-
                         processed_tokens.add(token_addr)
+                        success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
                         
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
-                        solscan_link = f"https://solscan.io/tx/{result_info}"
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = price * (1 + (FIRE_TAKE_PROFIT / 100))
                         target_sl_val = price * (1 + (FIRE_STOP_LOSS / 100))
@@ -601,12 +557,13 @@ def unified_market_scanner_loop(app):
                             f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                         )
                         
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": FIRE_TAKE_PROFIT,
-                            "sl": FIRE_STOP_LOSS
-                        }
+                        if success:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": FIRE_TAKE_PROFIT,
+                                "sl": FIRE_STOP_LOSS
+                            }
                         send_telegram_msg(msg)
 
         except Exception as e:
