@@ -112,7 +112,7 @@ def get_token_balance(token_mint):
                 "params": [
                     WALLET_PUBKEY,
                     {"mint": token_mint},
-                    {"encoding": "jsonParsed"}
+                    {"encoding": "jsonParsed", "commitment": "processed"}
                 ]
             }
             res = requests.post(RPC_URL, json=payload, timeout=8).json()
@@ -179,26 +179,30 @@ def execute_real_buy(token_mint, amount_sol):
 
     lamports = int(amount_sol * 1_000_000_000)
     headers = {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "application/json",
         "Origin": "https://jup.ag",
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=1000"
+    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=1500&onlyDirectRoutes=false"
     
     quote_res = None
-    for _ in range(3):
+    for attempt in range(4):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=5)
+            res = requests.get(quote_url, headers=headers, timeout=6)
             if res.status_code == 200:
                 data = res.json()
                 if "error" not in data:
                     quote_res = data
                     break
-        except Exception:
-            pass
-        time.sleep(0.3)
+                else:
+                    print(f"⚠️ خطای کوت ژوپیتر: {data.get('error')}")
+            else:
+                print(f"⚠️ کد وضعیت کوت: {res.status_code}, متن: {res.text}")
+        except Exception as e:
+            print(f"⚠️ استثنا در دریافت کوت خرید (تلاش {attempt+1}): {e}")
+        time.sleep(0.5)
 
     if not quote_res:
         return False, "خطای دریافت کوت خرید"
@@ -208,21 +212,25 @@ def execute_real_buy(token_mint, amount_sol):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 500000
+        "prioritizationFeeLamports": 600000
     }
     
     swap_res = None
-    for _ in range(3):
+    for attempt in range(4):
         try:
-            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=6)
+            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 if "swapTransaction" in data:
                     swap_res = data
                     break
-        except Exception:
-            pass
-        time.sleep(0.3)
+                else:
+                    print(f"⚠️ پاسخ سواپ فاقد تراکنش: {data}")
+            else:
+                print(f"⚠️ خطای سرور سواپ: {res.status_code} - {res.text}")
+        except Exception as e:
+            print(f"⚠️ استثنا در ساخت سواپ (تلاش {attempt+1}): {e}")
+        time.sleep(0.5)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "ساخت تراکنش خرید رد شد"
@@ -242,7 +250,7 @@ def execute_real_buy(token_mint, amount_sol):
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=12).json()
 
         if "result" in tx_res:
             return True, tx_res["result"]
@@ -257,18 +265,18 @@ def execute_real_sell(token_mint, token_amount):
         return False, "کلید عمومی ولت نامعتبر است"
 
     headers = {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "application/json",
         "Origin": "https://jup.ag",
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=1500"
+    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=2000&onlyDirectRoutes=false"
     
     quote_res = None
-    for _ in range(3):
+    for attempt in range(4):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=5)
+            res = requests.get(quote_url, headers=headers, timeout=6)
             if res.status_code == 200:
                 data = res.json()
                 if "error" not in data:
@@ -276,7 +284,7 @@ def execute_real_sell(token_mint, token_amount):
                     break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.5)
 
     if not quote_res:
         return False, "خطای دریافت کوت فروش"
@@ -286,13 +294,13 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 500000
+        "prioritizationFeeLamports": 600000
     }
     
     swap_res = None
-    for _ in range(3):
+    for attempt in range(4):
         try:
-            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=6)
+            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 if "swapTransaction" in data:
@@ -300,7 +308,7 @@ def execute_real_sell(token_mint, token_amount):
                     break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.5)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "ساخت تراکنش فروش رد شد"
@@ -320,8 +328,7 @@ def execute_real_sell(token_mint, token_amount):
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
-
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=12).json()
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
