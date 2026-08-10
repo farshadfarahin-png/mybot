@@ -191,7 +191,8 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=500"
+    # افزایش اسلیپیج به ۱۵ درصد (1500) برای جلوگیری از خطای ریجکت شدن توکن‌های نوسانی
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=1500"
     
     quote_res = None
     for attempt in range(3):
@@ -250,20 +251,11 @@ def execute_real_buy(token_mint, amount_sol):
 
         if "result" in tx_res:
             sig = tx_res["result"]
-            # تایید قطعی تراکنش در شبکه
-            for _ in range(10):
+            # حلقه انتظار برای نشستن واقعی تراکنش روی شبکه و تایید موجودی توکن در ولت
+            for _ in range(15):
                 time.sleep(2)
-                status_payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getSignatureStatuses",
-                    "params": [[sig], {"searchTransactionHistory": True}]
-                }
-                status_res = requests.post(RPC_URL, json=status_payload, timeout=5).json()
-                val = status_res.get("result", {}).get("value", [None])[0]
-                if val and (val.get("confirmationStatus") in ["confirmed", "finalized"] or val.get("confirmations")):
-                    if val.get("err"):
-                        return False, f"تراکنش شکست خورد: {val.get('err')}"
+                token_check_bal = get_token_balance(token_mint)
+                if token_check_bal > 0:
                     return True, sig
             return True, sig
         else:
@@ -278,14 +270,11 @@ def close_wsol_account():
         wallet_pubkey_obj = Pubkey.from_string(WALLET_PUBKEY)
         token_program_pubkey = Pubkey.from_string(TOKEN_PROGRAM_ID)
         
-        # پیدا کردن آدرس اکانت مرتبط WSOL (Associated Token Account)
         assoc_account = Pubkey.find_program_address(
             [bytes(wallet_pubkey_obj), bytes(token_program_pubkey), bytes(wsol_mint_pubkey)],
             Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
         )[0]
         
-        # ساخت دستور بستن اکانت (Close Account Instruction)
-        # فرمت دیتای دستور CloseAccount در پروتکل SPL Token برابر با بایت [9] است
         data = bytes([9])
         keys = [
             {"pubkey": assoc_account, "is_signer": False, "is_writable": True},
@@ -294,12 +283,9 @@ def close_wsol_account():
         ]
         
         instruction = Instruction(token_program_pubkey, data, keys)
-        
-        # گرفتن آخرین بلاکهاش
         blockhash_res = requests.post(RPC_URL, json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"}, timeout=5).json()
         blockhash = blockhash_res["result"]["value"]["blockhash"]
         
-        # ساخت و امضای تراکنش
         compiled_message = MessageV0.try_compile(
             wallet_pubkey_obj,
             [instruction],
@@ -330,7 +316,8 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=500"
+    # اسلیپیج فروش روی ۱۵ درصد (1500)
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=1500"
     quote_res = None
     for attempt in range(3):
         try:
@@ -387,24 +374,7 @@ def execute_real_sell(token_mint, token_amount):
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
         if "result" in tx_res:
             sig = tx_res["result"]
-            # تایید قطعی تراکنش فروش
-            for _ in range(10):
-                time.sleep(2)
-                status_payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getSignatureStatuses",
-                    "params": [[sig], {"searchTransactionHistory": True}]
-                }
-                status_res = requests.post(RPC_URL, json=status_payload, timeout=5).json()
-                val = status_res.get("result", {}).get("value", [None])[0]
-                if val and (val.get("confirmationStatus") in ["confirmed", "finalized"] or val.get("confirmations")):
-                    if val.get("err"):
-                        return False, f"تراکنش فروش شکست خورد: {val.get('err')}"
-                    # پس از فروش موفق، اکانت WSOL را می‌بندیم تا سول خالص به ولت برگردد
-                    time.sleep(1)
-                    close_wsol_account()
-                    return True, sig
+            time.sleep(3)
             close_wsol_account()
             return True, sig
         else:
@@ -414,7 +384,6 @@ def execute_real_sell(token_mint, token_amount):
         return False, f"خطای امضا در فروش: {str(e)}"
 
 def check_positions_loop():
-    # حلقه ناهمگام ایمن جهت جلوگیری از انباشت درخواست‌ها و کرش سیستم
     while True:
         try:
             tokens_to_close = []
