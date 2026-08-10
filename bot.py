@@ -4,6 +4,7 @@ import json
 import base64
 import base58
 import os
+import struct
 from threading import Thread
 from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -180,61 +181,32 @@ def execute_real_buy(token_mint, amount_sol):
         return False, "کلید عمومی ولت نامعتبر است"
 
     current_sol = get_sol_balance()
-    if current_sol < (amount_sol + 0.003):
+    if current_sol < (amount_sol + 0.005):
         return False, f"موجودی سولانا ناکافی ({current_sol:.4f} SOL)"
 
-    lamports = int(amount_sol * 1_000_000_000)
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-        "Origin": "https://jup.ag",
-        "Referer": "https://jup.ag/"
-    }
-
-    # استفاده از بالاترین اسلیپیج و باز گذاشتن مسیرها برای توکن‌های پام‌فان
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=2500"
+    # ارتباط مستقیم با اندپوینت خرید اختصاصی توکن‌های پام‌پ‌فان برای خرید واقعی
+    pump_buy_url = "https://pumpportal.fun/api/trade-local"
     
-    quote_res = None
-    for attempt in range(3):
-        try:
-            res = requests.get(quote_url, headers=headers, timeout=5)
-            if res.status_code == 200:
-                quote_res = res.json()
-                if "error" not in quote_res:
-                    break
-        except Exception:
-            pass
-        time.sleep(0.3)
-
-    if not quote_res or "error" in quote_res:
-        return False, "خطای کوت صرافی"
-
-    swap_payload = {
-        "quoteResponse": quote_res,
-        "userPublicKey": WALLET_PUBKEY,
-        "wrapAndUnwrapSol": True,
-        "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 500000 # کارمزد اولویت ثابت برای سبقت در تراکنش‌های پام‌فان
+    payload = {
+        "publicKey": WALLET_PUBKEY,
+        "action": "buy",
+        "mint": token_mint,
+        "denominatedInSol": "true",
+        "amount": amount_sol,
+        "slippage": 25,
+        "priorityFee": 0.001
     }
-    
-    swap_res = None
-    for attempt in range(3):
-        try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
-            if res.status_code == 200:
-                swap_res = res.json()
-                if "swapTransaction" in swap_res:
-                    break
-        except Exception:
-            pass
-        time.sleep(0.3)
-
-    if not swap_res or "swapTransaction" not in swap_res:
-        return False, "تراکنش سواپ رد شد"
 
     try:
-        swap_tx_b64 = swap_res["swapTransaction"]
-        raw_tx = base64.b64decode(swap_tx_b64)
+        res = requests.post(pump_buy_url, json=payload, timeout=10)
+        if res.status_code != 200:
+            return False, f"خطای سرور پام‌پ‌فان: {res.text}"
+        
+        tx_data = res.json()
+        if "transaction" not in tx_data:
+            return False, "تراکنش از سوی پام‌پ‌فان دریافت نشد"
+
+        raw_tx = base64.b64decode(tx_data["transaction"])
         txn = VersionedTransaction.from_bytes(raw_tx)
         signature = sender_keypair.sign_message(bytes(txn.message))
         signed_txn = VersionedTransaction.populate(txn.message, [signature])
@@ -244,28 +216,24 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 5}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
 
         if "result" in tx_res:
             sig = tx_res["result"]
-            # حلقه انتظار واقعی بررسی نشستن توکن داخل ولت
-            for _ in range(12):
-                time.sleep(2.5)
-                bal = get_token_balance(token_mint)
-                if bal > 0:
+            for _ in range(15):
+                time.sleep(2)
+                if get_token_balance(token_mint) > 0:
                     return True, sig
-            # حتی اگر تاییدیه صسوی هم نیامد ولی هش صادر شد، بار آخر چک میکنیم
-            if get_token_balance(token_mint) > 0:
-                return True, sig
-            return False, "تراکنش فرستاده شد اما توکن به ولت اضافه نشد"
+            return False, "تراکنش تایید شد ولی موجودی توکن صفر است"
         else:
-            err_details = tx_res.get('error', {}).get('message', 'ریجکت توسط شبکه')
-            return False, f"{err_details}"
+            err_details = tx_res.get('error', {}).get('message', 'ریجکت شبکه')
+            return False, f"خطای شبکه: {err_details}"
+            
     except Exception as e:
-        return False, f"خطای امضا: {str(e)}"
+        return False, f"خطای سیستمی خرید: {str(e)}"
 
 def close_wsol_account():
     try:
