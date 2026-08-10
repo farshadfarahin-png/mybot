@@ -14,7 +14,6 @@ from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 from solders.instruction import Instruction
 from solders.message import MessageV0
-from solders.transaction import Transaction as LegacyTransaction
 
 # تنظیمات کلیدی محیطی
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
@@ -235,9 +234,9 @@ def execute_real_buy(token_mint, amount_sol):
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
         raw_tx = base64.b64decode(swap_tx_b64)
+        
         txn = VersionedTransaction.from_bytes(raw_tx)
-        signature = sender_keypair.sign_message(bytes(txn.message))
-        signed_txn = VersionedTransaction.populate(txn.message, [signature])
+        signed_txn = VersionedTransaction(txn.message, [sender_keypair])
         serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
         rpc_payload = {
@@ -356,9 +355,9 @@ def execute_real_sell(token_mint, token_amount):
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
         raw_tx = base64.b64decode(swap_tx_b64)
+        
         txn = VersionedTransaction.from_bytes(raw_tx)
-        signature = sender_keypair.sign_message(bytes(txn.message))
-        signed_txn = VersionedTransaction.populate(txn.message, [signature])
+        signed_txn = VersionedTransaction(txn.message, [sender_keypair])
         serialized_tx = base58.b58encode(bytes(signed_txn)).decode('utf-8')
 
         rpc_payload = {
