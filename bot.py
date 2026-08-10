@@ -174,7 +174,7 @@ def execute_real_buy(token_mint, amount_sol):
         return False, "کلید عمومی ولت نامعتبر است"
 
     current_sol = get_sol_balance()
-    if current_sol < (amount_sol + 0.0025):
+    if current_sol < (amount_sol + 0.003):
         return False, f"موجودی ناکافی ({current_sol:.4f} SOL)"
 
     lamports = int(amount_sol * 1_000_000_000)
@@ -185,45 +185,47 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=500"
+    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=1000"
     
     quote_res = None
-    for attempt in range(4):
+    for _ in range(3):
         try:
             res = requests.get(quote_url, headers=headers, timeout=5)
             if res.status_code == 200:
-                quote_res = res.json()
-                if "error" not in quote_res:
+                data = res.json()
+                if "error" not in data:
+                    quote_res = data
                     break
         except Exception:
             pass
         time.sleep(0.3)
 
-    if not quote_res or "error" in quote_res:
-        return False, "خطای کوت صرافی"
+    if not quote_res:
+        return False, "خطای دریافت کوت خرید"
 
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 200000
+        "prioritizationFeeLamports": 500000
     }
     
     swap_res = None
-    for attempt in range(4):
+    for _ in range(3):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
+            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=6)
             if res.status_code == 200:
-                swap_res = res.json()
-                if "swapTransaction" in swap_res:
+                data = res.json()
+                if "swapTransaction" in data:
+                    swap_res = data
                     break
         except Exception:
             pass
         time.sleep(0.3)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "تراکنش سواپ رد شد"
+        return False, "ساخت تراکنش خرید رد شد"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -237,7 +239,7 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 5}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
@@ -261,44 +263,47 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=1000"
+    quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=1500"
+    
     quote_res = None
-    for attempt in range(4):
+    for _ in range(3):
         try:
             res = requests.get(quote_url, headers=headers, timeout=5)
             if res.status_code == 200:
-                quote_res = res.json()
-                if "error" not in quote_res:
+                data = res.json()
+                if "error" not in data:
+                    quote_res = data
                     break
         except Exception:
             pass
         time.sleep(0.3)
 
-    if not quote_res or "error" in quote_res:
-        return False, "خطای دریافت قیمت فروش"
+    if not quote_res:
+        return False, "خطای دریافت کوت فروش"
 
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 200000
+        "prioritizationFeeLamports": 500000
     }
     
     swap_res = None
-    for attempt in range(4):
+    for _ in range(3):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
+            res = requests.post("https://quote-api.jup.ag/v6/swap", json=swap_payload, headers=headers, timeout=6)
             if res.status_code == 200:
-                swap_res = res.json()
-                if "swapTransaction" in swap_res:
+                data = res.json()
+                if "swapTransaction" in data:
+                    swap_res = data
                     break
         except Exception:
             pass
         time.sleep(0.3)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "فروش رد شد"
+        return False, "ساخت تراکنش فروش رد شد"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -312,17 +317,18 @@ def execute_real_sell(token_mint, token_amount):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 5}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
         }
         
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+
         if "result" in tx_res:
             return True, tx_res["result"]
         else:
             err_details = tx_res.get('error', {}).get('message', 'ریجکت توسط شبکه')
             return False, f"{err_details}"
     except Exception as e:
-        return False, f"خطای امضا در فروش: {str(e)}"
+        return False, f"خطای امضای فروش: {str(e)}"
 
 def check_positions_loop():
     while True:
@@ -346,13 +352,7 @@ def check_positions_loop():
                         if pnl_percent >= tp or pnl_percent <= sl:
                             reason = "حد سود (TP) فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
 
-                            token_balance = 0
-                            for _ in range(4):
-                                token_balance = get_token_balance(token_addr)
-                                if token_balance > 0:
-                                    break
-                                time.sleep(1.5)
-
+                            token_balance = get_token_balance(token_addr)
                             if token_balance > 0:
                                 success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             else:
