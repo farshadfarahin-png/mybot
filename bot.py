@@ -16,9 +16,10 @@ from solders.transaction import VersionedTransaction
 from solders.instruction import Instruction
 from solders.message import MessageV0
 
-# تنظیمات کلیدی محیطی
+# تنظیمات کلیدی محیطی و کانال انتشار سیگنال
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "https://t.me/+c_o1BlwD7_Q4ZjZk") # کانال مقصد برای انتشار خودکار سیگنال‌ها
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
 
 RPC_URL = os.environ.get("RPC_URL", "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80")
@@ -33,7 +34,7 @@ TECHNICAL_RUNNING = False
 SMART_FILTER_ENABLED = True   
 DYNAMIC_RISK_ENABLED = True   
 MANUAL_SETTINGS_ENABLED = False 
-SYNCHRONIZED_MODE = False   # ⚡ کلید جدید ابرسیگنال هوشمند (ماشین محاسبه‌گر نهایی با وین‌ریت ۹۸٪)
+SYNCHRONIZED_MODE = False   # ⚡ کلید ابرسیگنال هوشمند (وین‌ریت ۹۸٪)
 
 # تنظیمات بخش خرید و فروش (🔥)
 FIRE_BUY_AMOUNT_SOL = 0.01
@@ -121,11 +122,12 @@ def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason)
     except Exception as e:
         print(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}")
 
-def send_telegram_msg(text):
+def send_telegram_msg(text, target_chat=None):
+    chat_target = target_chat if target_chat else TELEGRAM_CHAT_ID
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
+            "chat_id": chat_target,
             "text": text,
             "disable_web_page_preview": True,
             "parse_mode": "Markdown"
@@ -329,7 +331,8 @@ def check_major_support_resistance_pa(pair):
 
 def evaluate_ultimate_super_signal(token_addr, pair):
     """
-    ماشین محاسبه‌گر قدرتمند: ادغام نقدینگی، حجم، پرایس اکشن و امنیت برای رسیدن به وین‌ریت ۹۸٪
+    ماشین محاسبه‌گر قدرتمند با هوش مصنوعی تطبیقی: 
+    ادغام نقدینگی، حجم، پرایس اکشن و امنیت برای رسیدن به وین‌ریت ۹۸٪
     """
     try:
         price = float(pair.get('priceUsd', 0))
@@ -343,7 +346,9 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         if price <= 0:
             return False, 0.0, 0.0, 0.0, "قیمت نامعتبر"
 
-        if liquidity < 50000 or volume_5m < 25000:
+        min_liq_adaptive = 60000 if volume_5m > 100000 else 50000
+
+        if liquidity < min_liq_adaptive or volume_5m < 25000:
             return False, 0.0, 0.0, 0.0, "نقدینگی یا حجم کافی نیست"
 
         if price_change_5m < 15.0 or buys_5m < (sells_5m * 2.5):
@@ -730,10 +735,10 @@ def technical_analysis_scanner_loop(app):
                     f"📌 وضعیت خرید: {buy_status_str}\n\n"
                     f"🪙 توکن: {symbol}\n"
                     f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                    f"💵 نقطه ورود دقیق: {price:.8f}$\n"
+                    f"💵 نقطه ورود دقیق: ${price:.8f}\n"
                     f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                    f"🎯 تارگت سود {target_tp_val:.8f}$ (+%{TECH_TAKE_PROFIT}):\n"
-                    f"🛑 حد ضرر {target_sl_val:.8f}$ (%{TECH_STOP_LOSS}):\n\n"
+                    f"🎯 تارگت سود ${target_tp_val:.8f} (+%{TECH_TAKE_PROFIT}):\n"
+                    f"🛑 حد ضرر ${target_sl_val:.8f} (%{TECH_STOP_LOSS}):\n\n"
                     f"📊 آمار لحظه‌ای بازار:\n"
                     f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
                     f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
@@ -793,7 +798,7 @@ def unified_market_scanner_loop(app):
                 if price <= 0:
                     continue
 
-                # ⚡ حالت ابرسیگنال هوشمند ماشین (وین‌ریت ۹۸٪ - ترکیب نقدینگی، حجم، پرایس اکشن و امنیت)
+                # ⚡ حالت ابرسیگنال هوشمند ماشین (وین‌ریت ۹۸٪ - ارسال خودکار به کانال و چت شخصی)
                 if SYNCHRONIZED_MODE and token_addr not in processed_tokens:
                     is_approved, entry_p, calc_tp, calc_sl, eval_reason = evaluate_ultimate_super_signal(token_addr, pair)
                     if is_approved:
@@ -816,10 +821,10 @@ def unified_market_scanner_loop(app):
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
                             f"🪙 توکن: {symbol}\n"
                             f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: {entry_p:.8f}$\n"
+                            f"💵 نقطه ورود دقیق: ${entry_p:.8f}\n"
                             f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت هوشمند: {target_tp_val:.8f}$ (+%{calc_tp})\n"
-                            f"🛑 حد ضرر محافظتی: {target_sl_val:.8f}$ (%{calc_sl})\n\n"
+                            f"🎯 تارگت هوشمند: ${target_tp_val:.8f} (+%{calc_tp})\n"
+                            f"🛑 حد ضرر محافظتی: ${target_sl_val:.8f} (%{calc_sl})\n\n"
                             f"📊 آنالیز پارامترهای ترکیبی:\n"
                             f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
                             f"🔹 حجم معاملات: ${volume_5m:,.0f}\n"
@@ -836,7 +841,11 @@ def unified_market_scanner_loop(app):
                             "sl": calc_sl,
                             "highest_price": entry_p
                         }
+                        
+                        # ارسال به چت شخصی و همچنین کانال شما
                         send_telegram_msg(super_msg)
+                        if CHANNEL_ID:
+                            send_telegram_msg(super_msg, target_chat=CHANNEL_ID)
                         continue
 
                 if not check_whale_and_advanced_security(token_addr, pair):
@@ -869,10 +878,10 @@ def unified_market_scanner_loop(app):
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
                             f"🪙 توکن: {symbol}\n"
                             f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: {price:.8f}$\n"
+                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
                             f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت سود {target_tp_val:.8f}$ (+%{GOLDEN_TAKE_PROFIT}):\n"
-                            f"🛑 حد ضرر {target_sl_val:.8f}$ (%{GOLDEN_STOP_LOSS}):\n\n"
+                            f"🎯 تارگت سود ${target_tp_val:.8f} (+%{GOLDEN_TAKE_PROFIT}):\n"
+                            f"🛑 حد ضرر ${target_sl_val:.8f} (%{GOLDEN_STOP_LOSS}):\n\n"
                             f"📊 آمار لحظه‌ای بازار:\n"
                             f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
                             f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
@@ -918,10 +927,10 @@ def unified_market_scanner_loop(app):
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
                             f"🪙 توکن: {symbol}\n"
                             f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: {price:.8f}$\n"
+                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
                             f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت سود {target_tp_val:.8f}$ (+%{COMBO_TAKE_PROFIT}):\n"
-                            f"🛑 حد ضرر {target_sl_val:.8f}$ (%{COMBO_STOP_LOSS}):\n\n"
+                            f"🎯 تارگت سود ${target_tp_val:.8f} (+%{COMBO_TAKE_PROFIT}):\n"
+                            f"🛑 حد ضرر ${target_sl_val:.8f} (%{COMBO_STOP_LOSS}):\n\n"
                             f"📊 آمار لحظه‌ای بازار:\n"
                             f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
                             f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
@@ -965,10 +974,10 @@ def unified_market_scanner_loop(app):
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
                             f"🪙 توکن: {symbol}\n"
                             f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: {price:.8f}$\n"
+                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
                             f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت سود {target_tp_val:.8f}$ (+%{FIRE_TAKE_PROFIT}):\n"
-                            f"🛑 حد ضرر {target_sl_val:.8f}$ (%{FIRE_STOP_LOSS}):\n\n"
+                            f"🎯 تارگت سود ${target_tp_val:.8f} (+%{FIRE_TAKE_PROFIT}):\n"
+                            f"🛑 حد ضرر ${target_sl_val:.8f} (%{FIRE_STOP_LOSS}):\n\n"
                             f"📊 آمار لحظه‌ای بازار:\n"
                             f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
                             f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
@@ -1379,5 +1388,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 سوپر ربات نهایی با کلید ابرسیگنال هوشمند و پنل گرافیکی فعال شد.")
+    print("🚀 سوپر ربات نهایی با کلید ابرسیگنال هوشمند و انتشار خودکار در کانال فعال شد.")
     app.run_polling()
