@@ -1016,7 +1016,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "status":
         status_text = (
-            f"📊 وضعیت کامل سیستم:\n\n"
+            f"📊 **وضعیت کامل سیستم:**\n\n"
+            f"🔑 **آدرس ولت متصل:**\n`{WALLET_PUBKEY}`\n\n"
             f"📊 پرایس اکشن (سقف/کف کلی): {'🟢 روشن' if TECHNICAL_RUNNING else '🔴 خاموش'}\n"
             f"🚀 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
             f"🚨 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'}\n"
@@ -1024,14 +1025,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 موجودی ولت: {get_sol_balance():.4f} SOL"
         )
         try:
-            await query.edit_message_text(status_text, reply_markup=get_main_keyboard())
+            await query.edit_message_text(status_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
         except Exception:
             send_telegram_msg(status_text)
 
     elif query.data == "wallet_balance":
-        balance_text = f"💰 موجودی ولت: {get_sol_balance():.4f} SOL"
+        balance_text = (
+            f"💰 **اطلاعات ولت:**\n\n"
+            f"🔑 آدرس:\n`{WALLET_PUBKEY}`\n\n"
+            f"💵 موجودی لحظه‌ای: {get_sol_balance():.4f} SOL"
+        )
         try:
-            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
+            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
         except Exception:
             send_telegram_msg(balance_text)
 
