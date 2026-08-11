@@ -71,7 +71,6 @@ closed_trades_history = []
 total_realized_pnl_usd = 0.0
 total_realized_pnl_percent = 0.0
 
-# 🌟 راه‌اندازی پایگاه داده SQLite (سیستم یادگیری و آنالیز معاملات)
 def init_db():
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
@@ -177,7 +176,6 @@ def get_token_balance(token_mint):
             time.sleep(1)
     return 0
 
-# 🌟 5. سیستم ضد هانی‌پات و اسکن امنیت لایه دوم (Advanced Rug & HoneyPot Defense)
 def is_token_safe(token_mint, strict=False):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
@@ -189,7 +187,6 @@ def is_token_safe(token_mint, strict=False):
             if risk_score > max_score:
                 return False
             
-            # بررسی توکن‌های فریز شده، مالیات و محدودیت فروش در لایه دوم
             markets = data.get("markets", [])
             for market in markets:
                 if market.get("lpFee", 0) > 10 or market.get("sellTax", 0) > 10:
@@ -198,7 +195,6 @@ def is_token_safe(token_mint, strict=False):
     except Exception:
         return True
 
-# 🌟 2. فیلتر پیشرفته «نهنگ‌ها و اینسایدرها» + بررسی ولت‌های فیک (Smart Money & Sybil Filter)
 def check_whale_and_advanced_security(token_mint, pair):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
@@ -208,11 +204,9 @@ def check_whale_and_advanced_security(token_mint, pair):
             holders = data.get("holders", [])
             top_holders_share = sum([h.get("pct", 0) for h in holders[:5]])
             
-            # اگر ۵ هولدر برتر بیش از ۷۰ درصد توکن را داشته باشند مشکوک است (نهنگ متمرکز یا فیک)
             if top_holders_share > 70.0:
                 return False
             
-            # بررسی حجم سنگین صرافی‌ها یا ورود پول هوشمند
             txns = pair.get('txns', {})
             h1_buys = txns.get('h1', {}).get('buys', 0)
             h1_sells = txns.get('h1', {}).get('sells', 0)
@@ -465,7 +459,6 @@ def execute_real_sell(token_mint, token_amount):
     except Exception as e:
         return False, f"خطای امضا در فروش: {str(e)}"
 
-# 🌟 حلقه مدیریت پوزیشن شامل Trailing Stop، DCA (خرید پله‌ای) و Partial Take Profit
 def check_positions_loop():
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
     while True:
@@ -486,21 +479,18 @@ def check_positions_loop():
                     if entry_price > 0 and current_price > 0:
                         pnl_percent = ((current_price - entry_price) / entry_price) * 100
 
-                        # 🌟 1. تریلینگ استاپ پویا (Trailing Stop): بالا رفتن پویای تارگت و استاپ با صعود قیمت
                         highest_price = pos.get('highest_price', entry_price)
                         if current_price > highest_price:
                             pos['highest_price'] = current_price
-                            # بالا بردن محافظتی استاپ لاس بر اساس سقف جدید
                             new_sl = sl + (pnl_percent * 0.2)
                             if new_sl > sl:
-                                pos['sl'] = min(new_sl, 0) # محافظت از سود در محدوده مثبت یا صفر
+                                pos['sl'] = min(new_sl, 0)
 
-                        # 🌟 1. خرید پله‌ای (DCA): اصلاح قیمت در محدوده حمایت (-3% تا -5%) و پله دوم خرید
                         if -5.0 <= pnl_percent <= -3.0 and not pos.get('dca_done', False):
                             pos['dca_done'] = True
                             success_dca, _ = execute_real_buy(token_addr, 0.01)
                             if success_dca:
-                                pos['entry_price'] = (pos['entry_price'] + current_price) / 2 # تعدیل میانگین قیمت ورود
+                                pos['entry_price'] = (pos['entry_price'] + current_price) / 2 
                                 send_telegram_msg(
                                     f"🔄 **خرید پله‌ای (DCA) فعال شد**\n\n"
                                     f"🪙 توکن: {symbol}\n"
@@ -508,7 +498,6 @@ def check_positions_loop():
                                     f"✅ پله دوم خرید انجام شد و میانگین قیمت ورود تعدیل گردید."
                                 )
 
-                        # 🌟 3. مکانیزم فروش پله‌ای (Partial Take Profit / Free Ride)
                         half_tp = tp / 2.0
                         if pnl_percent >= half_tp and not pos.get('half_sold', False):
                             token_balance = get_token_balance(token_addr)
@@ -549,7 +538,6 @@ def check_positions_loop():
                             total_realized_pnl_percent += pnl_percent
                             total_realized_pnl_usd += pnl_usd_val
 
-                            # 🌟 ثبت در پایگاه داده (سیستم یادگیری پاداش و آنالیز)
                             log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
 
                             sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
@@ -613,11 +601,9 @@ def unified_market_scanner_loop(app):
                 if price <= 0:
                     continue
 
-                # بررسی خط روند و حمایت
                 if not check_trend_and_support(pair):
                     continue
 
-                # 🌟 بررسی پیشرفته نهنگ‌ها و امنیت لایه دوم پیش از خرید
                 if not check_whale_and_advanced_security(token_addr, pair):
                     continue
 
@@ -881,7 +867,6 @@ def get_main_keyboard():
 
     return InlineKeyboardMarkup(keyboard)
 
-# 🌟 دستور تلگرامی /stats برای گزارش‌گیری از پایگاه داده هوشمند
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
@@ -902,9 +887,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 **آمار تحلیلی و یادگیری ربات (Database Stats):**\n\n"
             f"🔹 کل معاملات ثبت شده: {total_trades}\n"
             f"📈 مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
-            f"💵 مجموع درآمد/ضرر دلاری: ${total_u:+.2f}\n\n"
+            f"💵 درآمد/ضرر دلاری کل: ${total_u:+.2f}\n\n"
             f"🏆 **بهترین معاملات ثبت شده:**\n"
-        ]
+        )
         for t in best_trades:
             stats_text += f"🪙 {t[0]} : {t[1]:+.2f}% (در {t[2]})\n"
 
