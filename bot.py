@@ -263,7 +263,6 @@ def get_real_market_trending_tokens():
 
     return tokens
 
-# 🌟 الگوریتم پرایس اکشن ضد فیک (تاییدیه تثبیت ۱ ساعته و حجم بالا برای جلوگیری از تلۀ سقف)
 def check_major_support_resistance_pa(pair):
     try:
         if not is_token_worthy(pair):
@@ -283,10 +282,7 @@ def check_major_support_resistance_pa(pair):
         if price_change_6h < -10.0:
             return False, ""
 
-        # سناریو اول: پولبک واقعی از حمایت
         is_real_support_pullback = (-1.5 <= price_change_5m <= 2.5) and (buys_5m >= sells_5m) and (price_change_1h >= -2.0)
-
-        # سناریو دوم: شکست معتبر و تاییدشده سقف کلی (با تثبیت ۱ ساعته بالاتر از ۶ درصد جهت جلوگیری از فیک بریک اوت)
         is_valid_resistance_breakout = (2.0 <= price_change_5m <= 8.0) and (price_change_1h >= 6.0) and (buys_5m >= sells_5m * 2.0)
 
         if is_real_support_pullback:
@@ -304,7 +300,7 @@ def execute_real_buy(token_mint, amount_sol):
 
     current_sol = get_sol_balance()
     if current_sol < (amount_sol + 0.003):
-        return False, f"موجودی سولانا ناکافی ({current_sol:.4f} SOL)"
+        return False, f"خطا (موجودی یافت نشد ❌)"
 
     lamports = int(amount_sol * 1_000_000_000)
     headers = {
@@ -530,20 +526,17 @@ def check_positions_loop():
                                 pos['sl'] = min(new_sl, 0)
 
                         if pnl_percent >= tp or pnl_percent <= pos['sl']:
-                            reason = "حد سود (TP) / تارگت نهایی فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
+                            reason = "حد سود (TP) / تارگت نهایی فعال شد 🎯" if pnl_percent >= 0 else "فروش خودکار (حد ضرر (SL)) فعال شد 🛑"
 
                             success = False
-                            sell_res_info = "تلاش‌ها ناموفق بود"
-                            for retry_idx in range(5):
-                                token_balance = get_token_balance(token_addr)
-                                if token_balance > 0:
-                                    success, sell_res_info = execute_real_sell(token_addr, token_balance)
-                                    if success:
-                                        break
-                                else:
-                                    success, sell_res_info = True, "موجودی صفر یا از قبل فروخته شده"
-                                    break
-                                time.sleep(1)
+                            sell_res_info = "خطا (موجودی یافت نشد ❌)"
+                            
+                            token_balance = get_token_balance(token_addr)
+                            if token_balance > 0:
+                                success, sell_res_info = execute_real_sell(token_addr, token_balance)
+                            else:
+                                success = False
+                                sell_res_info = "خطا (موجودی یافت نشد ❌)"
 
                             pnl_usd_val = 0.75 * (pnl_percent / 100)
                             closed_trades_history.append({
@@ -556,13 +549,12 @@ def check_positions_loop():
 
                             log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
 
-                            sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
                             
                             exit_msg = (
-                                f"🔴 فروش کامل ({reason})\n\n"
+                                f"🔴 {reason}\n\n"
                                 f"🪙 توکن: {symbol}\n"
-                                f"📌 وضعیت: {sell_status_str}\n"
+                                f"📌 وضعیت: {sell_res_info}\n"
                                 f"📍 آدرس:\n{token_addr}\n\n"
                                 f"📉 قیمت خروج: ${current_price:.8f}\n"
                                 f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
@@ -602,6 +594,7 @@ def technical_analysis_scanner_loop(app):
                 price = float(pair.get('priceUsd', 0))
                 liquidity = float(pair.get('liquidity', {}).get('usd', 0))
                 volume_5m = float(pair.get('volume', {}).get('m5', 0))
+                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TECH_TOKEN')
 
                 if price <= 0:
@@ -618,7 +611,7 @@ def technical_analysis_scanner_loop(app):
                 processed_tokens.add(token_addr)
 
                 success, result_info = execute_real_buy(token_addr, TECH_BUY_AMOUNT_SOL)
-                buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                 solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                 target_tp_val = price * (1 + (TECH_TAKE_PROFIT / 100))
@@ -631,21 +624,26 @@ def technical_analysis_scanner_loop(app):
                     f"📍 آدرس قرارداد:\n{token_addr}\n\n"
                     f"💵 نقطه ورود دقیق: {price:.8f}$\n"
                     f"💰 مقدار خرید: SOL {TECH_BUY_AMOUNT_SOL}\n"
-                    f"🎯 تارگت سود نهایی: +{TECH_TAKE_PROFIT}% (${target_tp_val:.8f})\n"
-                    f"🛑 حد ضرر: {TECH_STOP_LOSS}% (${target_sl_val:.8f})\n\n"
-                    f"💧 نقدینگی: ${liquidity:,.0f} | 📊 حجم ۵م: ${volume_5m:,.0f}\n\n"
-                    f"🔗 Solscan:\n{solscan_link}\n"
-                    f"📈 DexScreener:\nhttps://dexscreener.com/solana/{token_addr}"
+                    f"🎯 تارگت سود {target_tp_val:.8f}$ (+%{TECH_TAKE_PROFIT}):\n"
+                    f"🛑 حد ضرر {target_sl_val:.8f}$ (%{TECH_STOP_LOSS}):\n\n"
+                    f"📊 آمار لحظه‌ای بازار:\n"
+                    f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
+                    f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                    f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                    f"🔗 لینک‌های توکن:\n"
+                    f"🔍 Solscan\n{solscan_link}\n"
+                    f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                 )
 
-                if success:
-                    active_positions[token_addr] = {
-                        "entry_price": price,
-                        "symbol": symbol,
-                        "tp": TECH_TAKE_PROFIT,
-                        "sl": TECH_STOP_LOSS,
-                        "highest_price": price
-                    }
+                # 🌟 حتی اگر خرید به دلیل کمبود موجودی ناموفق بود، پوزیشن را برای ردیابی قیمت اضافه کن
+                active_positions[token_addr] = {
+                    "entry_price": price,
+                    "symbol": symbol,
+                    "tp": TECH_TAKE_PROFIT,
+                    "sl": TECH_STOP_LOSS,
+                    "highest_price": price
+                }
+                
                 send_telegram_msg(tech_msg)
 
         except Exception as e:
@@ -709,7 +707,7 @@ def unified_market_scanner_loop(app):
                         trend_alerted_tokens.add(token_addr)
 
                         success, result_info = execute_real_buy(token_addr, GOLDEN_BUY_AMOUNT_SOL)
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = price * (1 + (GOLDEN_TAKE_PROFIT / 100))
@@ -732,14 +730,13 @@ def unified_market_scanner_loop(app):
                             f"🔍 Solscan\n{solscan_link}\n"
                             f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                         )
-                        if success:
-                            active_positions[token_addr] = {
-                                "entry_price": price,
-                                "symbol": symbol,
-                                "tp": GOLDEN_TAKE_PROFIT,
-                                "sl": GOLDEN_STOP_LOSS,
-                                "highest_price": price
-                            }
+                        active_positions[token_addr] = {
+                            "entry_price": price,
+                            "symbol": symbol,
+                            "tp": GOLDEN_TAKE_PROFIT,
+                            "sl": GOLDEN_STOP_LOSS,
+                            "highest_price": price
+                        }
                         send_telegram_msg(golden_msg)
                         continue
 
@@ -754,7 +751,7 @@ def unified_market_scanner_loop(app):
                         processed_tokens.add(token_addr)
 
                         success, result_info = execute_real_buy(token_addr, COMBO_BUY_AMOUNT_SOL)
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = price * (1 + (COMBO_TAKE_PROFIT / 100))
@@ -777,14 +774,13 @@ def unified_market_scanner_loop(app):
                             f"🔍 Solscan\n{solscan_link}\n"
                             f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                         )
-                        if success:
-                            active_positions[token_addr] = {
-                                "entry_price": price,
-                                "symbol": symbol,
-                                "tp": COMBO_TAKE_PROFIT,
-                                "sl": COMBO_STOP_LOSS,
-                                "highest_price": price
-                            }
+                        active_positions[token_addr] = {
+                            "entry_price": price,
+                            "symbol": symbol,
+                            "tp": COMBO_TAKE_PROFIT,
+                            "sl": COMBO_STOP_LOSS,
+                            "highest_price": price
+                        }
                         send_telegram_msg(combo_msg)
                         continue
 
@@ -817,7 +813,7 @@ def unified_market_scanner_loop(app):
                         processed_tokens.add(token_addr)
                         success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
                         
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"خطا ({result_info} ❌)"
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = price * (1 + (FIRE_TAKE_PROFIT / 100))
@@ -841,14 +837,13 @@ def unified_market_scanner_loop(app):
                             f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                         )
                         
-                        if success:
-                            active_positions[token_addr] = {
-                                "entry_price": price,
-                                "symbol": symbol,
-                                "tp": FIRE_TAKE_PROFIT,
-                                "sl": FIRE_STOP_LOSS,
-                                "highest_price": price
-                            }
+                        active_positions[token_addr] = {
+                            "entry_price": price,
+                            "symbol": symbol,
+                            "tp": FIRE_TAKE_PROFIT,
+                            "sl": FIRE_STOP_LOSS,
+                            "highest_price": price
+                        }
                         send_telegram_msg(msg)
 
         except Exception as e:
@@ -870,7 +865,7 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "Legendary Solana Bot with Anti-Fake Breakout Filter is running 24/7!"
+    return "Legendary Solana Bot with Tracking Mode is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
