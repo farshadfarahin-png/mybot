@@ -185,6 +185,16 @@ def get_token_balance(token_mint):
             time.sleep(1)
     return 0
 
+def is_token_worthy(pair):
+    try:
+        liquidity = float(pair.get('liquidity', {}).get('usd', 0))
+        volume_5m = float(pair.get('volume', {}).get('m5', 0))
+        if liquidity < 15000 or volume_5m < 5000:
+            return False
+        return True
+    except:
+        return False
+
 def is_token_safe(token_mint, strict=False):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
@@ -253,9 +263,11 @@ def get_real_market_trending_tokens():
 
     return tokens
 
-# 🌟 الگوریتم پرایس اکشن سخت‌گیر (شناسایی دقیق سقف/کف کلی، پولبک واقعی از حمایت، و ضد شکست فیک)
 def check_major_support_resistance_pa(pair):
     try:
+        if not is_token_worthy(pair):
+            return False, ""
+
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
         price_change_1h = float(pair.get('priceChange', {}).get('h1', 0))
         price_change_6h = float(pair.get('priceChange', {}).get('h6', 0))
@@ -264,18 +276,13 @@ def check_major_support_resistance_pa(pair):
         buys_5m = int(txns_5m.get('buys', 0))
         sells_5m = int(txns_5m.get('sells', 0))
 
-        # ۱. جلوگیری از ورود هنگام شکست فیک به سمت پایین یا ریزش زیر حمایت اصلی
         if price_change_5m < -3.5 or sells_5m > (buys_5m * 1.5):
             return False, ""
 
-        # ۲. بررسی قرار داشتن نمودار در ساختار کانال نوسانی بین سقف و کف کلی (بدون ریزش سنگین ساختاری)
         if price_change_6h < -10.0:
             return False, ""
 
-        # ۳. سناریو اول: برخورد به حمایت اصلی (کف کلی) و ثبت پولبک واقعی با تایید خریداران
         is_real_support_pullback = (-1.5 <= price_change_5m <= 2.5) and (buys_5m >= sells_5m) and (price_change_1h >= -2.0)
-
-        # ۴. سناریو دوم: شکست معتبر مقاومت کلی (سقف کلی) همراه با تثبیت و عدم فیک‌بریک‌اوت
         is_valid_resistance_breakout = (3.0 <= price_change_5m <= 10.0) and (buys_5m >= sells_5m * 1.5) and (price_change_1h > 3.0)
 
         if is_real_support_pullback:
@@ -518,35 +525,8 @@ def check_positions_loop():
                             if new_sl > sl:
                                 pos['sl'] = min(new_sl, 0)
 
-                        if -5.0 <= pnl_percent <= -3.0 and not pos.get('dca_done', False):
-                            pos['dca_done'] = True
-                            success_dca, _ = execute_real_buy(token_addr, 0.01)
-                            if success_dca:
-                                pos['entry_price'] = (pos['entry_price'] + current_price) / 2 
-                                send_telegram_msg(
-                                    f"🔄 **خرید پله‌ای (DCA) فعال شد**\n\n"
-                                    f"🪙 توکن: {symbol}\n"
-                                    f"📉 قیمت اصلاحی: ${current_price:.8f}\n"
-                                    f"✅ پله دوم خرید انجام شد و میانگین قیمت ورود تعدیل گردید."
-                                )
-
-                        half_tp = tp / 2.0
-                        if pnl_percent >= half_tp and not pos.get('half_sold', False):
-                            token_balance = get_token_balance(token_addr)
-                            if token_balance > 100:
-                                half_amount = token_balance // 2
-                                success_half, _ = execute_real_sell(token_addr, half_amount)
-                                if success_half:
-                                    pos['half_sold'] = True
-                                    send_telegram_msg(
-                                        f"🛡️ **مدیریت ریسک هوشمند (فروش پله‌ای)**\n\n"
-                                        f"🪙 توکن: {symbol}\n"
-                                        f"📊 سود فعلی: {pnl_percent:+.2f}%\n"
-                                        f"✅ ۵۰ درصد حجم برای ریسک‌فری شدن معامله نقد شد!"
-                                    )
-
                         if pnl_percent >= tp or pnl_percent <= pos['sl']:
-                            reason = "حد سود (TP) / تریلینگ فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
+                            reason = "حد سود (TP) / تارگت نهایی فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
 
                             success = False
                             sell_res_info = "تلاش‌ها ناموفق بود"
@@ -576,7 +556,7 @@ def check_positions_loop():
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
                             
                             exit_msg = (
-                                f"🔴 فروش خودکار ({reason})\n\n"
+                                f"🔴 فروش کامل ({reason})\n\n"
                                 f"🪙 توکن: {symbol}\n"
                                 f"📌 وضعیت: {sell_status_str}\n"
                                 f"📍 آدرس:\n{token_addr}\n\n"
@@ -595,7 +575,6 @@ def check_positions_loop():
             print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(3)
 
-# 🌟 موتور پرایس اکشن حرفه‌ای و سخت‌گیر (تشخیص سقف و کف کلی، پولبک واقعی و ضد شکست فیک)
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
     send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای (تشخیص سقف و کف کلی، پولبک واقعی و ضد فیک‌بریک‌اوت) فعال شد.")
@@ -621,15 +600,13 @@ def technical_analysis_scanner_loop(app):
                 volume_5m = float(pair.get('volume', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TECH_TOKEN')
 
-                if price <= 0 or liquidity < TECH_MIN_LIQUIDITY or volume_5m < TECH_MIN_VOLUME_5M:
+                if price <= 0:
                     continue
 
-                # بررسی فیلتر پیشرفته سقف/کف کلی و ضد فیک
                 is_valid_pa, pa_reason = check_major_support_resistance_pa(pair)
                 if not is_valid_pa:
                     continue
 
-                # بررسی امنیت لایه دوم و نهنگ‌ها
                 if not is_token_safe(token_addr) or not check_whale_and_advanced_security(token_addr, pair):
                     continue
 
@@ -650,7 +627,7 @@ def technical_analysis_scanner_loop(app):
                     f"📍 آدرس قرارداد:\n{token_addr}\n\n"
                     f"💵 نقطه ورود دقیق: {price:.8f}$\n"
                     f"💰 مقدار خرید: SOL {TECH_BUY_AMOUNT_SOL}\n"
-                    f"🎯 تارگت سود: +{TECH_TAKE_PROFIT}% (${target_tp_val:.8f})\n"
+                    f"🎯 تارگت سود نهایی: +{TECH_TAKE_PROFIT}% (${target_tp_val:.8f})\n"
                     f"🛑 حد ضرر: {TECH_STOP_LOSS}% (${target_sl_val:.8f})\n\n"
                     f"💧 نقدینگی: ${liquidity:,.0f} | 📊 حجم ۵م: ${volume_5m:,.0f}\n\n"
                     f"🔗 Solscan:\n{solscan_link}\n"
@@ -663,8 +640,6 @@ def technical_analysis_scanner_loop(app):
                         "symbol": symbol,
                         "tp": TECH_TAKE_PROFIT,
                         "sl": TECH_STOP_LOSS,
-                        "half_sold": False,
-                        "dca_done": False,
                         "highest_price": price
                     }
                 send_telegram_msg(tech_msg)
@@ -759,8 +734,6 @@ def unified_market_scanner_loop(app):
                                 "symbol": symbol,
                                 "tp": GOLDEN_TAKE_PROFIT,
                                 "sl": GOLDEN_STOP_LOSS,
-                                "half_sold": False,
-                                "dca_done": False,
                                 "highest_price": price
                             }
                         send_telegram_msg(golden_msg)
@@ -806,8 +779,6 @@ def unified_market_scanner_loop(app):
                                 "symbol": symbol,
                                 "tp": COMBO_TAKE_PROFIT,
                                 "sl": COMBO_STOP_LOSS,
-                                "half_sold": False,
-                                "dca_done": False,
                                 "highest_price": price
                             }
                         send_telegram_msg(combo_msg)
@@ -872,8 +843,6 @@ def unified_market_scanner_loop(app):
                                 "symbol": symbol,
                                 "tp": FIRE_TAKE_PROFIT,
                                 "sl": FIRE_STOP_LOSS,
-                                "half_sold": False,
-                                "dca_done": False,
                                 "highest_price": price
                             }
                         send_telegram_msg(msg)
