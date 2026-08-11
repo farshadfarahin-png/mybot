@@ -1102,12 +1102,11 @@ def unified_market_scanner_loop(app):
 
         time.sleep(2)
 
-# وب اپلیکیشن Flask کامل همراه با بخش تریدینگ و درگاه ثبت اشتراک ۱۰۰ دلاری ۳۰ روزه
+# وب اپلیکیشن Flask کامل همراه با بخش تریدینگ و درگاه ثبت اشتراک ۱۰۰ دلاری ۳۰ روزه (بدون نمایش موجودی برای کاربران)
 web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    sol_bal = get_sol_balance()
     html_template = """
     <!DOCTYPE html>
     <html lang="fa" dir="rtl">
@@ -1133,8 +1132,7 @@ def home():
             <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
             <p>AI Vision و سنتیمنت: <span class="sync-badge">فعال</span></p>
             <hr style="border: 0; border-top: 1px solid #334155; margin: 15px 0;">
-            <p style="word-break: break-all;">🔑 ولت ادمین: <code>{{ wallet }}</code></p>
-            <p>💰 موجودی ولت: <b>{{ balance }} SOL</b></p>
+            <p style="word-break: break-all;">🔑 ولت ادمین جهت واریز: <code>{{ wallet }}</code></p>
             
             <div style="background: #0f172a; padding: 15px; border-radius: 12px; margin-top: 15px; border: 1px solid #334155;">
                 <h3 style="color: #c084fc; font-size: 15px;">اشتراک ماهانه کپی‌تریدینگ ($100 / ۳۰ روزه)</h3>
@@ -1165,7 +1163,7 @@ def home():
     </body>
     </html>
     """
-    return render_template_string(html_template, wallet=WALLET_PUBKEY, balance=f"{sol_bal:.4f}")
+    return render_template_string(html_template, wallet=WALLET_PUBKEY)
 
 @web_app.route('/api/subscribe', methods=['POST'])
 def api_subscribe():
@@ -1229,7 +1227,7 @@ def get_main_keyboard():
         [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
          InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-         InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
+         InlineKeyboardButton("💰 موجودی ولت (مخصوص ادمین)", callback_data="wallet_balance")],
         [InlineKeyboardButton(pnl_percent_label, callback_data="refresh_pnl"),
          InlineKeyboardButton(pnl_usd_label, callback_data="refresh_pnl")]
     ]
@@ -1308,6 +1306,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE, COPY_TRADING_ENABLED, AWAITING_STATE
     query = update.callback_query
+    
+    # محافظت دسترسی ادمین برای دکمه‌های کنترلی
+    if str(query.from_user.id) != str(TELEGRAM_CHAT_ID):
+        try:
+            await query.answer("⛔ شما دسترسی ادمین ندارید!", show_alert=True)
+        except:
+            pass
+        return
+
     try:
         await query.answer()
     except Exception:
@@ -1315,9 +1322,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_smart_filter":
         SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
-        state_txt = "🛡️ فیلتر هوشمند تغییر وضعیت داد."
         try:
-            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
+            await query.edit_message_text("🛡️ فیلتر هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except Exception:
             pass
     elif query.data == "toggle_risk":
@@ -1386,15 +1392,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🛡️ فیلتر هوشمند: {'🟢 روشن' if SMART_FILTER_ENABLED else '🔴 خاموش'}\n"
             f"⚡ ابرسیگنال + AI Vision: {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
             f"🔗 کپی‌تریدینگ VIP (۱۰۰$): {'🟢 روشن' if COPY_TRADING_ENABLED else '🔴 خاموش'}\n"
-            f"🌐 مینی‌اپلیکیشن: 🟢 فعال\n"
-            f"💰 موجودی ولت: {get_sol_balance():.4f} SOL"
+            f"🌐 مینی‌اپلیکیشن: 🟢 فعال (موجودی پنهان برای کاربران)\n"
+            f"💰 موجودی ولت ادمین: {get_sol_balance():.4f} SOL"
         )
         try:
             await query.edit_message_text(status_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
         except:
             send_telegram_msg(status_text)
     elif query.data == "wallet_balance":
-        balance_text = f"💰 موجودی لحظه‌ای ولت: {get_sol_balance():.4f} SOL"
+        balance_text = f"💰 موجودی لحظه‌ای ولت ادمین (اختصاصی شما): {get_sol_balance():.4f} SOL"
         try:
             await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
         except:
