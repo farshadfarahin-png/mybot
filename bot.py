@@ -29,7 +29,7 @@ IS_RUNNING = False
 TREND_ALERT_RUNNING = False 
 COMBO_RUNNING = False       
 GOLDEN_OPTION = False       
-TECHNICAL_RUNNING = False   # 🌟 موتور اختصاصی تحلیل تکنیکال (حمایت/مقاومت/پولبک)
+TECHNICAL_RUNNING = False   # 🌟 موتور پرایس اکشن حرفه‌ای (سقف/کف کلی، کانال و فیک‌بریک‌اوت)
 
 # تنظیمات بخش خرید و فروش (🔥)
 FIRE_BUY_AMOUNT_SOL = 0.01
@@ -62,7 +62,7 @@ GOLDEN_MIN_VOLUME_5M = 30000
 GOLDEN_MIN_CHANGE_5M = 20.0
 GOLDEN_MIN_BUYS_5M = 80
 
-# 🌟 تنظیمات موتور اختصاصی تکنیکال (حمایت، مقاومت، پولبک)
+# 🌟 تنظیمات موتور پرایس اکشن (حمایت و مقاومت کلی)
 TECH_BUY_AMOUNT_SOL = 0.01
 TECH_TAKE_PROFIT = 20.0
 TECH_STOP_LOSS = -8.0
@@ -252,24 +252,39 @@ def get_real_market_trending_tokens():
 
     return tokens
 
-# 🌟 تحلیل تکنیکال واقعی: بررسی پولبک به حمایت، شکست مقاومت و خط روند
-def check_technical_support_resistance_setup(pair):
+# 🌟 الگوریتم پیشرفته پرایس اکشن (تشخیص سقف/کف کلی، پولبک واقعی از حمایت اصلی، شکست معتبر مقاومت بدون فیک‌بریک‌اوت)
+def check_major_support_resistance_pa(pair):
     try:
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
         price_change_1h = float(pair.get('priceChange', {}).get('h1', 0))
         price_change_6h = float(pair.get('priceChange', {}).get('h6', 0))
         
-        # ساختار روند صعودی کلی (بالاتر از کف‌های قبلی / روند مثبت ۶ ساعته و ۱ ساعته)
-        is_uptrend_structure = price_change_6h > 0 or price_change_1h > 2.0
-        
-        # سناریو ۱: پولبک به حمایت (در روند صعودی، قیمت در ۵ دقیقه گذشته بین -3% تا +1.5% تثبیت داده یا اصلاح کرده و آماده رشد است)
-        is_pullback_at_support = is_uptrend_structure and (-4.0 <= price_change_5m <= 2.0)
-        
-        # سناریو ۲: شکست مقاومت و تثبیت (Breakout + Consolidation) (روند ۱ ساعته قوی است و ۵ دقیقه اخیر بین +2% تا +10% رشد همراه با تثبیت داشته)
-        is_resistance_breakout = price_change_1h > 5.0 and (2.0 <= price_change_5m <= 12.0)
-        
-        if is_pullback_at_support or is_resistance_breakout:
-            return True, "پولبک به حمایت / شکست مقاومت تایید شد 📊"
+        txns_5m = pair.get('txns', {}).get('m5', {})
+        buys_5m = int(txns_5m.get('buys', 0))
+        sells_5m = int(txns_5m.get('sells', 0))
+
+        # جلوگیری کامل از ورود در صورت شکست فیک به سمت پایین یا ریزش زیر حمایت
+        if price_change_5m < -4.0 or sells_5m > (buys_5m * 1.6):
+            return False, ""
+
+        # بررسی ساختار کانال نوسانی بین سقف و کف کلی
+        is_in_range_channel = price_change_6h > -8.0
+
+        if not is_in_range_channel:
+            return False, ""
+
+        # سناریو ۱: پولبک واقعی از حمایت اصلی (قیمت پس از اصلاح به کف خورده و برگشت صعودی با تایید حجم خریداران داشته)
+        is_real_support_pullback = (-2.0 <= price_change_5m <= 3.0) and (buys_5m >= sells_5m) and (price_change_1h > -1.0)
+
+        # سناریو ۲: شکست معتبر سقف کلی و تثبیت (Breakout + Consolidation بدون فیک‌بریک‌اوت)
+        # قیمت مقاومت را شکسته، بین 3 تا 12 درصد رشد داشته و خریداران کاملاً بر فروشندگان غلبه دارند
+        is_valid_resistance_breakout = (3.0 <= price_change_5m <= 12.0) and (buys_5m > sells_5m * 1.4) and (price_change_1h > 4.0)
+
+        if is_real_support_pullback:
+            return True, "پولبک واقعی و معتبر از کف / حمایت اصلی 📈"
+        elif is_valid_resistance_breakout:
+            return True, "شکست معتبر سقف کلی همراه با تثبیت (بدون فیک) 🚀"
+
     except Exception:
         pass
     return False, ""
@@ -582,10 +597,10 @@ def check_positions_loop():
             print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(3)
 
-# 🌟 موتور پردازش مجزای تحلیل تکنیکال (حمایت، مقاومت و پولبک)
+# 🌟 موتور پرایس اکشن حرفه‌ای (سقف و کف کلی، کانال، جلوگیری از شکست فیک)
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
-    send_telegram_msg("📊 موتور تخصصی تحلیل تکنیکال (حمایت، مقاومت، پولبک و خط روند) فعال شد.")
+    send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای (تشخیص سقف و کف کلی، پولبک واقعی و ضد فیک‌بریک‌اوت) فعال شد.")
 
     while True:
         if not TECHNICAL_RUNNING:
@@ -610,9 +625,9 @@ def technical_analysis_scanner_loop(app):
                 if price <= 0 or liquidity < TECH_MIN_LIQUIDITY:
                     continue
 
-                # بررسی فیلتر حمایت، مقاومت و پولبک
-                is_valid_tech, tech_reason = check_technical_support_resistance_setup(pair)
-                if not is_valid_tech:
+                # بررسی فیلتر سقف/کف کلی و ضد فیک
+                is_valid_pa, pa_reason = check_major_support_resistance_pa(pair)
+                if not is_valid_pa:
                     continue
 
                 # بررسی امنیت لایه دوم و نهنگ‌ها
@@ -630,7 +645,7 @@ def technical_analysis_scanner_loop(app):
                 target_sl_val = price * (1 + (TECH_STOP_LOSS / 100))
 
                 tech_msg = (
-                    f"📊📈 سیگنال تکنیکال ({tech_reason})\n"
+                    f"📊📈 سیگنال پرایس اکشن ({pa_reason})\n"
                     f"📌 وضعیت خرید: {buy_status_str}\n\n"
                     f"🪙 توکن: {symbol}\n"
                     f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -656,7 +671,7 @@ def technical_analysis_scanner_loop(app):
                 send_telegram_msg(tech_msg)
 
         except Exception as e:
-            print(f"⚠️ خطای موتور تکنیکال: {e}")
+            print(f"⚠️ خطای موتور پرایس اکشن: {e}")
 
         time.sleep(3)
 
@@ -883,19 +898,18 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "Legendary Solana Bot with Technical Analysis & Support/Resistance is running 24/7!"
+    return "Legendary Solana Bot with Major Support/Resistance & Fake Breakout Filter is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
 
-# 🌟 بروزرسانی منوی شیشه‌ای تلگرام با کلید مجزای تحلیل تکنیکال
 def get_main_keyboard():
     golden_status = "🚀 گزینه طلایی: روشن" if GOLDEN_OPTION else "⭐ گزینه طلایی: خاموش"
     combo_status = "🚨 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
     trader_status = "🔥 خرید و فروش: روشن" if IS_RUNNING else "🔥 خرید و فروش: خاموش"
     trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
-    tech_status = "📊 تحلیل تکنیکال (پولبک/مقاومت): روشن" if TECHNICAL_RUNNING else "📊 تحلیل تکنیکال (پولبک/مقاومت): خاموش"
+    tech_status = "📊 پرایس اکشن (سقف/کف کلی): روشن" if TECHNICAL_RUNNING else "📊 پرایس اکشن (سقف/کف کلی): خاموش"
 
     open_pnl_usd = 0.0
     open_pnl_percent = 0.0
@@ -921,7 +935,7 @@ def get_main_keyboard():
     pnl_usd_label = f"💵 درآمد/ضرر دلاری: ${grand_total_usd:+.2f}"
 
     keyboard = [
-        [InlineKeyboardButton(tech_status, callback_data="toggle_technical")], # دکمه مستقل موتور تکنیکال
+        [InlineKeyboardButton(tech_status, callback_data="toggle_technical")],
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
         [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
@@ -933,10 +947,10 @@ def get_main_keyboard():
     ]
 
     if TECHNICAL_RUNNING:
-        keyboard.append([InlineKeyboardButton(f"⚙️ حجم معامله (تکنیکال): {TECH_BUY_AMOUNT_SOL} SOL", callback_data="menu_t_vol")])
+        keyboard.append([InlineKeyboardButton(f"⚙️ حجم معامله (پرایس اکشن): {TECH_BUY_AMOUNT_SOL} SOL", callback_data="menu_t_vol")])
         keyboard.append([
-            InlineKeyboardButton(f"📊 [تکنیکال] تارگت: +{TECH_TAKE_PROFIT}%", callback_data="menu_t_tp"),
-            InlineKeyboardButton(f"📊 [تکنیکال] ضرر: {TECH_STOP_LOSS}%", callback_data="menu_t_sl")
+            InlineKeyboardButton(f"📊 [پرایس اکشن] تارگت: +{TECH_TAKE_PROFIT}%", callback_data="menu_t_tp"),
+            InlineKeyboardButton(f"📊 [پرایس اکشن] ضرر: {TECH_STOP_LOSS}%", callback_data="menu_t_sl")
         ])
 
     return InlineKeyboardMarkup(keyboard)
@@ -988,7 +1002,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_technical":
         TECHNICAL_RUNNING = not TECHNICAL_RUNNING
-        state_txt = "📊 موتور تحلیل تکنیکال روشن شد." if TECHNICAL_RUNNING else "📊 موتور تحلیل تکنیکال خاموش شد."
+        state_txt = "📊 موتور پرایس اکشن روشن شد." if TECHNICAL_RUNNING else "📊 موتور پرایس اکشن خاموش شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -1037,7 +1051,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_sol_bal = get_sol_balance()
         status_text = (
             f"📊 وضعیت کامل سیستم:\n\n"
-            f"📊 تحلیل تکنیکال: {'🟢 روشن' if TECHNICAL_RUNNING else '🔴 خاموش'}\n"
+            f"📊 پرایس اکشن (سقف/کف کلی): {'🟢 روشن' if TECHNICAL_RUNNING else '🔴 خاموش'}\n"
             f"🚀 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
             f"🚨 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'}\n"
             f"🔥 خرید و فروش: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'}\n"
@@ -1057,13 +1071,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg(balance_text)
 
     elif query.data == "menu_t_vol":
-        AWAITING_STATE, cur_val, prefix = "tech_vol", TECH_BUY_AMOUNT_SOL, "📊 [تکنیکال] حجم معامله"
+        AWAITING_STATE, cur_val, prefix = "tech_vol", TECH_BUY_AMOUNT_SOL, "📊 [پرایس اکشن] حجم معامله"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_t_tp":
-        AWAITING_STATE, cur_val, prefix = "tech_tp", TECH_TAKE_PROFIT, "📊 [تکنیکال] تارگت سود"
+        AWAITING_STATE, cur_val, prefix = "tech_tp", TECH_TAKE_PROFIT, "📊 [پرایس اکشن] تارگت سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_t_sl":
-        AWAITING_STATE, cur_val, prefix = "tech_sl", TECH_STOP_LOSS, "📊 [تکنیکال] حد ضرر"
+        AWAITING_STATE, cur_val, prefix = "tech_sl", TECH_STOP_LOSS, "📊 [پرایس اکشن] حد ضرر"
         await prompt_input(query, prefix, cur_val)
             
     elif query.data == "cancel_input":
@@ -1096,7 +1110,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif st == "tech_tp": TECH_TAKE_PROFIT = val
             elif st == "tech_sl": TECH_STOP_LOSS = val
 
-            msg = f"✅ تنظیمات تکنیکال با موفقیت به مقدار {val} بروزرسانی شد."
+            msg = f"✅ تنظیمات پرایس اکشن با موفقیت به مقدار {val} بروزرسانی شد."
             AWAITING_STATE = None
             await update.message.reply_text(msg, reply_markup=get_main_keyboard())
         except ValueError:
@@ -1116,17 +1130,14 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # موتور حجم و مومنتوم
     unified_thread = Thread(target=unified_market_scanner_loop, args=(app,))
     unified_thread.daemon = True
     unified_thread.start()
 
-    # موتور اختصاصی تحلیل تکنیکال (حمایت، مقاومت و پولبک)
     tech_thread = Thread(target=technical_analysis_scanner_loop, args=(app,))
     tech_thread.daemon = True
     tech_thread.start()
 
-    # موتور مدیریت پوزیشن‌ها (تریلینگ، DCA، فروش پله‌ای)
     pos_thread = Thread(target=check_positions_loop)
     pos_thread.daemon = True
     pos_thread.start()
