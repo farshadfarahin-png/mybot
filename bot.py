@@ -32,7 +32,7 @@ GOLDEN_OPTION = False
 TECHNICAL_RUNNING = False   
 SMART_FILTER_ENABLED = True   
 DYNAMIC_RISK_ENABLED = True   
-MANUAL_SETTINGS_ENABLED = False # 🌟 سویچ جدید: کنترل نمایش دکمه‌های تنظیمات دستی
+MANUAL_SETTINGS_ENABLED = False 
 
 # تنظیمات بخش خرید و فروش (🔥)
 FIRE_BUY_AMOUNT_SOL = 0.01
@@ -666,7 +666,7 @@ def technical_analysis_scanner_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TECH_TOKEN')
 
-                if price <= 0:
+                if price <= 0 or liquidity < TECH_MIN_LIQUIDITY or volume_5m < TECH_MIN_VOLUME_5M:
                     continue
 
                 is_valid_pa, pa_reason = check_major_support_resistance_pa(pair)
@@ -767,6 +767,7 @@ def unified_market_scanner_loop(app):
                 if not check_whale_and_advanced_security(token_addr, pair):
                     continue
 
+                # 1. گزینه طلایی
                 if GOLDEN_OPTION and token_addr not in golden_processed_tokens:
                     if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
                         buys_5m >= GOLDEN_MIN_BUYS_5M and 
@@ -816,6 +817,7 @@ def unified_market_scanner_loop(app):
                         send_telegram_msg(golden_msg)
                         continue
 
+                # 2. حالت ترکیبی
                 if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
                     if (price_change_5m >= COMBO_MIN_CHANGE_5M and 
                         buys_5m >= MIN_BUYS_5M and 
@@ -864,6 +866,7 @@ def unified_market_scanner_loop(app):
                         send_telegram_msg(combo_msg)
                         continue
 
+                # 3. اعلان ترند
                 if TREND_ALERT_RUNNING and token_addr not in trend_alerted_tokens:
                     if (price_change_5m >= TREND_MIN_CHANGE_5M and 
                         buys_5m >= MIN_BUYS_5M and 
@@ -884,6 +887,7 @@ def unified_market_scanner_loop(app):
                         )
                         send_telegram_msg(alert_msg)
 
+                # 4. خرید و فروش معمولی (FIRE)
                 if IS_RUNNING and token_addr not in processed_tokens:
                     if (liquidity >= FIRE_MIN_LIQUIDITY and 
                         volume_5m >= FIRE_MIN_VOLUME_5M and 
@@ -1018,7 +1022,7 @@ def get_main_keyboard():
     keyboard = [
         [InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
          InlineKeyboardButton(risk_status, callback_data="toggle_risk")],
-        [InlineKeyboardButton(manual_status, callback_data="toggle_manual")], # 🌟 کلید کنترل تنظیمات دستی
+        [InlineKeyboardButton(manual_status, callback_data="toggle_manual")],
         [InlineKeyboardButton(tech_status, callback_data="toggle_technical")],
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
@@ -1030,7 +1034,7 @@ def get_main_keyboard():
          InlineKeyboardButton(pnl_usd_label, callback_data="refresh_pnl")]
     ]
 
-    # 🌟 کلیدهای تنظیمات دستی فقط زمانی ظاهر می‌شوند که کلید "تنظیمات دستی" روشن باشد
+    # 🌟 کلیدهای تنظیمات دستی برای تمام موتورها (هنگامی که فعال است)
     if MANUAL_SETTINGS_ENABLED:
         if TECHNICAL_RUNNING:
             keyboard.append([InlineKeyboardButton(f"⚙️ حجم (پرایس اکشن): {TECH_BUY_AMOUNT_SOL} SOL", callback_data="menu_t_vol")])
@@ -1040,15 +1044,24 @@ def get_main_keyboard():
             ])
 
         if GOLDEN_OPTION:
+            keyboard.append([InlineKeyboardButton(f"⚙️ حجم (گزینه طلایی): {GOLDEN_BUY_AMOUNT_SOL} SOL", callback_data="menu_g_vol")])
             keyboard.append([
                 InlineKeyboardButton(f"🚀 [گزینه طلایی] تارگت: +{GOLDEN_TAKE_PROFIT}%", callback_data="menu_g_tp"),
                 InlineKeyboardButton(f"🚀 [گزینه طلایی] ضرر: {GOLDEN_STOP_LOSS}%", callback_data="menu_g_sl")
             ])
 
         if COMBO_RUNNING:
+            keyboard.append([InlineKeyboardButton(f"⚙️ حجم (حالت ترکیبی): {COMBO_BUY_AMOUNT_SOL} SOL", callback_data="menu_c_vol")])
             keyboard.append([
                 InlineKeyboardButton(f"🚨 [حالت ترکیبی] تارگت: +{COMBO_TAKE_PROFIT}%", callback_data="menu_c_tp"),
                 InlineKeyboardButton(f"🚨 [حالت ترکیبی] ضرر: {COMBO_STOP_LOSS}%", callback_data="menu_c_sl")
+            ])
+
+        if IS_RUNNING:
+            keyboard.append([InlineKeyboardButton(f"⚙️ حجم (خرید و فروش): {FIRE_BUY_AMOUNT_SOL} SOL", callback_data="menu_f_vol")])
+            keyboard.append([
+                InlineKeyboardButton(f"🔥 [خرید و فروش] تارگت: +{FIRE_TAKE_PROFIT}%", callback_data="menu_f_tp"),
+                InlineKeyboardButton(f"🔥 [خرید و فروش] ضرر: {FIRE_STOP_LOSS}%", callback_data="menu_f_sl")
             ])
 
     return InlineKeyboardMarkup(keyboard)
@@ -1068,15 +1081,16 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 3")
         best_trades = cursor.fetchall()
 
+        # نمودار میله‌ای عملکرد ۲۴ ساعته و کلی
         chart_bars = "🟩" * min(int(max(total_pct, 0) // 5), 10) if total_pct >= 0 else "🟥" * min(int(abs(total_pct) // 5), 10)
         conn.close()
 
         stats_text = (
-            f"📊 **آمار تحلیلی و گزارش پیشرفته سوپر ربات:**\n\n"
+            f"📊 **آمار تحلیلی و گزارش نموداری ۲۴ ساعته ربات:**\n\n"
             f"🔹 کل معاملات انجام شده: {total_trades}\n"
             f"📈 مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
             f"💵 درآمد/ضرر دلاری کل: ${total_u:+.2f}\n\n"
-            f"📉 **نمودار عملکرد کلی:**\n`[{chart_bars}]`\n\n"
+            f"📉 **نمودار روند عملکرد:**\n`[{chart_bars}]`\n\n"
             f"🏆 **برترین معاملات ثبت‌شده:**\n"
         )
         for t in best_trades:
@@ -1200,6 +1214,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             send_telegram_msg(balance_text)
 
+    # مدیریت دکمه‌های تنظیمات دستی
     elif query.data == "menu_t_vol":
         AWAITING_STATE, cur_val, prefix = "tech_vol", TECH_BUY_AMOUNT_SOL, "📊 [پرایس اکشن] حجم معامله"
         await prompt_input(query, prefix, cur_val)
@@ -1209,17 +1224,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_t_sl":
         AWAITING_STATE, cur_val, prefix = "tech_sl", TECH_STOP_LOSS, "📊 [پرایس اکشن] حد ضرر"
         await prompt_input(query, prefix, cur_val)
+    elif query.data == "menu_g_vol":
+        AWAITING_STATE, cur_val, prefix = "golden_vol", GOLDEN_BUY_AMOUNT_SOL, "🚀 [گزینه طلایی] حجم معامله"
+        await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_tp":
         AWAITING_STATE, cur_val, prefix = "golden_tp", GOLDEN_TAKE_PROFIT, "🚀 [گزینه طلایی] تارگت سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_sl":
         AWAITING_STATE, cur_val, prefix = "golden_sl", GOLDEN_STOP_LOSS, "🚀 [گزینه طلایی] حد ضرر"
         await prompt_input(query, prefix, cur_val)
+    elif query.data == "menu_c_vol":
+        AWAITING_STATE, cur_val, prefix = "combo_vol", COMBO_BUY_AMOUNT_SOL, "🚨 [حالت ترکیبی] حجم معامله"
+        await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_tp":
         AWAITING_STATE, cur_val, prefix = "combo_tp", COMBO_TAKE_PROFIT, "🚨 [حالت ترکیبی] تارگت سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_sl":
         AWAITING_STATE, cur_val, prefix = "combo_sl", COMBO_STOP_LOSS, "🚨 [حالت ترکیبی] حد ضرر"
+        await prompt_input(query, prefix, cur_val)
+    elif query.data == "menu_f_vol":
+        AWAITING_STATE, cur_val, prefix = "fire_vol", FIRE_BUY_AMOUNT_SOL, "🔥 [خرید و فروش] حجم معامله"
+        await prompt_input(query, prefix, cur_val)
+    elif query.data == "menu_f_tp":
+        AWAITING_STATE, cur_val, prefix = "fire_tp", FIRE_TAKE_PROFIT, "🔥 [خرید و فروش] تارگت سود"
+        await prompt_input(query, prefix, cur_val)
+    elif query.data == "menu_f_sl":
+        AWAITING_STATE, cur_val, prefix = "fire_sl", FIRE_STOP_LOSS, "🔥 [خرید و فروش] حد ضرر"
         await prompt_input(query, prefix, cur_val)
             
     elif query.data == "cancel_input":
@@ -1238,7 +1268,9 @@ async def prompt_input(query, prefix, cur_val):
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS
-    global GOLDEN_TAKE_PROFIT, GOLDEN_STOP_LOSS, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS, AWAITING_STATE
+    global GOLDEN_BUY_AMOUNT_SOL, GOLDEN_TAKE_PROFIT, GOLDEN_STOP_LOSS
+    global COMBO_BUY_AMOUNT_SOL, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS
+    global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, AWAITING_STATE
     
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
@@ -1252,12 +1284,17 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if st == "tech_vol": TECH_BUY_AMOUNT_SOL = val
             elif st == "tech_tp": TECH_TAKE_PROFIT = val
             elif st == "tech_sl": TECH_STOP_LOSS = val
+            elif st == "golden_vol": GOLDEN_BUY_AMOUNT_SOL = val
             elif st == "golden_tp": GOLDEN_TAKE_PROFIT = val
             elif st == "golden_sl": GOLDEN_STOP_LOSS = val
+            elif st == "combo_vol": COMBO_BUY_AMOUNT_SOL = val
             elif st == "combo_tp": COMBO_TAKE_PROFIT = val
             elif st == "combo_sl": COMBO_STOP_LOSS = val
+            elif st == "fire_vol": FIRE_BUY_AMOUNT_SOL = val
+            elif st == "fire_tp": FIRE_TAKE_PROFIT = val
+            elif st == "fire_sl": FIRE_STOP_LOSS = val
 
-            msg = f"✅ تنظیمات با موفقیت به مقدار {val} بروزرسانی شد."
+            msg = f"✅ تنظیمات دستی با موفقیت به مقدار {val} بروزرسانی شد."
             AWAITING_STATE = None
             await update.message.reply_text(msg, reply_markup=get_main_keyboard())
         except ValueError:
@@ -1289,5 +1326,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 سوپر ربات نهایی با کلید کنترل تنظیمات دستی استارت شد.")
+    print("🚀 سوپر ربات نهایی با تنظیمات کامل حجم و سود/زیان استارت شد.")
     app.run_polling()
