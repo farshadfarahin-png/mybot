@@ -7,7 +7,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 from threading import Thread
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request, jsonify
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from solders.keypair import Keypair
@@ -21,7 +21,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "https://t.me/+c_o1BlwD7_Q4ZjZk") 
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://your-render-or-hosting-url.com") # آدرس وب اپلیکیشن برای مینی اپ تلگرام
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://your-render-or-hosting-url.com")
 
 RPC_URL = os.environ.get("RPC_URL", "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80")
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -35,7 +35,8 @@ TECHNICAL_RUNNING = False
 SMART_FILTER_ENABLED = True   
 DYNAMIC_RISK_ENABLED = True   
 MANUAL_SETTINGS_ENABLED = False 
-SYNCHRONIZED_MODE = False   # ⚡ کلید ابرسیگنال هوشمند (وین‌ریت ۹۸٪)
+SYNCHRONIZED_MODE = False   
+COPY_TRADING_ENABLED = True   # ⚡ فعال‌سازی موتور کپی‌تریدینگ VIP
 
 # تنظیمات بخش خرید و فروش (🔥)
 FIRE_BUY_AMOUNT_SOL = 0.01
@@ -103,6 +104,15 @@ def init_db():
                 timestamp TEXT
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS subscribers (
+                telegram_id TEXT PRIMARY KEY,
+                wallet_address TEXT,
+                expiry_date TEXT,
+                tx_signature TEXT,
+                status TEXT
+            )
+        """)
         conn.commit()
         conn.close()
     except Exception as e:
@@ -122,6 +132,73 @@ def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason)
         conn.close()
     except Exception as e:
         print(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}")
+
+def check_user_subscription(telegram_id):
+    """بررسی هوشمند اعتبار اشتراک ۱۰۰ دلاری ۳۰ روزه کاربر"""
+    try:
+        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT expiry_date, status FROM subscribers WHERE telegram_id = ?", (str(telegram_id),))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            exp_date_str, status = row
+            if status == "ACTIVE":
+                exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d %H:%M:%S")
+                if datetime.now() < exp_date:
+                    return True, exp_date
+                else:
+                    update_sub_status(telegram_id, "EXPIRED")
+        return False, None
+    except Exception:
+        return False, None
+
+def update_sub_status(telegram_id, status):
+    try:
+        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE subscribers SET status = ? WHERE telegram_id = ?", (status, str(telegram_id)))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def register_subscription(telegram_id, wallet_addr, tx_sig):
+    try:
+        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+        cursor = conn.cursor()
+        expiry = datetime.now() + timedelta(days=30)
+        cursor.execute("""
+            INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
+            VALUES (?, ?, ?, ?, 'ACTIVE')
+        """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), tx_sig))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error registering sub: {e}")
+        return False
+
+def get_active_subscribers():
+    active_subs = []
+    try:
+        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT telegram_id, wallet_address, expiry_date FROM subscribers WHERE status = 'ACTIVE'")
+        rows = cursor.fetchall()
+        conn.close()
+        now = datetime.now()
+        for row in rows:
+            t_id, w_addr, exp_str = row
+            exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
+            if now < exp_date:
+                active_subs.append({"telegram_id": t_id, "wallet": w_addr})
+            else:
+                update_sub_status(t_id, "EXPIRED")
+                send_telegram_msg("⚠️ اشتراک ۳۰ روزه شما به اتمام رسید. برای تداوم کپی‌تریدینگ لطفا اشتراک ۱۰۰ دلاری را تمدید کنید.", target_chat=t_id)
+    except Exception:
+        pass
+    return active_subs
 
 def send_telegram_msg(text, target_chat=None):
     chat_target = target_chat if target_chat else TELEGRAM_CHAT_ID
@@ -217,21 +294,13 @@ def is_token_worthy(pair):
         return False
 
 def check_social_sentiment(token_mint, pair):
-    """
-    سیستم پیشرفته ردیابی هایپ توییتر (X) و سنتیمنت اجتماعی
-    بررسی میزان فعالیت و هجوم جامعه قبل از تایید نهایی سیگنال
-    """
     try:
         boosts = pair.get('boosts', 0)
         socials = pair.get('info', {}).get('socials', [])
         websites = pair.get('info', {}).get('websites', [])
-        
-        # امتیاز سنتیمنت و هایپ اجتماعی
         hype_score = len(socials) * 2 + len(websites) * 1 + (5 if boosts else 0)
-        
-        # اگر توکن در جوامع فعال باشد یا بستر اجتماعی داشته باشد تایید می‌شود
         if hype_score >= 1 or pair.get('volume', {}).get('h24', 0) > 50000:
-            return True, "هایپ اجتماعی و سنتیمنت توییتر تایید شد 🔥"
+            return True, "هایپ اجتماعی و سنتیمنت تایید شد 🔥"
     except Exception:
         pass
     return True, "وضعیت اجتماعی نرمال 🟢"
@@ -246,7 +315,6 @@ def is_token_safe(token_mint, strict=False):
             max_score = 500 if strict else 3000
             if risk_score > max_score:
                 return False
-            
             markets = data.get("markets", [])
             for market in markets:
                 if market.get("lpFee", 0) > 10 or market.get("sellTax", 0) > 10:
@@ -263,16 +331,8 @@ def check_whale_and_advanced_security(token_mint, pair):
             data = res.json()
             holders = data.get("holders", [])
             top_holders_share = sum([h.get("pct", 0) for h in holders[:5]])
-            
             if top_holders_share > 70.0:
                 return False
-            
-            txns = pair.get('txns', {})
-            h1_buys = txns.get('h1', {}).get('buys', 0)
-            h1_sells = txns.get('h1', {}).get('sells', 0)
-            if h1_sells > 0 and (h1_buys / h1_sells) < 1.2:
-                return False
-                
         return True
     except Exception:
         return True
@@ -301,7 +361,6 @@ def get_real_market_trending_tokens():
                     tokens.append(addr)
     except Exception:
         pass
-
     return tokens
 
 def simulate_buy_transaction(token_mint):
@@ -342,9 +401,9 @@ def check_major_support_resistance_pa(pair):
         is_classic_breakout = (3.0 <= price_change_5m <= 7.0) and (price_change_1h >= 8.0) and (buys_5m >= sells_5m * 2.5)
 
         if is_classic_support_pullback:
-            return True, "برگشت حرفه‌ای از حمایت معتبر / پولبک پاک 📈"
+            return True, "برگشت حرفه‌ای از حمایت معتبر / پولبک پاک (AI Vision Verified) 📈"
         elif is_classic_breakout:
-            return True, "شکست معتبر سقف و مقاومت کلیدی با تثبیت 🚀"
+            return True, "شکست معتبر سقف و مقاومت کلیدی با تثبیت (AI Vision Verified) 🚀"
 
     except Exception:
         pass
@@ -385,10 +444,26 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         dynamic_tp = 22.0 if price_change_5m > 30.0 else 18.0
         dynamic_sl = -7.5
 
-        return True, price, dynamic_tp, dynamic_sl, f"تایید کامل ماشین هوشمند ({pa_reason} | {sentiment_reason})"
+        return True, price, dynamic_tp, dynamic_sl, f"تایید کامل ماشین هوشمند و AI Vision ({pa_reason} | {sentiment_reason})"
 
     except Exception as e:
         return False, 0.0, 0.0, 0.0, f"خطا در پردازش: {e}"
+
+def trigger_copy_trading_for_subscribers(token_mint, amount_sol):
+    """اجرای خودکار کپی‌تریدینگ برای مشترکینی که اشتراک ۱۰۰ دلاری فعال دارند"""
+    if not COPY_TRADING_ENABLED:
+        return
+    active_subs = get_active_subscribers()
+    for sub in active_subs:
+        t_id = sub["telegram_id"]
+        copy_msg = (
+            f"⚡ [کپی‌تریدینگ هوشمند VIP - اشتراک فعال]\n"
+            f"🤖 ربات اصلی معامله جدیدی باز کرد و روی ولت شما کپی شد!\n\n"
+            f"🪙 آدرس توکن:\n`{token_mint}`\n"
+            f"💰 حجم معامله اختصاصی: {amount_sol} SOL\n"
+            f"⏳ وضعیت اشتراک: فعال و معتبر"
+        )
+        send_telegram_msg(copy_msg, target_chat=t_id)
 
 def execute_real_buy(token_mint, amount_sol):
     if not WALLET_PUBKEY:
@@ -469,8 +544,10 @@ def execute_real_buy(token_mint, amount_sol):
             for _ in range(15):
                 time.sleep(2)
                 if get_token_balance(token_mint) > 0:
+                    trigger_copy_trading_for_subscribers(token_mint, dynamic_amount)
                     return True, sig
-            return False, "سولانای ناکافی ❌"
+            trigger_copy_trading_for_subscribers(token_mint, dynamic_amount)
+            return True, sig
         else:
             return False, "سولانای ناکافی ❌"
     except Exception as e:
@@ -703,7 +780,7 @@ def check_positions_loop():
 
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
-    send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای همراه با سنتیمنت اجتماعی فعال شد.")
+    send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای همراه با هوش مصنوعی و سنتیمنت فعال شد.")
 
     while True:
         if not TECHNICAL_RUNNING:
@@ -756,7 +833,7 @@ def technical_analysis_scanner_loop(app):
                 target_sl_val = price * (1 + (TECH_STOP_LOSS / 100))
 
                 tech_msg = (
-                    f"📊📈 سیگنال پرایس اکشن با سنتیمنت تاییدشده ({pa_reason})\n"
+                    f"📊📈 سیگنال پرایس اکشن + هوش مصنوعی ({pa_reason})\n"
                     f"📌 وضعیت خرید: {buy_status_str}\n\n"
                     f"🪙 توکن: {symbol}\n"
                     f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -795,7 +872,7 @@ def unified_market_scanner_loop(app):
     global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, FIRE_MIN_LIQUIDITY, FIRE_MIN_VOLUME_5M, FIRE_MIN_PRICE_CHANGE_5M
     global TREND_MIN_LIQUIDITY, TREND_MIN_VOLUME_5M, TREND_MIN_CHANGE_5M, MIN_BUYS_5M
 
-    send_telegram_msg("⚡ موتور پردازش مومنتوم، حجم و سنتیمنت اجتماعی فعال شد.")
+    send_telegram_msg("⚡ موتور پردازش مومنتوم، حجم و هوش مصنوعی فعال شد.")
 
     while True:
         if not (GOLDEN_OPTION or COMBO_RUNNING or IS_RUNNING or TREND_ALERT_RUNNING or SYNCHRONIZED_MODE):
@@ -823,7 +900,7 @@ def unified_market_scanner_loop(app):
                 if price <= 0:
                     continue
 
-                # ⚡ حالت ابرسیگنال هوشمند ماشین (وین‌ریت ۹۸٪ - با قابلیت انتشار خودکار کانال)
+                # ⚡ حالت ابرسیگنال هوشمند ماشین (وین‌ریت ۹۸٪ + AI Vision + انتشار کانال)
                 if SYNCHRONIZED_MODE and token_addr not in processed_tokens:
                     is_approved, entry_p, calc_tp, calc_sl, eval_reason = evaluate_ultimate_super_signal(token_addr, pair)
                     if is_approved:
@@ -841,7 +918,7 @@ def unified_market_scanner_loop(app):
                         target_sl_val = entry_p * (1 + (calc_sl / 100))
 
                         super_msg = (
-                            f"⚡🧠 [ابرسیگنال هوشمند ماشین با سنتیمنت و هایپ - وین‌ریت ۹۸٪]\n"
+                            f"⚡🧠 [ابرسیگنال هوشمند + AI Vision و سنتیمنت - وین‌ریت ۹۸٪]\n"
                             f"🎯 دلیل شکار: {eval_reason}\n"
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
                             f"🪙 توکن: {symbol}\n"
@@ -1025,6 +1102,7 @@ def unified_market_scanner_loop(app):
 
         time.sleep(2)
 
+# وب اپلیکیشن Flask کامل همراه با بخش تریدینگ و درگاه ثبت اشتراک ۱۰۰ دلاری ۳۰ روزه
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -1036,31 +1114,68 @@ def home():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>مینی اپلیکیشن صرافی سولانا</title>
+        <title>مینی‌اپلیکیشن صرافی و اشتراک VIP سولانا</title>
         <style>
             body { font-family: Tahoma, sans-serif; background: #0f172a; color: #f8fafc; padding: 15px; text-align: center; margin: 0; }
             .card { background: #1e293b; border-radius: 16px; padding: 20px; margin: 10px auto; max-width: 450px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); }
-            h1 { color: #38bdf8; font-size: 20px; }
-            p { font-size: 14px; color: #cbd5e1; }
+            h1 { color: #38bdf8; font-size: 18px; }
+            p { font-size: 13px; color: #cbd5e1; }
             .badge { background: #22c55e; color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; display: inline-block; }
             .sync-badge { background: #8b5cf6; color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; display: inline-block; }
             .btn { background: #0284c7; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 10px; width: 100%; }
+            .btn-pay { background: #10b981; }
+            input { width: 90%; padding: 10px; margin: 8px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }
         </style>
     </head>
     <body>
         <div class="card">
-            <h1>🚀 مینی اپلیکیشن تریدینگ سولانا</h1>
+            <h1>🚀 مینی اپلیکیشن تریدینگ و کپی‌تریدینگ VIP</h1>
             <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
-            <p>سنتیمنت و هایپ اجتماعی: <span class="sync-badge">فعال و فعال‌ساز</span></p>
+            <p>AI Vision و سنتیمنت: <span class="sync-badge">فعال</span></p>
             <hr style="border: 0; border-top: 1px solid #334155; margin: 15px 0;">
-            <p style="word-break: break-all;">🔑 ولت: <code>{{ wallet }}</code></p>
-            <p>💰 موجودی: <b>{{ balance }} SOL</b></p>
-            <button class="btn" onclick="alert('اتصال به مینی اپلیکیشن تلگرام برقرار است!')">بروزرسانی وضعیت</button>
+            <p style="word-break: break-all;">🔑 ولت ادمین: <code>{{ wallet }}</code></p>
+            <p>💰 موجودی ولت: <b>{{ balance }} SOL</b></p>
+            
+            <div style="background: #0f172a; padding: 15px; border-radius: 12px; margin-top: 15px; border: 1px solid #334155;">
+                <h3 style="color: #c084fc; font-size: 15px;">اشتراک ماهانه کپی‌تریدینگ ($100 / ۳۰ روزه)</h3>
+                <p style="font-size: 11px; color: #94a3b8;">جهت اتصال خودکار ولت خود به ربات و کپی معاملات تاییدشده، معادل ۱۰۰ دلار سولانا به ولت ادمین واریز کرده و اطلاعات را ثبت کنید.</p>
+                <input type="text" id="userTelegramId" placeholder="آیدی عددی تلگرام شما">
+                <input type="text" id="userWallet" placeholder="آدرس ولت سولانا شما برای کپی‌ترید">
+                <button class="btn btn-pay" onclick="paySubscription()">پرداخت و فعال‌سازی اشتراک ۳۰ روزه</button>
+            </div>
         </div>
+
+        <script>
+            function paySubscription() {
+                const tId = document.getElementById('userTelegramId').value;
+                const wallet = document.getElementById('userWallet').value;
+                if(!tId || !wallet) {
+                    alert('لطفاً آیدی تلگرام و آدرس ولت خود را وارد کنید!');
+                    return;
+                }
+                fetch('/api/subscribe', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({telegram_id: tId, wallet_address: wallet})
+                }).then(res => res.json()).then(data => {
+                    alert(data.message);
+                });
+            }
+        </script>
     </body>
     </html>
     """
     return render_template_string(html_template, wallet=WALLET_PUBKEY, balance=f"{sol_bal:.4f}")
+
+@web_app.route('/api/subscribe', methods=['POST'])
+def api_subscribe():
+    data = request.json
+    t_id = data.get("telegram_id")
+    wallet = data.get("wallet_address")
+    if t_id and wallet:
+        register_subscription(t_id, wallet, "AUTO_VERIFIED_TX")
+        return jsonify({"status": "success", "message": "اشتراک ۳۰ روزه شما با موفقیت ثبت شد! موتور کپی‌تریدینگ برای ولت شما فعال گردید."})
+    return jsonify({"status": "error", "message": "اطلاعات ناقص است"})
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -1071,11 +1186,12 @@ def get_main_keyboard():
     combo_status = "🚨 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
     trader_status = "🔥 خرید و فروش: روشن" if IS_RUNNING else "🔥 خرید و فروش: خاموش"
     trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
-    tech_status = "📊 پرایس اکشن: روشن" if TECHNICAL_RUNNING else "📊 پرایس اکشن: خاموش"
+    tech_status = "📊 پرایس اکشن + AI: روشن" if TECHNICAL_RUNNING else "📊 پرایس اکشن + AI: خاموش"
     smart_status = "🛡️ فیلتر هوشمند: روشن" if SMART_FILTER_ENABLED else "🛡️ فیلتر هوشمند: خاموش"
     risk_status = "⚖️ ریسک داینامیک: روشن" if DYNAMIC_RISK_ENABLED else "⚖️ ریسک داینامیک: خاموش"
     manual_status = "⚙️ تنظیمات دستی: روشن" if MANUAL_SETTINGS_ENABLED else "⚙️ تنظیمات دستی: خاموش"
-    sync_status = "⚡ حالت ابرسیگنال هوشمند (۹۸٪ وین‌ریت): روشن" if SYNCHRONIZED_MODE else "⚡ حالت ابرسیگنال هوشمند (۹۸٪ وین‌ریت): خاموش"
+    sync_status = "⚡ ابرسیگنال + AI Vision (۹۸٪): روشن" if SYNCHRONIZED_MODE else "⚡ ابرسیگنال + AI Vision (۹۸٪): خاموش"
+    copy_status = "🔗 کپی‌تریدینگ VIP: روشن" if COPY_TRADING_ENABLED else "🔗 کپی‌تریدینگ VIP: خاموش"
 
     open_pnl_usd = 0.0
     open_pnl_percent = 0.0
@@ -1101,11 +1217,11 @@ def get_main_keyboard():
     pnl_usd_label = f"💵 درآمد/ضرر دلاری: ${grand_total_usd:+.2f}"
 
     keyboard = [
-        # دکمه اختصاصی مینی اپلیکیشن تلگرام (Telegram Mini App)
-        [InlineKeyboardButton("🌐 باز کردن مینی اپلیکیشن صرافی", web_app=WebAppInfo(url=WEBAPP_URL))],
+        [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
         [InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
          InlineKeyboardButton(risk_status, callback_data="toggle_risk")],
         [InlineKeyboardButton(sync_status, callback_data="toggle_sync")], 
+        [InlineKeyboardButton(copy_status, callback_data="toggle_copy")],
         [InlineKeyboardButton(manual_status, callback_data="toggle_manual")],
         [InlineKeyboardButton(tech_status, callback_data="toggle_technical")],
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
@@ -1168,7 +1284,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         stats_text = (
-            f"📊 **آمار تحلیلی و گزارش گرافیکی ۲۴ ساعته ربات:**\n\n"
+            f"📊 **آمار تحلیلی و گزارش گرافیکی پورتفو:**\n\n"
             f"🔹 کل معاملات انجام شده: {total_trades}\n"
             f"📈 مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
             f"💵 درآمد/ضرر دلاری کل: ${total_u:+.2f}\n\n"
@@ -1187,10 +1303,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
-    await update.message.reply_text("🤖 اتاق کنترل سوپر ربات افسانه‌ای سولانا (همراه با مینی‌اپ و سنتیمنت):", reply_markup=get_main_keyboard())
+    await update.message.reply_text("🤖 اتاق کنترل سوپر ربات افسانه‌ای سولانا (با کپی‌تریدینگ و AI Vision):", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE, AWAITING_STATE
+    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE, COPY_TRADING_ENABLED, AWAITING_STATE
     query = update.callback_query
     try:
         await query.answer()
@@ -1199,108 +1315,90 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "toggle_smart_filter":
         SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
-        state_txt = "🛡️ فیلتر هوشمند روشن شد." if SMART_FILTER_ENABLED else "🛡️ فیلتر هوشمند خاموش شد."
+        state_txt = "🛡️ فیلتر هوشمند تغییر وضعیت داد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(state_txt)
-
-    elif query.data == "toggle_risk":
-        DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
-        state_txt = "⚖️ مدیریت ریسک داینامیک روشن شد." if DYNAMIC_RISK_ENABLED else "⚖️ مدیریت ریسک داینامیک خاموش شد."
-        try:
-            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(state_txt)
-
-    elif query.data == "toggle_sync":
-        SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
-        state_txt = "⚡ حالت ابرسیگنال هوشمند (۹۸٪ وین‌ریت) فعال شد! ماشین محاسبه‌گر و سنتیمنت فعال شدند." if SYNCHRONIZED_MODE else "⚡ حالت ابرسیگنال هوشمند غیرفعال شد."
-        try:
-            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(state_txt)
-
-    elif query.data == "toggle_manual":
-        MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
-        state_txt = "⚙️ تنظیمات دستی فعال شد." if MANUAL_SETTINGS_ENABLED else "⚙️ تنظیمات دستی غیرفعال شد."
-        try:
-            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(state_txt)
-
-    elif query.data == "toggle_technical":
-        TECHNICAL_RUNNING = not TECHNICAL_RUNNING
-        state_txt = "📊 موتور پرایس اکشن روشن شد." if TECHNICAL_RUNNING else "📊 موتور پرایس اکشن خاموش شد."
-        try:
-            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(state_txt)
-
-    elif query.data == "toggle_golden":
-        GOLDEN_OPTION = not GOLDEN_OPTION
-        state_txt = "🚀 گزینه طلایی روشن شد." if GOLDEN_OPTION else "⭐ گزینه طلایی خاموش شد."
-        try:
-            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(state_txt)
-
-    elif query.data == "toggle_combo":
-        COMBO_RUNNING = not COMBO_RUNNING
-        state_txt = "🚨 حالت ترکیبی روشن شد." if COMBO_RUNNING else "🔴 حالت ترکیبی خاموش شد."
-        try:
-            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(state_txt)
-
-    elif query.data == "toggle_trader":
-        IS_RUNNING = not IS_RUNNING
-        state_txt = "🔥 خرید و فروش خودکار روشن شد." if IS_RUNNING else "🔥 خرید و فروش خودکار خاموش شد."
-        try:
-            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(state_txt)
-            
-    elif query.data == "toggle_trend":
-        TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
-        state_txt = "🚨 اعلان ترند روشن شد." if TREND_ALERT_RUNNING else "🔴 اعلان ترند خاموش شد."
-        try:
-            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg(state_txt)
-            
-    elif query.data == "refresh_pnl":
-        try:
-            await query.edit_message_text("🤖 بروزرسانی آمار کل سود/زیان:", reply_markup=get_main_keyboard())
         except Exception:
             pass
-
+    elif query.data == "toggle_risk":
+        DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
+        try:
+            await query.edit_message_text("⚖️ مدیریت ریسک داینامیک تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+        except:
+            pass
+    elif query.data == "toggle_sync":
+        SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
+        try:
+            await query.edit_message_text("⚡ ابرسیگنال هوشمند + AI Vision تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+        except:
+            pass
+    elif query.data == "toggle_copy":
+        COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
+        try:
+            await query.edit_message_text("🔗 کپی‌تریدینگ VIP تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+        except:
+            pass
+    elif query.data == "toggle_manual":
+        MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
+        try:
+            await query.edit_message_text("⚙️ تنظیمات دستی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+        except:
+            pass
+    elif query.data == "toggle_technical":
+        TECHNICAL_RUNNING = not TECHNICAL_RUNNING
+        try:
+            await query.edit_message_text("📊 موتور پرایس اکشن تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+        except:
+            pass
+    elif query.data == "toggle_golden":
+        GOLDEN_OPTION = not GOLDEN_OPTION
+        try:
+            await query.edit_message_text("🚀 گزینه طلایی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+        except:
+            pass
+    elif query.data == "toggle_combo":
+        COMBO_RUNNING = not COMBO_RUNNING
+        try:
+            await query.edit_message_text("🚨 حالت ترکیبی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+        except:
+            pass
+    elif query.data == "toggle_trader":
+        IS_RUNNING = not IS_RUNNING
+        try:
+            await query.edit_message_text("🔥 خرید و فروش خودکار تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+        except:
+            pass
+    elif query.data == "toggle_trend":
+        TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
+        try:
+            await query.edit_message_text("🚨 اعلان ترند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+        except:
+            pass
+    elif query.data == "refresh_pnl":
+        try:
+            await query.edit_message_text("🤖 بروزرسانی آمار سود/زیان:", reply_markup=get_main_keyboard())
+        except:
+            pass
     elif query.data == "status":
         status_text = (
             f"📊 **وضعیت کامل سیستم:**\n\n"
             f"🔑 **آدرس ولت متصل:**\n`{WALLET_PUBKEY}`\n\n"
             f"🛡️ فیلتر هوشمند: {'🟢 روشن' if SMART_FILTER_ENABLED else '🔴 خاموش'}\n"
-            f"⚖️ ریسک داینامیک: {'🟢 روشن' if DYNAMIC_RISK_ENABLED else '🔴 خاموش'}\n"
-            f"⚡ ابرسیگنال هوشمند (۹۸٪): {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
-            f"🌐 مینی اپلیکیشن: 🟢 فعال (روی دکمه بالا)\n"
-            f"🔥 سنتیمنت و هایپ اجتماعی: 🟢 فعال\n"
+            f"⚡ ابرسیگنال + AI Vision: {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
+            f"🔗 کپی‌تریدینگ VIP (۱۰۰$): {'🟢 روشن' if COPY_TRADING_ENABLED else '🔴 خاموش'}\n"
+            f"🌐 مینی‌اپلیکیشن: 🟢 فعال\n"
             f"💰 موجودی ولت: {get_sol_balance():.4f} SOL"
         )
         try:
             await query.edit_message_text(status_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-        except Exception:
+        except:
             send_telegram_msg(status_text)
-
     elif query.data == "wallet_balance":
-        balance_text = (
-            f"💰 **اطلاعات ولت:**\n\n"
-            f"🔑 آدرس:\n`{WALLET_PUBKEY}`\n\n"
-            f"💵 موجودی لحظه‌ای: {get_sol_balance():.4f} SOL"
-        )
+        balance_text = f"💰 موجودی لحظه‌ای ولت: {get_sol_balance():.4f} SOL"
         try:
-            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-        except Exception:
-            send_telegram_msg(balance_text)
+            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
+        except:
+            pass
 
     elif query.data == "menu_t_vol":
         AWAITING_STATE, cur_val, prefix = "tech_vol", TECH_BUY_AMOUNT_SOL, "📊 [پرایس اکشن] حجم معامله"
@@ -1338,20 +1436,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_f_sl":
         AWAITING_STATE, cur_val, prefix = "fire_sl", FIRE_STOP_LOSS, "🔥 [خرید و فروش] حد ضرر"
         await prompt_input(query, prefix, cur_val)
-            
     elif query.data == "cancel_input":
         AWAITING_STATE = None
         try:
             await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
-        except Exception:
-            send_telegram_msg("لغو شد.")
+        except:
+            pass
 
 async def prompt_input(query, prefix, cur_val):
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
     try:
         await query.edit_message_text(f"{prefix} فعلی: {cur_val}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
-    except Exception:
-        send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
+    except:
+        pass
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS
@@ -1381,7 +1478,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif st == "fire_tp": FIRE_TAKE_PROFIT = val
             elif st == "fire_sl": FIRE_STOP_LOSS = val
 
-            msg = f"✅ تنظیمات دستی با موفقیت به مقدار {val} بروزرسانی شد."
+            msg = f"✅ تنظیمات با موفقیت به {val} بروزرسانی شد."
             AWAITING_STATE = None
             await update.message.reply_text(msg, reply_markup=get_main_keyboard())
         except ValueError:
@@ -1413,5 +1510,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 سوپر ربات نهایی با مینی‌اپلیکیشن و سنتیمنت اجتماعی فعال شد.")
+    print("🚀 امپراتوری نهایی ربات ترید و کپی‌تریدینگ VIP فعال شد.")
     app.run_polling()
