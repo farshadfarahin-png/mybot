@@ -62,11 +62,12 @@ GOLDEN_MIN_VOLUME_5M = 30000
 GOLDEN_MIN_CHANGE_5M = 20.0
 GOLDEN_MIN_BUYS_5M = 80
 
-# 🌟 تنظیمات موتور پرایس اکشن (حمایت و مقاومت کلی)
+# 🌟 تنظیمات موتور پرایس اکشن سخت‌گیر (حمایت و مقاومت کلی)
 TECH_BUY_AMOUNT_SOL = 0.01
 TECH_TAKE_PROFIT = 20.0
 TECH_STOP_LOSS = -8.0
 TECH_MIN_LIQUIDITY = 35000
+TECH_MIN_VOLUME_5M = 15000
 
 AWAITING_STATE = None 
 processed_tokens = set()
@@ -252,7 +253,7 @@ def get_real_market_trending_tokens():
 
     return tokens
 
-# 🌟 الگوریتم پیشرفته پرایس اکشن (تشخیص سقف/کف کلی، پولبک واقعی از حمایت اصلی، شکست معتبر مقاومت بدون فیک‌بریک‌اوت)
+# 🌟 الگوریتم پرایس اکشن سخت‌گیر (شناسایی دقیق سقف/کف کلی، پولبک واقعی از حمایت، و ضد شکست فیک)
 def check_major_support_resistance_pa(pair):
     try:
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
@@ -263,22 +264,19 @@ def check_major_support_resistance_pa(pair):
         buys_5m = int(txns_5m.get('buys', 0))
         sells_5m = int(txns_5m.get('sells', 0))
 
-        # جلوگیری کامل از ورود در صورت شکست فیک به سمت پایین یا ریزش زیر حمایت
-        if price_change_5m < -4.0 or sells_5m > (buys_5m * 1.6):
+        # ۱. جلوگیری از ورود هنگام شکست فیک به سمت پایین یا ریزش زیر حمایت اصلی
+        if price_change_5m < -3.5 or sells_5m > (buys_5m * 1.5):
             return False, ""
 
-        # بررسی ساختار کانال نوسانی بین سقف و کف کلی
-        is_in_range_channel = price_change_6h > -8.0
-
-        if not is_in_range_channel:
+        # ۲. بررسی قرار داشتن نمودار در ساختار کانال نوسانی بین سقف و کف کلی (بدون ریزش سنگین ساختاری)
+        if price_change_6h < -10.0:
             return False, ""
 
-        # سناریو ۱: پولبک واقعی از حمایت اصلی (قیمت پس از اصلاح به کف خورده و برگشت صعودی با تایید حجم خریداران داشته)
-        is_real_support_pullback = (-2.0 <= price_change_5m <= 3.0) and (buys_5m >= sells_5m) and (price_change_1h > -1.0)
+        # ۳. سناریو اول: برخورد به حمایت اصلی (کف کلی) و ثبت پولبک واقعی با تایید خریداران
+        is_real_support_pullback = (-1.5 <= price_change_5m <= 2.5) and (buys_5m >= sells_5m) and (price_change_1h >= -2.0)
 
-        # سناریو ۲: شکست معتبر سقف کلی و تثبیت (Breakout + Consolidation بدون فیک‌بریک‌اوت)
-        # قیمت مقاومت را شکسته، بین 3 تا 12 درصد رشد داشته و خریداران کاملاً بر فروشندگان غلبه دارند
-        is_valid_resistance_breakout = (3.0 <= price_change_5m <= 12.0) and (buys_5m > sells_5m * 1.4) and (price_change_1h > 4.0)
+        # ۴. سناریو دوم: شکست معتبر مقاومت کلی (سقف کلی) همراه با تثبیت و عدم فیک‌بریک‌اوت
+        is_valid_resistance_breakout = (3.0 <= price_change_5m <= 10.0) and (buys_5m >= sells_5m * 1.5) and (price_change_1h > 3.0)
 
         if is_real_support_pullback:
             return True, "پولبک واقعی و معتبر از کف / حمایت اصلی 📈"
@@ -597,7 +595,7 @@ def check_positions_loop():
             print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(3)
 
-# 🌟 موتور پرایس اکشن حرفه‌ای (سقف و کف کلی، کانال، جلوگیری از شکست فیک)
+# 🌟 موتور پرایس اکشن حرفه‌ای و سخت‌گیر (تشخیص سقف و کف کلی، پولبک واقعی و ضد شکست فیک)
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
     send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای (تشخیص سقف و کف کلی، پولبک واقعی و ضد فیک‌بریک‌اوت) فعال شد.")
@@ -620,12 +618,13 @@ def technical_analysis_scanner_loop(app):
                 pair = pair_res['pairs'][0]
                 price = float(pair.get('priceUsd', 0))
                 liquidity = float(pair.get('liquidity', {}).get('usd', 0))
+                volume_5m = float(pair.get('volume', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TECH_TOKEN')
 
-                if price <= 0 or liquidity < TECH_MIN_LIQUIDITY:
+                if price <= 0 or liquidity < TECH_MIN_LIQUIDITY or volume_5m < TECH_MIN_VOLUME_5M:
                     continue
 
-                # بررسی فیلتر سقف/کف کلی و ضد فیک
+                # بررسی فیلتر پیشرفته سقف/کف کلی و ضد فیک
                 is_valid_pa, pa_reason = check_major_support_resistance_pa(pair)
                 if not is_valid_pa:
                     continue
@@ -653,7 +652,7 @@ def technical_analysis_scanner_loop(app):
                     f"💰 مقدار خرید: SOL {TECH_BUY_AMOUNT_SOL}\n"
                     f"🎯 تارگت سود: +{TECH_TAKE_PROFIT}% (${target_tp_val:.8f})\n"
                     f"🛑 حد ضرر: {TECH_STOP_LOSS}% (${target_sl_val:.8f})\n\n"
-                    f"💧 نقدینگی: ${liquidity:,.0f}\n\n"
+                    f"💧 نقدینگی: ${liquidity:,.0f} | 📊 حجم ۵م: ${volume_5m:,.0f}\n\n"
                     f"🔗 Solscan:\n{solscan_link}\n"
                     f"📈 DexScreener:\nhttps://dexscreener.com/solana/{token_addr}"
                 )
@@ -1047,15 +1046,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     elif query.data == "status":
-        pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
-        current_sol_bal = get_sol_balance()
         status_text = (
             f"📊 وضعیت کامل سیستم:\n\n"
             f"📊 پرایس اکشن (سقف/کف کلی): {'🟢 روشن' if TECHNICAL_RUNNING else '🔴 خاموش'}\n"
             f"🚀 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
             f"🚨 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'}\n"
             f"🔥 خرید و فروش: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'}\n"
-            f"💰 موجودی ولت: {current_sol_bal:.4f} SOL"
+            f"💰 موجودی ولت: {get_sol_balance():.4f} SOL"
         )
         try:
             await query.edit_message_text(status_text, reply_markup=get_main_keyboard())
@@ -1063,8 +1060,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_telegram_msg(status_text)
 
     elif query.data == "wallet_balance":
-        current_sol_bal = get_sol_balance()
-        balance_text = f"💰 موجودی ولت: {current_sol_bal:.4f} SOL"
+        balance_text = f"💰 موجودی ولت: {get_sol_balance():.4f} SOL"
         try:
             await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
         except Exception:
