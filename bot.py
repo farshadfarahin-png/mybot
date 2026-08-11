@@ -1161,8 +1161,15 @@ def home():
         </div>
 
         <script>
-            // تشخیص وضعیت ادمین یا کاربر از طریق API
-            fetch('/api/check-status')
+            // دریافت پارامتر آیدی تلگرام کاربر از طریقکرام (Telegram WebApp initDataUnsafe) یا فچ
+            const urlParams = new URLSearchParams(window.location.search);
+            // فرض بر این است که تلگرام دیتای کاربر را ارسال می‌کند یا از طریق ادمین بودن چک می‌شود
+            let telegramId = "";
+            if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user) {
+                telegramId = window.Telegram.WebApp.initDataUnsafe.user.id;
+            }
+
+            fetch('/api/check-status?telegram_id=' + telegramId)
             .then(res => res.json())
             .then(data => {
                 const area = document.getElementById('contentArea');
@@ -1185,7 +1192,7 @@ def home():
                         <p style="word-break: break-all; font-size:11px;">🔑 ولت جهت واریز: <code>{{ wallet }}</code></p>
                         <hr style="border:0; border-top:1px solid #334155; margin:10px 0;">
                         <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه کپی‌تریدینگ ($100)</h3>
-                        <input type="text" id="userTelegramId" placeholder="آیدی عددی تلگرام شما">
+                        <input type="text" id="userTelegramId" value="${telegramId}" placeholder="آیدی عددی تلگرام شما">
                         <input type="text" id="userWallet" placeholder="آدرس ولت سولانا شما برای کپی‌ترید">
                         <button class="btn btn-pay" onclick="paySubscription()">پرداخت و فعال‌سازی اشتراک</button>
                     `;
@@ -1212,9 +1219,11 @@ def home():
 
 @web_app.route('/api/check-status')
 def api_check_status():
-    subs = get_active_subscribers()
+    t_id = request.args.get("telegram_id", "")
+    is_admin_user = (str(t_id) == str(TELEGRAM_CHAT_ID))
+    subs = get_active_subscribers() if is_admin_user else []
     return jsonify({
-        "is_admin": True, # برای نمایش پنل مدیریت ادمین
+        "is_admin": is_admin_user,
         "subscribers": subs
     })
 
@@ -1268,7 +1277,7 @@ def get_main_keyboard():
     pnl_usd_label = f"💵 درآمد/ضرر دلاری: ${grand_total_usd:+.2f}"
 
     keyboard = [
-        [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و پنل مدیریت VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
+        [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
         [InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
          InlineKeyboardButton(risk_status, callback_data="toggle_risk")],
         [InlineKeyboardButton(sync_status, callback_data="toggle_sync")], 
