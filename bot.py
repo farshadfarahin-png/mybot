@@ -29,34 +29,34 @@ TREND_ALERT_RUNNING = False
 COMBO_RUNNING = False       
 GOLDEN_OPTION = False       
 
-# تنظیمات بخش خرید و فروش (🔥)
-FIRE_BUY_AMOUNT_SOL = 0.005
-FIRE_TAKE_PROFIT = 30.0
-FIRE_STOP_LOSS = -12.0
-FIRE_MIN_LIQUIDITY = 35000       
+# تنظیمات بخش خرید و فروش (🔥) - مطابق عکس
+FIRE_BUY_AMOUNT_SOL = 0.01
+FIRE_TAKE_PROFIT = 18.0
+FIRE_STOP_LOSS = -10.0
+FIRE_MIN_LIQUIDITY = 30000       
 FIRE_MIN_VOLUME_5M = 5000       
 FIRE_MIN_PRICE_CHANGE_5M = 5.0  
 
-# تنظیمات بخش ترکیبی (🚨)
-COMBO_BUY_AMOUNT_SOL = 0.005
-COMBO_TAKE_PROFIT = 20.0
-COMBO_STOP_LOSS = -5.0
+# تنظیمات بخش ترکیبی (🚨) - مطابق عکس
+COMBO_BUY_AMOUNT_SOL = 0.01
+COMBO_TAKE_PROFIT = 18.0
+COMBO_STOP_LOSS = -10.0
 COMBO_MIN_LIQUIDITY = 40000
-COMBO_MIN_VOLUME_5M = 60000  
+COMBO_MIN_VOLUME_5M = 20000  
 COMBO_MIN_CHANGE_5M = 25.0   
 
-# تنظیمات بخش اعلان ترند (🚨)
+# تنظیمات بخش اعلان ترند (🚨) - مطابق عکس
 TREND_MIN_LIQUIDITY = 40000
-TREND_MIN_VOLUME_5M = 60000  
+TREND_MIN_VOLUME_5M = 40000  
 TREND_MIN_CHANGE_5M = 25.0   
 MIN_BUYS_5M = 80             
 
-# تنظیمات بخش گزینه طلایی (🚀)
-GOLDEN_BUY_AMOUNT_SOL = 0.005
-GOLDEN_TAKE_PROFIT = 25.0
-GOLDEN_STOP_LOSS = -5.0
-GOLDEN_MIN_LIQUIDITY = 80000
-GOLDEN_MIN_VOLUME_5M = 70000
+# تنظیمات بخش گزینه طلایی (🚀) - مطابق عکس
+GOLDEN_BUY_AMOUNT_SOL = 0.01
+GOLDEN_TAKE_PROFIT = 16.0
+GOLDEN_STOP_LOSS = -8.0
+GOLDEN_MIN_LIQUIDITY = 60000
+GOLDEN_MIN_VOLUME_5M = 30000
 GOLDEN_MIN_CHANGE_5M = 20.0
 GOLDEN_MIN_BUYS_5M = 80
 
@@ -413,7 +413,6 @@ def check_positions_loop():
                             else:
                                 success, sell_res_info = False, "موجودی یافت نشد"
 
-                            # ثبت سود/زیان این معامله بسته شده به لیست کل سوابق
                             pnl_usd_val = 0.75 * (pnl_percent / 100)
                             closed_trades_history.append({
                                 "symbol": symbol,
@@ -660,7 +659,6 @@ def get_main_keyboard():
     trader_status = "🔥 خرید و فروش: در حال سوختن" if IS_RUNNING else "🔥 خرید و فروش: خاموش"
     trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
 
-    # جمع کردن سود/زیانِ پوزیشن‌های باز لحظه‌ای
     open_pnl_usd = 0.0
     open_pnl_percent = 0.0
     
@@ -678,7 +676,6 @@ def get_main_keyboard():
             except:
                 pass
 
-    # مجموع نهایی = معاملات بسته شده (Realized) + پوزیشن‌های باز (Open)
     grand_total_percent = total_realized_pnl_percent + open_pnl_percent
     grand_total_usd = total_realized_pnl_usd + open_pnl_usd
 
@@ -692,7 +689,6 @@ def get_main_keyboard():
          InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
          InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
-        # دکمه‌های شیشه‌ای تجمیعی (بسته شده + باز)
         [InlineKeyboardButton(pnl_percent_label, callback_data="refresh_pnl"),
          InlineKeyboardButton(pnl_usd_label, callback_data="refresh_pnl")]
     ]
