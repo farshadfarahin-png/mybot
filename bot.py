@@ -1,4 +1,4 @@
-Import time
+import time
 import requests
 import json
 import base64
@@ -276,14 +276,12 @@ def check_major_support_resistance_pa(pair):
         buys_5m = int(txns_5m.get('buys', 0))
         sells_5m = int(txns_5m.get('sells', 0))
 
-        # فیلتر حرفه‌ای و سخت‌گیرانه برای جلوگیری از ضرر و فیک‌بریک‌اوت
         if price_change_5m <= 0 or sells_5m >= buys_5m:
             return False, ""
 
         if price_change_6h < -5.0 or price_change_1h < 1.0:
             return False, ""
 
-        # بررسی پولبک معتبر از حمایت و شکست سقف با حجم تاییدشده
         is_classic_support_pullback = (0.3 <= price_change_5m <= 3.0) and (buys_5m >= sells_5m * 2.0) and (price_change_1h >= 3.0)
         is_classic_breakout = (3.0 <= price_change_5m <= 7.0) and (price_change_1h >= 8.0) and (buys_5m >= sells_5m * 2.5)
 
@@ -424,7 +422,7 @@ def close_wsol_account():
 
 def execute_real_sell(token_mint, token_amount):
     if not WALLET_PUBKEY:
-        return False, "کلید عمومی ولت نامعتبر است"
+        return False, "سولانای ناکافی ❌"
 
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -512,33 +510,70 @@ def check_positions_loop():
                     current_price = float(pair.get('priceUsd', 0))
                     entry_price = pos['entry_price']
                     symbol = pos['symbol']
-                    tp = pos['tp']
-                    sl = pos['sl']
+                    initial_tp = pos['tp'] # تارگت اول اولیه
+                    sl = pos['sl']         # حد ضرر اولیه
                     
                     if entry_price > 0 and current_price > 0:
                         pnl_percent = ((current_price - entry_price) / entry_price) * 100
 
-                        highest_price = pos.get('highest_price', entry_price)
-                        if current_price > highest_price:
-                            pos['highest_price'] = current_price
-                            new_sl = sl + (pnl_percent * 0.2)
-                            if new_sl > sl:
-                                pos['sl'] = min(new_sl, 0)
+                        # پیگیری بالاترین سقفِ لمس‌شده برای تریلینگ استاپ پله‌ای تا 1000%
+                        highest_pnl = pos.get('highest_pnl', pnl_percent)
+                        if pnl_percent > highest_pnl:
+                            pos['highest_pnl'] = pnl_percent
+                            highest_pnl = pnl_percent
 
-                        if pnl_percent >= tp or pnl_percent <= pos['sl']:
-                            is_profit = pnl_percent >= 0
-                            sticker = "🤑" if is_profit else "🧐"
-                            reason = f"حد سود (TP) / تارگت نهایی فعال شد 🎯 {sticker}" if is_profit else f"فروش خودکار (حد ضرر (SL)) فعال شد 🛑 {sticker}"
+                        # تعیین کف‌های قفل سود پویا تا پله ۱۰۰۰ درصدی
+                        current_locked_floor = pos.get('locked_floor', sl)
 
+                        if highest_pnl >= 1000.0:
+                            current_locked_floor = max(current_locked_floor, 750.0) # عبور از 1000، قفل کف روی 750%
+                        elif highest_pnl >= 750.0:
+                            current_locked_floor = max(current_locked_floor, 500.0) # عبور از 750، قفل کف روی 500%
+                        elif highest_pnl >= 500.0:
+                            current_locked_floor = max(current_locked_floor, 300.0) # عبور از 500، قفل کف روی 300%
+                        elif highest_pnl >= 300.0:
+                            current_locked_floor = max(current_locked_floor, 200.0) # عبور از 300، قفل کف روی 200%
+                        elif highest_pnl >= 200.0:
+                            current_locked_floor = max(current_locked_floor, 100.0) # عبور از 200، قفل کف روی 100%
+                        elif highest_pnl >= 100.0:
+                            current_locked_floor = max(current_locked_floor, 50.0)  # عبور از 100، قفل کف روی 50%
+                        elif highest_pnl >= 50.0:
+                            current_locked_floor = max(current_locked_floor, initial_tp) # عبور از 50، قفل کف روی تارگت اول
+                        elif highest_pnl >= initial_tp:
+                            current_locked_floor = max(current_locked_floor, 0.0)    # عبور از تارگت اول، ریسک‌فری (سر به سر)
+
+                        pos['locked_floor'] = current_locked_floor
+
+                        # بررسی شرط خروج در صورت ریزش از سقف‌ها یا برخورد به حد ضرر
+                        should_exit = False
+                        exit_reason_text = ""
+
+                        if pnl_percent <= current_locked_floor and highest_pnl >= initial_tp:
+                            should_exit = True
+                            exit_reason_text = f"سیو سود پله‌ای هوشمند تا 1000% در مسیر برگشت روی سقف {current_locked_floor:.0f}% 🎯 🤑"
+                        elif pnl_percent <= sl:
+                            should_exit = True
+                            exit_reason_text = f"فروش خودکار (حد ضرر (SL)) فعال شد 🛑 🧐"
+
+                        if should_exit:
                             success = False
                             sell_res_info = "سولانای ناکافی ❌"
                             
-                            token_balance = get_token_balance(token_addr)
-                            if token_balance > 0:
-                                success, sell_res_info = execute_real_sell(token_addr, token_balance)
-                            else:
-                                success = False
-                                sell_res_info = "سولانای ناکافی ❌"
+                            # مکانیسم تکرار فروش (Retry Mechanism) برای جلوگیری از جا ماندن در بلاکچین پرنوسان
+                            for attempt_sell in range(3):
+                                token_balance = get_token_balance(token_addr)
+                                if token_balance > 0:
+                                    success, sell_res_info = execute_real_sell(token_addr, token_balance)
+                                    if success:
+                                        break
+                                else:
+                                    success = False
+                                    sell_res_info = "سولانای ناکافی ❌"
+                                time.sleep(1)
+
+                            is_profit = pnl_percent >= 0
+                            sticker = "🤑" if is_profit else "🧐"
+                            reason = exit_reason_text if exit_reason_text else (f"حد سود (TP) / تارگت نهایی فعال شد 🎯 {sticker}" if is_profit else f"فروش خودکار (حد ضرر (SL)) فعال شد 🛑 {sticker}")
 
                             pnl_usd_val = 0.75 * (pnl_percent / 100)
                             closed_trades_history.append({
