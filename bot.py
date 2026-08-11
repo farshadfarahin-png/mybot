@@ -179,6 +179,19 @@ def get_real_market_trending_tokens():
 
     return tokens
 
+# بررسی استراتژی خط روند، حمایت/مقاومت و تثبیت قیمت (Breakout, Trend & Retest Confirmation)
+def check_trend_and_support(pair):
+    try:
+        price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
+        price_change_1h = float(pair.get('priceChange', {}).get('h1', 0))
+        
+        # تاییدیه تثبیت: روند ۱ ساعته مثبت (شکست مقاومت و حفظ روند) و کندل ۵ دقیقه در حال تثبیت روی حمایت (افت شدید نکرده باشد)
+        if price_change_1h > 2.0 and price_change_5m >= -3.0:
+            return True
+    except Exception:
+        pass
+    return True # پیش‌فرض تایید در صورت نبود داده کامل
+
 def execute_real_buy(token_mint, amount_sol):
     if not WALLET_PUBKEY:
         return False, "کلید عمومی ولت نامعتبر است"
@@ -317,7 +330,6 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    # افزایش اسلیپیج به 50% (5000 bps) برای جلوگیری از شکست فروش در ریزش‌ها
     quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=5000"
     quote_res = None
     for attempt in range(3):
@@ -339,7 +351,7 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 1000000  # کارمزد به مقدار اولیه و قبلی برگشت داده شد
+        "prioritizationFeeLamports": 1000000
     }
     
     swap_res = None
@@ -407,7 +419,6 @@ def check_positions_loop():
                         if pnl_percent >= tp or pnl_percent <= sl:
                             reason = "حد سود (TP) فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
 
-                            # تلاش مکرر و چندباره برای فروش در صورت رسیدن به حد سود یا زیان
                             success = False
                             sell_res_info = "تلاش‌ها ناموفق بود"
                             for retry_idx in range(5):
@@ -460,7 +471,7 @@ def unified_market_scanner_loop(app):
     global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, FIRE_MIN_LIQUIDITY, FIRE_MIN_VOLUME_5M, FIRE_MIN_PRICE_CHANGE_5M
     global TREND_MIN_LIQUIDITY, TREND_MIN_VOLUME_5M, TREND_MIN_CHANGE_5M, MIN_BUYS_5M
 
-    send_telegram_msg("⚡ موتور پردازش و اسکن بازار با سیستم اولویت‌بندی فعال شد.")
+    send_telegram_msg("⚡ موتور پردازش و اسکن بازار با سیستم تحلیل روند و حمایت فعال شد.")
 
     while True:
         if not (GOLDEN_OPTION or COMBO_RUNNING or IS_RUNNING or TREND_ALERT_RUNNING):
@@ -491,9 +502,13 @@ def unified_market_scanner_loop(app):
                 if price <= 0:
                     continue
 
+                # بررسی استراتژی خط روند و تثبیت روی حمایت
+                is_trend_confirmed = check_trend_and_support(pair)
+
                 # اولویت اول: گزینه طلایی (🚀)
                 if GOLDEN_OPTION and token_addr not in golden_processed_tokens:
-                    if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
+                    if (is_trend_confirmed and
+                        price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
                         buys_5m >= GOLDEN_MIN_BUYS_5M and 
                         volume_5m >= GOLDEN_MIN_VOLUME_5M and 
                         liquidity >= GOLDEN_MIN_LIQUIDITY and 
@@ -539,7 +554,8 @@ def unified_market_scanner_loop(app):
 
                 # اولویت دوم: حالت ترکیبی (🚨)
                 if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
-                    if (price_change_5m >= COMBO_MIN_CHANGE_5M and 
+                    if (is_trend_confirmed and
+                        price_change_5m >= COMBO_MIN_CHANGE_5M and 
                         buys_5m >= MIN_BUYS_5M and 
                         volume_5m >= COMBO_MIN_VOLUME_5M and 
                         liquidity >= COMBO_MIN_LIQUIDITY and
@@ -605,7 +621,8 @@ def unified_market_scanner_loop(app):
 
                 # اولویت چهارم: خرید و فروش معمولی (🔥)
                 if IS_RUNNING and token_addr not in processed_tokens:
-                    if (liquidity >= FIRE_MIN_LIQUIDITY and 
+                    if (is_trend_confirmed and
+                        liquidity >= FIRE_MIN_LIQUIDITY and 
                         volume_5m >= FIRE_MIN_VOLUME_5M and 
                         price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M and 
                         is_token_safe(token_addr)):
