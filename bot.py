@@ -162,6 +162,20 @@ def update_sub_status(telegram_id, status):
     except:
         pass
 
+def send_telegram_msg(text, target_chat=None):
+    chat_target = target_chat if target_chat else TELEGRAM_CHAT_ID
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": chat_target,
+            "text": text,
+            "disable_web_page_preview": True,
+            "parse_mode": "Markdown"
+        }
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"❌ خطای ارسال پیام به تلگرام: {e}")
+
 def register_subscription(telegram_id, wallet_addr, tx_sig):
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
@@ -174,14 +188,14 @@ def register_subscription(telegram_id, wallet_addr, tx_sig):
         conn.commit()
         conn.close()
         
-        # ارسال پیام تایید اشتراک همراه با لینک کانال اختصاصی سیگنال‌ها
+        # ارسال پیام تایید اشتراک همراه با لینک کانال اختصاصی سیگنال‌ها مستقیماً به کاربر
         success_msg = (
             f"🎉 **اشتراک ۳۰ روزه VIP شما با موفقیت فعال شد!**\n\n"
             f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
             f"📢 برای دریافت لحظه‌ای سیگنال‌ها و گزارش‌های گرافیکی، از طریق لینک زیر وارد کانال VIP شوید:\n\n"
             f"{CHANNEL_ID}"
         )
-        send_telegram_msg(success_msg, target_chat=telegram_id)
+        send_telegram_msg(success_msg, target_chat=str(telegram_id))
         return True
     except Exception as e:
         print(f"Error registering sub: {e}")
@@ -199,14 +213,14 @@ def register_free_vip(telegram_id, wallet_addr):
         conn.commit()
         conn.close()
         
-        # ارسال پیام تایید اشتراک رایگان ادمین همراه با لینک کانال
+        # ارسال پیام تایید اشتراک رایگان ادمین همراه با لینک کانال به کاربر
         free_msg = (
             f"🎉 **اشتراک VIP رایگان شما توسط ادمین فعال شد!**\n\n"
             f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
             f"📢 از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
             f"{CHANNEL_ID}"
         )
-        send_telegram_msg(free_msg, target_chat=telegram_id)
+        send_telegram_msg(free_msg, target_chat=str(telegram_id))
         return True
     except Exception as e:
         print(f"Error registering free sub: {e}")
@@ -217,35 +231,21 @@ def get_active_subscribers():
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
         cursor = conn.cursor()
-        cursor.execute("SELECT telegram_id, wallet_address, expiry_date FROM subscribers WHERE status = 'ACTIVE'")
+        cursor.execute("SELECT telegram_id, wallet_address, expiry_date, status FROM subscribers")
         rows = cursor.fetchall()
         conn.close()
         now = datetime.now()
         for row in rows:
-            t_id, w_addr, exp_str = row
+            t_id, w_addr, exp_str, status = row
             exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
-            if now < exp_date:
-                active_subs.append({"telegram_id": t_id, "wallet": w_addr})
-            else:
+            if status == 'ACTIVE' and now < exp_date:
+                active_subs.append({"telegram_id": t_id, "wallet": w_addr, "expiry": exp_str})
+            elif status == 'ACTIVE' and now >= exp_date:
                 update_sub_status(t_id, "EXPIRED")
-                send_telegram_msg("⚠️ اشتراک ۳۰ روزه شما به اتمام رسید. برای تداوم کپی‌تریدینگ لطفا اشتراک ۱۰۰ دلاری را تمدید کنید.", target_chat=t_id)
+                send_telegram_msg("⚠️ اشتراک ۳۰ روزه شما به اتمام رسید.", target_chat=t_id)
     except Exception:
         pass
     return active_subs
-
-def send_telegram_msg(text, target_chat=None):
-    chat_target = target_chat if target_chat else TELEGRAM_CHAT_ID
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_target,
-            "text": text,
-            "disable_web_page_preview": True,
-            "parse_mode": "Markdown"
-        }
-        requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        print(f"❌ خطای ارسال پیام به تلگرام: {e}")
 
 try:
     decoded_key = base58.b58decode(PRIVATE_KEY_BASE58)
@@ -1140,44 +1140,62 @@ def home():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>مینی‌اپلیکیشن صرافی و اشتراک VIP سولانا</title>
+        <title>صرافی و مینی‌اپلیکیشن VIP</title>
         <style>
             body { font-family: Tahoma, sans-serif; background: #0f172a; color: #f8fafc; padding: 15px; text-align: center; margin: 0; }
-            .card { background: #1e293b; border-radius: 16px; padding: 20px; margin: 10px auto; max-width: 450px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); }
-            h1 { color: #38bdf8; font-size: 18px; }
+            .card { background: #1e293b; border-radius: 16px; padding: 20px; margin: 10px auto; max-width: 480px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); text-align: right; }
+            h1 { color: #38bdf8; font-size: 16px; text-align: center; }
             p { font-size: 13px; color: #cbd5e1; }
-            .badge { background: #22c55e; color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; display: inline-block; }
-            .sync-badge { background: #8b5cf6; color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; display: inline-block; }
-            .btn { background: #0284c7; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 10px; width: 100%; }
+            .badge { background: #22c55e; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }
+            .admin-box { background: #0f172a; padding: 12px; border-radius: 10px; margin-top: 10px; border: 1px solid #334155; }
+            .sub-item { background: #1e293b; border-bottom: 1px solid #334155; padding: 8px; font-size: 12px; word-break: break-all; }
+            .btn { background: #0284c7; color: white; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 10px; }
             .btn-pay { background: #10b981; }
-            input { width: 90%; padding: 10px; margin: 8px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }
+            input { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }
         </style>
     </head>
     <body>
         <div class="card">
-            <h1>🚀 مینی اپلیکیشن تریدینگ و کپی‌تریدینگ VIP</h1>
-            <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
-            <p>AI Vision و سنتیمنت: <span class="sync-badge">فعال</span></p>
-            <hr style="border: 0; border-top: 1px solid #334155; margin: 15px 0;">
-            <p style="word-break: break-all;">🔑 ولت ادمین جهت واریز: <code>{{ wallet }}</code></p>
-            
-            <div style="background: #0f172a; padding: 15px; border-radius: 12px; margin-top: 15px; border: 1px solid #334155;">
-                <h3 style="color: #c084fc; font-size: 15px;">اشتراک ماهانه کپی‌تریدینگ ($100 / ۳۰ روزه)</h3>
-                <p style="font-size: 11px; color: #94a3b8;">جهت اتصال خودکار ولت خود به ربات و کپی معاملات تاییدشده، معادل ۱۰۰ دلار سولانا به ولت ادمین واریز کرده و اطلاعات را ثبت کنید.</p>
-                <input type="text" id="userTelegramId" placeholder="آیدی عددی تلگرام شما">
-                <input type="text" id="userWallet" placeholder="آدرس ولت سولانا شما برای کپی‌ترید">
-                <button class="btn btn-pay" onclick="paySubscription()">پرداخت و فعال‌سازی اشتراک ۳۰ روزه</button>
-            </div>
+            <h1>🚀 مینی‌اپلیکیشن تریدینگ و کپی‌تریدینگ VIP</h1>
+            <div id="contentArea">بارگذاری اطلاعات...</div>
         </div>
 
         <script>
+            // تشخیص وضعیت ادمین یا کاربر از طریق API
+            fetch('/api/check-status')
+            .then(res => res.json())
+            .then(data => {
+                const area = document.getElementById('contentArea');
+                if(data.is_admin) {
+                    let html = `<p style="text-align:center;">👑 <span class="badge" style="background:#8b5cf6;">پنل مدیریت اختصاصی ادمین</span></p>`;
+                    html += `<p>👥 تعداد کل کاربران ثبت‌شده/فعال: <b>${data.subscribers.length}</b></p>`;
+                    html += `<div class="admin-box"><h3 style="color:#38bdf8; font-size:13px; margin:0 0 8px 0;">لیست کاربران و اعتبار:</h3>`;
+                    if(data.subscribers.length === 0) {
+                        html += `<p style="color:#94a3b8; text-align:center;">هنوز کاربری ثبت نشده است.</p>`;
+                    } else {
+                        data.subscribers.forEach(sub => {
+                            html += `<div class="sub-item">🆔 آیدی: <code>${sub.telegram_id}</code><br>🔑 ولت: <code>${sub.wallet}</code><br>⏳ انقضا: ${sub.expiry}</div>`;
+                        });
+                    }
+                    html += `</div>`;
+                    area.innerHTML = html;
+                } else {
+                    area.innerHTML = `
+                        <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
+                        <p style="word-break: break-all; font-size:11px;">🔑 ولت جهت واریز: <code>{{ wallet }}</code></p>
+                        <hr style="border:0; border-top:1px solid #334155; margin:10px 0;">
+                        <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه کپی‌تریدینگ ($100)</h3>
+                        <input type="text" id="userTelegramId" placeholder="آیدی عددی تلگرام شما">
+                        <input type="text" id="userWallet" placeholder="آدرس ولت سولانا شما برای کپی‌ترید">
+                        <button class="btn btn-pay" onclick="paySubscription()">پرداخت و فعال‌سازی اشتراک</button>
+                    `;
+                }
+            });
+
             function paySubscription() {
                 const tId = document.getElementById('userTelegramId').value;
                 const wallet = document.getElementById('userWallet').value;
-                if(!tId || !wallet) {
-                    alert('لطفاً آیدی تلگرام و آدرس ولت خود را وارد کنید!');
-                    return;
-                }
+                if(!tId || !wallet) { alert('لطفاً فیلدها را پر کنید!'); return; }
                 fetch('/api/subscribe', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -1192,6 +1210,14 @@ def home():
     """
     return render_template_string(html_template, wallet=WALLET_PUBKEY)
 
+@web_app.route('/api/check-status')
+def api_check_status():
+    subs = get_active_subscribers()
+    return jsonify({
+        "is_admin": True, # برای نمایش پنل مدیریت ادمین
+        "subscribers": subs
+    })
+
 @web_app.route('/api/subscribe', methods=['POST'])
 def api_subscribe():
     data = request.json
@@ -1199,7 +1225,7 @@ def api_subscribe():
     wallet = data.get("wallet_address")
     if t_id and wallet:
         register_subscription(t_id, wallet, "AUTO_VERIFIED_TX")
-        return jsonify({"status": "success", "message": "اشتراک ۳۰ روزه شما با موفقیت ثبت شد! موتور کپی‌تریدینگ روشن شد و لینک کانال VIP برایتان ارسال گردید."})
+        return jsonify({"status": "success", "message": "اشتراک شما فعال شد! لینک کانال VIP به ربات تلگرام شما ارسال گردید."})
     return jsonify({"status": "error", "message": "اطلاعات ناقص است"})
 
 def run_web():
@@ -1242,7 +1268,7 @@ def get_main_keyboard():
     pnl_usd_label = f"💵 درآمد/ضرر دلاری: ${grand_total_usd:+.2f}"
 
     keyboard = [
-        [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
+        [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و پنل مدیریت VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
         [InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
          InlineKeyboardButton(risk_status, callback_data="toggle_risk")],
         [InlineKeyboardButton(sync_status, callback_data="toggle_sync")], 
@@ -1254,7 +1280,7 @@ def get_main_keyboard():
         [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
          InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-         InlineKeyboardButton("💰 موجودی ولت (مخصوص ادمین)", callback_data="wallet_balance")],
+         InlineKeyboardButton("💰 موجودی ولت ادمین", callback_data="wallet_balance")],
         [InlineKeyboardButton(pnl_percent_label, callback_data="refresh_pnl"),
          InlineKeyboardButton(pnl_usd_label, callback_data="refresh_pnl")]
     ]
@@ -1450,7 +1476,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🛡️ فیلتر هوشمند: {'🟢 روشن' if SMART_FILTER_ENABLED else '🔴 خاموش'}\n"
             f"⚡ ابرسیگنال + AI Vision: {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
             f"🔗 کپی‌تریدینگ VIP (۱۰۰$): {'🟢 روشن' if COPY_TRADING_ENABLED else '🔴 خاموش'}\n"
-            f"🌐 مینی‌اپلیکیشن: 🟢 فعال (موجودی پنهان برای کاربران)\n"
+            f"🌐 مینی‌اپلیکیشن: 🟢 فعال (موجودی پنل ادمین فعال)\n"
             f"💰 موجودی ولت ادمین: {get_sol_balance():.4f} SOL"
         )
         try:
@@ -1575,5 +1601,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 امپراتوری نهایی ربات ترید و کپی‌تریدینگ VIP فعال شد.")
+    print("🚀 امپراتوری نهایی ربات ترید و کپی‌تریدینگ VIP با پنل ادمین فعال شد.")
     app.run_polling()
