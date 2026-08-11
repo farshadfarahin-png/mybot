@@ -179,6 +179,23 @@ def register_subscription(telegram_id, wallet_addr, tx_sig):
         print(f"Error registering sub: {e}")
         return False
 
+def register_free_vip(telegram_id, wallet_addr):
+    """ثبت‌نام رایگان و ویژه توسط ادمین"""
+    try:
+        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+        cursor = conn.cursor()
+        expiry = datetime.now() + timedelta(days=365) # اشتراک ۱ ساله رایگان
+        cursor.execute("""
+            INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
+            VALUES (?, ?, ?, ?, 'ACTIVE')
+        """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), "ADMIN_FREE_PASS"))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error registering free sub: {e}")
+        return False
+
 def get_active_subscribers():
     active_subs = []
     try:
@@ -1102,7 +1119,7 @@ def unified_market_scanner_loop(app):
 
         time.sleep(2)
 
-# وب اپلیکیشن Flask کامل همراه با بخش تریدینگ و درگاه ثبت اشتراک ۱۰۰ دلاری ۳۰ روزه (بدون نمایش موجودی برای کاربران)
+# وب اپلیکیشن Flask کامل همراه با بخش تریدینگ و درگاه ثبت اشتراک ۱۰۰ دلاری ۳۰ روزه (پنهان‌سازی موجودی برای کاربران)
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -1297,17 +1314,51 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ خطا در دریافت آمار: {e}")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
-        return
     global AWAITING_STATE
     AWAITING_STATE = None
-    await update.message.reply_text("🤖 اتاق کنترل سوپر ربات افسانه‌ای سولانا (با کپی‌تریدینگ و AI Vision):", reply_markup=get_main_keyboard())
+    user_id = str(update.effective_user.id)
+    
+    # تفکیک پنل ادمین و کاربران عادی
+    if user_id == str(TELEGRAM_CHAT_ID):
+        await update.message.reply_text("🤖 اتاق کنترل سوپر ربات افسانه‌ای سولانا:", reply_markup=get_main_keyboard())
+    else:
+        user_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 ورود به مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))]
+        ])
+        await update.message.reply_text(
+            "👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.\n\n"
+            "برای اتصال ولت خود و دریافت سرویس کپی‌تریدینگ VIP، روی دکمه زیر کلیک کنید:",
+            reply_markup=user_keyboard
+        )
+
+async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
+        return
+    
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "❌ فرمت اشتباه! برای فعال‌سازی رایگان کاربر به این صورت استفاده کنید:\n\n"
+            "`/free آیدی_تلگرام آدرس_ولت`", 
+            parse_mode="Markdown"
+        )
+        return
+    
+    t_id = args[0]
+    wallet = args[1]
+    
+    success = register_free_vip(t_id, wallet)
+    if success:
+        await update.message.reply_text(f"✅ کاربر با آیدی `{t_id}` با موفقیت به صورت رایگان و ویژه (VIP) ثبت شد!", parse_mode="Markdown")
+        send_telegram_msg("🎉 اشتراک VIP رایگان شما توسط ادمین فعال شد و موتور کپی‌تریدینگ برایتان روشن گردید.", target_chat=t_id)
+    else:
+        await update.message.reply_text("❌ خطا در ثبت کاربر رایگان در دیتابیس.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE, COPY_TRADING_ENABLED, AWAITING_STATE
     query = update.callback_query
     
-    # محافظت دسترسی ادمین برای دکمه‌های کنترلی
+    # قفل امنیتی دکمه‌ها مخصوص ادمین
     if str(query.from_user.id) != str(TELEGRAM_CHAT_ID):
         try:
             await query.answer("⛔ شما دسترسی ادمین ندارید!", show_alert=True)
@@ -1501,6 +1552,7 @@ if __name__ == "__main__":
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("free", free_user_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
