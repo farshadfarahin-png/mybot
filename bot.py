@@ -134,7 +134,6 @@ def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason)
         print(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}")
 
 def check_user_subscription(telegram_id):
-    """بررسی هوشمند اعتبار اشتراک ۱۰۰ دلاری ۳۰ روزه کاربر"""
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
         cursor = conn.cursor()
@@ -174,13 +173,21 @@ def register_subscription(telegram_id, wallet_addr, tx_sig):
         """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), tx_sig))
         conn.commit()
         conn.close()
+        
+        # ارسال پیام تایید اشتراک همراه با لینک کانال اختصاصی سیگنال‌ها
+        success_msg = (
+            f"🎉 **اشتراک ۳۰ روزه VIP شما با موفقیت فعال شد!**\n\n"
+            f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
+            f"📢 برای دریافت لحظه‌ای سیگنال‌ها و گزارش‌های گرافیکی، از طریق لینک زیر وارد کانال VIP شوید:\n\n"
+            f"{CHANNEL_ID}"
+        )
+        send_telegram_msg(success_msg, target_chat=telegram_id)
         return True
     except Exception as e:
         print(f"Error registering sub: {e}")
         return False
 
 def register_free_vip(telegram_id, wallet_addr):
-    """ثبت‌نام رایگان و ویژه توسط ادمین"""
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
         cursor = conn.cursor()
@@ -191,6 +198,15 @@ def register_free_vip(telegram_id, wallet_addr):
         """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), "ADMIN_FREE_PASS"))
         conn.commit()
         conn.close()
+        
+        # ارسال پیام تایید اشتراک رایگان ادمین همراه با لینک کانال
+        free_msg = (
+            f"🎉 **اشتراک VIP رایگان شما توسط ادمین فعال شد!**\n\n"
+            f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
+            f"📢 از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
+            f"{CHANNEL_ID}"
+        )
+        send_telegram_msg(free_msg, target_chat=telegram_id)
         return True
     except Exception as e:
         print(f"Error registering free sub: {e}")
@@ -467,7 +483,6 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         return False, 0.0, 0.0, 0.0, f"خطا در پردازش: {e}"
 
 def trigger_copy_trading_for_subscribers(token_mint, amount_sol):
-    """اجرای خودکار کپی‌تریدینگ برای مشترکینی که اشتراک ۱۰۰ دلاری فعال دارند"""
     if not COPY_TRADING_ENABLED:
         return
     active_subs = get_active_subscribers()
@@ -917,7 +932,6 @@ def unified_market_scanner_loop(app):
                 if price <= 0:
                     continue
 
-                # ⚡ حالت ابرسیگنال هوشمند ماشین (وین‌ریت ۹۸٪ + AI Vision + انتشار کانال)
                 if SYNCHRONIZED_MODE and token_addr not in processed_tokens:
                     is_approved, entry_p, calc_tp, calc_sl, eval_reason = evaluate_ultimate_super_signal(token_addr, pair)
                     if is_approved:
@@ -969,7 +983,6 @@ def unified_market_scanner_loop(app):
                 if not check_whale_and_advanced_security(token_addr, pair):
                     continue
 
-                # 1. گزینه طلایی
                 if GOLDEN_OPTION and token_addr not in golden_processed_tokens:
                     if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
                         buys_5m >= GOLDEN_MIN_BUYS_5M and 
@@ -1018,7 +1031,6 @@ def unified_market_scanner_loop(app):
                         send_telegram_msg(golden_msg)
                         continue
 
-                # 2. حالت ترکیبی
                 if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
                     if (price_change_5m >= COMBO_MIN_CHANGE_5M and 
                         buys_5m >= MIN_BUYS_5M and 
@@ -1067,7 +1079,6 @@ def unified_market_scanner_loop(app):
                         send_telegram_msg(combo_msg)
                         continue
 
-                # 3. خرید و فروش معمولی (FIRE)
                 if IS_RUNNING and token_addr not in processed_tokens:
                     if (liquidity >= FIRE_MIN_LIQUIDITY and 
                         volume_5m >= FIRE_MIN_VOLUME_5M and 
@@ -1119,7 +1130,6 @@ def unified_market_scanner_loop(app):
 
         time.sleep(2)
 
-# وب اپلیکیشن Flask کامل همراه با بخش تریدینگ و درگاه ثبت اشتراک ۱۰۰ دلاری ۳۰ روزه (پنهان‌سازی موجودی برای کاربران)
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -1189,7 +1199,7 @@ def api_subscribe():
     wallet = data.get("wallet_address")
     if t_id and wallet:
         register_subscription(t_id, wallet, "AUTO_VERIFIED_TX")
-        return jsonify({"status": "success", "message": "اشتراک ۳۰ روزه شما با موفقیت ثبت شد! موتور کپی‌تریدینگ برای ولت شما فعال گردید."})
+        return jsonify({"status": "success", "message": "اشتراک ۳۰ روزه شما با موفقیت ثبت شد! موتور کپی‌تریدینگ روشن شد و لینک کانال VIP برایتان ارسال گردید."})
     return jsonify({"status": "error", "message": "اطلاعات ناقص است"})
 
 def run_web():
@@ -1318,7 +1328,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AWAITING_STATE = None
     user_id = str(update.effective_user.id)
     
-    # تفکیک پنل ادمین و کاربران عادی
     if user_id == str(TELEGRAM_CHAT_ID):
         await update.message.reply_text("🤖 اتاق کنترل سوپر ربات افسانه‌ای سولانا:", reply_markup=get_main_keyboard())
     else:
@@ -1349,8 +1358,7 @@ async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     success = register_free_vip(t_id, wallet)
     if success:
-        await update.message.reply_text(f"✅ کاربر با آیدی `{t_id}` با موفقیت به صورت رایگان و ویژه (VIP) ثبت شد!", parse_mode="Markdown")
-        send_telegram_msg("🎉 اشتراک VIP رایگان شما توسط ادمین فعال شد و موتور کپی‌تریدینگ برایتان روشن گردید.", target_chat=t_id)
+        await update.message.reply_text(f"✅ کاربر با آیدی `{t_id}` با موفقیت به صورت رایگان و ویژه (VIP) ثبت شد و لینک کانال برایش ارسال گشت!", parse_mode="Markdown")
     else:
         await update.message.reply_text("❌ خطا در ثبت کاربر رایگان در دیتابیس.")
 
@@ -1358,7 +1366,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE, COPY_TRADING_ENABLED, AWAITING_STATE
     query = update.callback_query
     
-    # قفل امنیتی دکمه‌ها مخصوص ادمین
     if str(query.from_user.id) != str(TELEGRAM_CHAT_ID):
         try:
             await query.answer("⛔ شما دسترسی ادمین ندارید!", show_alert=True)
