@@ -300,7 +300,7 @@ def execute_real_buy(token_mint, amount_sol):
 
     current_sol = get_sol_balance()
     if current_sol < (amount_sol + 0.003):
-        return False, f"خطا (موجودی یافت نشد ❌)"
+        return False, "سولانای ناکافی ❌"
 
     lamports = int(amount_sol * 1_000_000_000)
     headers = {
@@ -325,7 +325,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.3)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای کوت صرافی"
+        return False, "سولانای ناکافی ❌"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -348,7 +348,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.3)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "تراکنش سواپ رد شد"
+        return False, "سولانای ناکافی ❌"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -373,12 +373,11 @@ def execute_real_buy(token_mint, amount_sol):
                 time.sleep(2)
                 if get_token_balance(token_mint) > 0:
                     return True, sig
-            return False, "تراکنش تایید شد اما توکن به ولت ننشست"
+            return False, "سولانای ناکافی ❌"
         else:
-            err_details = tx_res.get('error', {}).get('message', 'ریجکت شبکه')
-            return False, f"{err_details}"
+            return False, "سولانای ناکافی ❌"
     except Exception as e:
-        return False, f"خطای امضا: {str(e)}"
+        return False, "سولانای ناکافی ❌"
 
 def close_wsol_account():
     try:
@@ -446,7 +445,7 @@ def execute_real_sell(token_mint, token_amount):
         time.sleep(0.3)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای دریافت قیمت فروش"
+        return False, "سولانای ناکافی ❌"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -469,7 +468,7 @@ def execute_real_sell(token_mint, token_amount):
         time.sleep(0.3)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "فروش رد شد"
+        return False, "سولانای ناکافی ❌"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -493,10 +492,9 @@ def execute_real_sell(token_mint, token_amount):
             close_wsol_account()
             return True, sig
         else:
-            err_details = tx_res.get('error', {}).get('message', 'ریجکت توسط شبکه')
-            return False, f"{err_details}"
+            return False, "سولانای ناکافی ❌"
     except Exception as e:
-        return False, f"خطای امضا در فروش: {str(e)}"
+        return False, "سولانای ناکافی ❌"
 
 def check_positions_loop():
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
@@ -526,17 +524,19 @@ def check_positions_loop():
                                 pos['sl'] = min(new_sl, 0)
 
                         if pnl_percent >= tp or pnl_percent <= pos['sl']:
-                            reason = "حد سود (TP) / تارگت نهایی فعال شد 🎯" if pnl_percent >= 0 else "فروش خودکار (حد ضرر (SL)) فعال شد 🛑"
+                            is_profit = pnl_percent >= 0
+                            sticker = "🤑" if is_profit else "🧐"
+                            reason = f"حد سود (TP) / تارگت نهایی فعال شد 🎯 {sticker}" if is_profit else f"فروش خودکار (حد ضرر (SL)) فعال شد 🛑 {sticker}"
 
                             success = False
-                            sell_res_info = "خطا (موجودی یافت نشد ❌)"
+                            sell_res_info = "سولانای ناکافی ❌"
                             
                             token_balance = get_token_balance(token_addr)
                             if token_balance > 0:
                                 success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             else:
                                 success = False
-                                sell_res_info = "خطا (موجودی یافت نشد ❌)"
+                                sell_res_info = "سولانای ناکافی ❌"
 
                             pnl_usd_val = 0.75 * (pnl_percent / 100)
                             closed_trades_history.append({
@@ -635,7 +635,6 @@ def technical_analysis_scanner_loop(app):
                     f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
                 )
 
-                # 🌟 حتی اگر خرید به دلیل کمبود موجودی ناموفق بود، پوزیشن را برای ردیابی قیمت اضافه کن
                 active_positions[token_addr] = {
                     "entry_price": price,
                     "symbol": symbol,
@@ -865,7 +864,7 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "Legendary Solana Bot with Tracking Mode is running 24/7!"
+    return "Legendary Solana Bot with Stickers & Balance Check is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
