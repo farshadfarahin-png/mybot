@@ -62,7 +62,7 @@ GOLDEN_MIN_VOLUME_5M = 30000
 GOLDEN_MIN_CHANGE_5M = 20.0
 GOLDEN_MIN_BUYS_5M = 80
 
-# 🌟 تنظیمات موتور پرایس اکشن سخت‌گیر (حمایت و مقاومت کلی)
+# 🌟 تنظیمات موتور پرایس اکشن سخت‌گیر و ضد فیک (حمایت و مقاومت کلی)
 TECH_BUY_AMOUNT_SOL = 0.01
 TECH_TAKE_PROFIT = 20.0
 TECH_STOP_LOSS = -8.0
@@ -263,6 +263,7 @@ def get_real_market_trending_tokens():
 
     return tokens
 
+# 🌟 الگوریتم پرایس اکشن ضد فیک (تاییدیه تثبیت ۱ ساعته و حجم بالا برای جلوگیری از تلۀ سقف)
 def check_major_support_resistance_pa(pair):
     try:
         if not is_token_worthy(pair):
@@ -282,13 +283,16 @@ def check_major_support_resistance_pa(pair):
         if price_change_6h < -10.0:
             return False, ""
 
+        # سناریو اول: پولبک واقعی از حمایت
         is_real_support_pullback = (-1.5 <= price_change_5m <= 2.5) and (buys_5m >= sells_5m) and (price_change_1h >= -2.0)
-        is_valid_resistance_breakout = (3.0 <= price_change_5m <= 10.0) and (buys_5m >= sells_5m * 1.5) and (price_change_1h > 3.0)
+
+        # سناریو دوم: شکست معتبر و تاییدشده سقف کلی (با تثبیت ۱ ساعته بالاتر از ۶ درصد جهت جلوگیری از فیک بریک اوت)
+        is_valid_resistance_breakout = (2.0 <= price_change_5m <= 8.0) and (price_change_1h >= 6.0) and (buys_5m >= sells_5m * 2.0)
 
         if is_real_support_pullback:
             return True, "پولبک واقعی و معتبر از کف / حمایت اصلی 📈"
         elif is_valid_resistance_breakout:
-            return True, "شکست معتبر سقف کلی همراه با تثبیت (بدون فیک) 🚀"
+            return True, "شکست معتبر و تاییدشده سقف کلی (با تثبیت ۱ ساعته) 🚀"
 
     except Exception:
         pass
@@ -866,7 +870,7 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "Legendary Solana Bot with Major Support/Resistance & Fake Breakout Filter is running 24/7!"
+    return "Legendary Solana Bot with Anti-Fake Breakout Filter is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
