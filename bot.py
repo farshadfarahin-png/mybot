@@ -29,7 +29,7 @@ TREND_ALERT_RUNNING = False
 COMBO_RUNNING = False       
 GOLDEN_OPTION = False       
 
-# تنظیمات بخش خرید و فروش (🔥) - مطابق عکس
+# تنظیمات بخش خرید و فروش (🔥)
 FIRE_BUY_AMOUNT_SOL = 0.01
 FIRE_TAKE_PROFIT = 18.0
 FIRE_STOP_LOSS = -10.0
@@ -37,7 +37,7 @@ FIRE_MIN_LIQUIDITY = 30000
 FIRE_MIN_VOLUME_5M = 5000       
 FIRE_MIN_PRICE_CHANGE_5M = 5.0  
 
-# تنظیمات بخش ترکیبی (🚨) - مطابق عکس
+# تنظیمات بخش ترکیبی (🚨)
 COMBO_BUY_AMOUNT_SOL = 0.01
 COMBO_TAKE_PROFIT = 18.0
 COMBO_STOP_LOSS = -10.0
@@ -45,13 +45,13 @@ COMBO_MIN_LIQUIDITY = 40000
 COMBO_MIN_VOLUME_5M = 20000  
 COMBO_MIN_CHANGE_5M = 25.0   
 
-# تنظیمات بخش اعلان ترند (🚨) - مطابق عکس
+# تنظیمات بخش اعلان ترند (🚨)
 TREND_MIN_LIQUIDITY = 40000
 TREND_MIN_VOLUME_5M = 40000  
 TREND_MIN_CHANGE_5M = 25.0   
 MIN_BUYS_5M = 80             
 
-# تنظیمات بخش گزینه طلایی (🚀) - مطابق عکس
+# تنظیمات بخش گزینه طلایی (🚀)
 GOLDEN_BUY_AMOUNT_SOL = 0.01
 GOLDEN_TAKE_PROFIT = 16.0
 GOLDEN_STOP_LOSS = -8.0
@@ -66,7 +66,6 @@ trend_alerted_tokens = set()
 golden_processed_tokens = set()
 active_positions = {}
 
-# متغیرهای ذخیره سابقه کلی سود و زیان (بسته شده + باز)
 closed_trades_history = []
 total_realized_pnl_usd = 0.0
 total_realized_pnl_percent = 0.0
@@ -318,7 +317,8 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=3000"
+    # افزایش اسلیپیج به 50% (5000 bps) برای جلوگیری از شکست فروش در ریزش‌ها
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=5000"
     quote_res = None
     for attempt in range(3):
         try:
@@ -339,7 +339,7 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 1000000
+        "prioritizationFeeLamports": 1000000  # کارمزد به مقدار اولیه و قبلی برگشت داده شد
     }
     
     swap_res = None
@@ -375,7 +375,7 @@ def execute_real_sell(token_mint, token_amount):
         tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
         if "result" in tx_res:
             sig = tx_res["result"]
-            time.sleep(3)
+            time.sleep(2)
             close_wsol_account()
             return True, sig
         else:
@@ -407,11 +407,19 @@ def check_positions_loop():
                         if pnl_percent >= tp or pnl_percent <= sl:
                             reason = "حد سود (TP) فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
 
-                            token_balance = get_token_balance(token_addr)
-                            if token_balance > 0:
-                                success, sell_res_info = execute_real_sell(token_addr, token_balance)
-                            else:
-                                success, sell_res_info = False, "موجودی یافت نشد"
+                            # تلاش مکرر و چندباره برای فروش در صورت رسیدن به حد سود یا زیان
+                            success = False
+                            sell_res_info = "تلاش‌ها ناموفق بود"
+                            for retry_idx in range(5):
+                                token_balance = get_token_balance(token_addr)
+                                if token_balance > 0:
+                                    success, sell_res_info = execute_real_sell(token_addr, token_balance)
+                                    if success:
+                                        break
+                                else:
+                                    success, sell_res_info = True, "موجودی صفر یا از قبل فروخته شده"
+                                    break
+                                time.sleep(1)
 
                             pnl_usd_val = 0.75 * (pnl_percent / 100)
                             closed_trades_history.append({
