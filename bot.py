@@ -31,7 +31,8 @@ COMBO_RUNNING = False
 GOLDEN_OPTION = False       
 TECHNICAL_RUNNING = False   
 SMART_FILTER_ENABLED = True   
-DYNAMIC_RISK_ENABLED = True   # 🌟 سویچ مدیریت ریسک داینامیک و سود مرکب بر اساس موجودی ولت
+DYNAMIC_RISK_ENABLED = True   
+MANUAL_SETTINGS_ENABLED = False # 🌟 سویچ جدید: کنترل نمایش دکمه‌های تنظیمات دستی
 
 # تنظیمات بخش خرید و فروش (🔥)
 FIRE_BUY_AMOUNT_SOL = 0.01
@@ -64,7 +65,7 @@ GOLDEN_MIN_VOLUME_5M = 30000
 GOLDEN_MIN_CHANGE_5M = 20.0
 GOLDEN_MIN_BUYS_5M = 80
 
-# 🌟 تنظیمات موتور پرایس اکشن سخت‌گیر و ضد فیک (حمایت و مقاومت کلی)
+# تنظیمات موتور پرایس اکشن
 TECH_BUY_AMOUNT_SOL = 0.01
 TECH_TAKE_PROFIT = 20.0
 TECH_STOP_LOSS = -8.0
@@ -161,18 +162,15 @@ def get_sol_balance():
             time.sleep(1)
     return 0.0
 
-# 🌟 1. محاسبه حجم خرید داینامیک بر اساس موجودی ولت (مدیریت ریسک هوشمند و سود مرکب)
 def get_dynamic_buy_amount(base_amount):
     if not DYNAMIC_RISK_ENABLED:
         return base_amount
     try:
         sol_bal = get_sol_balance()
         if sol_bal > 1.0:
-            # اگر موجودی بالا رفت، ۲ درصد کل موجودی به عنوان حجم معامله در نظر گرفته شود (سود مرکب)
             calculated = sol_bal * 0.02
             return max(base_amount, round(calculated, 4))
         elif sol_bal < 0.1:
-            # اگر موجودی کم شد، حجم معامله برای حفظ سرمایه کاهش پیدا کند
             return max(0.005, round(base_amount * 0.5, 4))
     except:
         pass
@@ -282,7 +280,6 @@ def get_real_market_trending_tokens():
 
     return tokens
 
-# 🌟 ماژول‌های پیشرفته امنیتی و شکارچی سیگنال
 def simulate_buy_transaction(token_mint):
     try:
         return True 
@@ -948,7 +945,6 @@ def check_trend_and_support(pair):
         pass
     return True
 
-# 🌟 2 & 3. پنل وب‌ویو تعاملی (داشبورد مدیریتی وب) همراه با نمایش زنده وضعیت ربات
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -975,7 +971,7 @@ def home():
             <hr style="border: 0; border-top: 1px solid #334155; margin: 15px 0;">
             <p>🔑 آدرس ولت: <code>{{ wallet }}</code></p>
             <p>💰 موجودی لحظه‌ای: <b>{{ balance }} SOL</b></p>
-            <p>🛡️ فیلتر هوشمند و مدیریت ریسک داینامیک: <b style="color: #4ade80;">فعال</b></p>
+            <p>🛡️ فیلتر هوشمند و مدیریت ریسک: <b style="color: #4ade80;">فعال</b></p>
         </div>
     </body>
     </html>
@@ -991,9 +987,10 @@ def get_main_keyboard():
     combo_status = "🚨 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
     trader_status = "🔥 خرید و فروش: روشن" if IS_RUNNING else "🔥 خرید و فروش: خاموش"
     trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
-    tech_status = "📊 پرایس اکشن (سقف/کف کلی): روشن" if TECHNICAL_RUNNING else "📊 پرایس اکشن (سقف/کف کلی): خاموش"
+    tech_status = "📊 پرایس اکشن: روشن" if TECHNICAL_RUNNING else "📊 پرایس اکشن: خاموش"
     smart_status = "🛡️ فیلتر هوشمند: روشن" if SMART_FILTER_ENABLED else "🛡️ فیلتر هوشمند: خاموش"
     risk_status = "⚖️ ریسک داینامیک: روشن" if DYNAMIC_RISK_ENABLED else "⚖️ ریسک داینامیک: خاموش"
+    manual_status = "⚙️ تنظیمات دستی: روشن" if MANUAL_SETTINGS_ENABLED else "⚙️ تنظیمات دستی: خاموش"
 
     open_pnl_usd = 0.0
     open_pnl_percent = 0.0
@@ -1021,6 +1018,7 @@ def get_main_keyboard():
     keyboard = [
         [InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
          InlineKeyboardButton(risk_status, callback_data="toggle_risk")],
+        [InlineKeyboardButton(manual_status, callback_data="toggle_manual")], # 🌟 کلید کنترل تنظیمات دستی
         [InlineKeyboardButton(tech_status, callback_data="toggle_technical")],
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
@@ -1032,16 +1030,29 @@ def get_main_keyboard():
          InlineKeyboardButton(pnl_usd_label, callback_data="refresh_pnl")]
     ]
 
-    if TECHNICAL_RUNNING:
-        keyboard.append([InlineKeyboardButton(f"⚙️ حجم معامله (پرایس اکشن): {TECH_BUY_AMOUNT_SOL} SOL", callback_data="menu_t_vol")])
-        keyboard.append([
-            InlineKeyboardButton(f"📊 [پرایس اکشن] تارگت: +{TECH_TAKE_PROFIT}%", callback_data="menu_t_tp"),
-            InlineKeyboardButton(f"📊 [پرایس اکشن] ضرر: {TECH_STOP_LOSS}%", callback_data="menu_t_sl")
-        ])
+    # 🌟 کلیدهای تنظیمات دستی فقط زمانی ظاهر می‌شوند که کلید "تنظیمات دستی" روشن باشد
+    if MANUAL_SETTINGS_ENABLED:
+        if TECHNICAL_RUNNING:
+            keyboard.append([InlineKeyboardButton(f"⚙️ حجم (پرایس اکشن): {TECH_BUY_AMOUNT_SOL} SOL", callback_data="menu_t_vol")])
+            keyboard.append([
+                InlineKeyboardButton(f"📊 [پرایس اکشن] تارگت: +{TECH_TAKE_PROFIT}%", callback_data="menu_t_tp"),
+                InlineKeyboardButton(f"📊 [پرایس اکشن] ضرر: {TECH_STOP_LOSS}%", callback_data="menu_t_sl")
+            ])
+
+        if GOLDEN_OPTION:
+            keyboard.append([
+                InlineKeyboardButton(f"🚀 [گزینه طلایی] تارگت: +{GOLDEN_TAKE_PROFIT}%", callback_data="menu_g_tp"),
+                InlineKeyboardButton(f"🚀 [گزینه طلایی] ضرر: {GOLDEN_STOP_LOSS}%", callback_data="menu_g_sl")
+            ])
+
+        if COMBO_RUNNING:
+            keyboard.append([
+                InlineKeyboardButton(f"🚨 [حالت ترکیبی] تارگت: +{COMBO_TAKE_PROFIT}%", callback_data="menu_c_tp"),
+                InlineKeyboardButton(f"🚨 [حالت ترکیبی] ضرر: {COMBO_STOP_LOSS}%", callback_data="menu_c_sl")
+            ])
 
     return InlineKeyboardMarkup(keyboard)
 
-# 🌟 2. گزارش‌گیری پیشرفته متنی همراه با نمودارکِ پیشرفت عملکرد (Visual Text Chart)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
@@ -1057,7 +1068,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 3")
         best_trades = cursor.fetchall()
 
-        # ساخت نمودار میله‌ای متنی ساده و بصری برای گزارش‌گیری
         chart_bars = "🟩" * min(int(max(total_pct, 0) // 5), 10) if total_pct >= 0 else "🟥" * min(int(abs(total_pct) // 5), 10)
         conn.close()
 
@@ -1084,7 +1094,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 اتاق کنترل سوپر ربات افسانه‌ای سولانا:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, AWAITING_STATE
+    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, AWAITING_STATE
     query = update.callback_query
     try:
         await query.answer()
@@ -1102,6 +1112,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "toggle_risk":
         DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
         state_txt = "⚖️ مدیریت ریسک داینامیک روشن شد." if DYNAMIC_RISK_ENABLED else "⚖️ مدیریت ریسک داینامیک خاموش شد."
+        try:
+            await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
+        except Exception:
+            send_telegram_msg(state_txt)
+
+    elif query.data == "toggle_manual":
+        MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
+        state_txt = "⚙️ تنظیمات دستی فعال شد." if MANUAL_SETTINGS_ENABLED else "⚙️ تنظیمات دستی غیرفعال شد."
         try:
             await query.edit_message_text(state_txt, reply_markup=get_main_keyboard())
         except Exception:
@@ -1159,7 +1177,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔑 **آدرس ولت متصل:**\n`{WALLET_PUBKEY}`\n\n"
             f"🛡️ فیلتر هوشمند: {'🟢 روشن' if SMART_FILTER_ENABLED else '🔴 خاموش'}\n"
             f"⚖️ مدیریت ریسک داینامیک: {'🟢 روشن' if DYNAMIC_RISK_ENABLED else '🔴 خاموش'}\n"
-            f"📊 پرایس اکشن (سقف/کف کلی): {'🟢 روشن' if TECHNICAL_RUNNING else '🔴 خاموش'}\n"
+            f"⚙️ تنظیمات دستی: {'🟢 روشن' if MANUAL_SETTINGS_ENABLED else '🔴 خاموش'}\n"
+            f"📊 پرایس اکشن: {'🟢 روشن' if TECHNICAL_RUNNING else '🔴 خاموش'}\n"
             f"🚀 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
             f"🚨 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'}\n"
             f"🔥 خرید و فروش: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'}\n"
@@ -1190,6 +1209,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_t_sl":
         AWAITING_STATE, cur_val, prefix = "tech_sl", TECH_STOP_LOSS, "📊 [پرایس اکشن] حد ضرر"
         await prompt_input(query, prefix, cur_val)
+    elif query.data == "menu_g_tp":
+        AWAITING_STATE, cur_val, prefix = "golden_tp", GOLDEN_TAKE_PROFIT, "🚀 [گزینه طلایی] تارگت سود"
+        await prompt_input(query, prefix, cur_val)
+    elif query.data == "menu_g_sl":
+        AWAITING_STATE, cur_val, prefix = "golden_sl", GOLDEN_STOP_LOSS, "🚀 [گزینه طلایی] حد ضرر"
+        await prompt_input(query, prefix, cur_val)
+    elif query.data == "menu_c_tp":
+        AWAITING_STATE, cur_val, prefix = "combo_tp", COMBO_TAKE_PROFIT, "🚨 [حالت ترکیبی] تارگت سود"
+        await prompt_input(query, prefix, cur_val)
+    elif query.data == "menu_c_sl":
+        AWAITING_STATE, cur_val, prefix = "combo_sl", COMBO_STOP_LOSS, "🚨 [حالت ترکیبی] حد ضرر"
+        await prompt_input(query, prefix, cur_val)
             
     elif query.data == "cancel_input":
         AWAITING_STATE = None
@@ -1206,7 +1237,8 @@ async def prompt_input(query, prefix, cur_val):
         send_telegram_msg("لطفاً مقدار جدید را تایپ کنید:")
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, AWAITING_STATE
+    global TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS
+    global GOLDEN_TAKE_PROFIT, GOLDEN_STOP_LOSS, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS, AWAITING_STATE
     
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
@@ -1220,8 +1252,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if st == "tech_vol": TECH_BUY_AMOUNT_SOL = val
             elif st == "tech_tp": TECH_TAKE_PROFIT = val
             elif st == "tech_sl": TECH_STOP_LOSS = val
+            elif st == "golden_tp": GOLDEN_TAKE_PROFIT = val
+            elif st == "golden_sl": GOLDEN_STOP_LOSS = val
+            elif st == "combo_tp": COMBO_TAKE_PROFIT = val
+            elif st == "combo_sl": COMBO_STOP_LOSS = val
 
-            msg = f"✅ تنظیمات پرایس اکشن با موفقیت به مقدار {val} بروزرسانی شد."
+            msg = f"✅ تنظیمات با موفقیت به مقدار {val} بروزرسانی شد."
             AWAITING_STATE = None
             await update.message.reply_text(msg, reply_markup=get_main_keyboard())
         except ValueError:
@@ -1253,5 +1289,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 سوپر ربات پیشرفته نهایی سولانا استارت شد.")
+    print("🚀 سوپر ربات نهایی با کلید کنترل تنظیمات دستی استارت شد.")
     app.run_polling()
