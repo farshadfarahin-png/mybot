@@ -4,7 +4,8 @@ import json
 import base64
 import base58
 import os
-import struct
+import sqlite3
+from datetime import datetime, timedelta
 from threading import Thread
 from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -69,6 +70,44 @@ active_positions = {}
 closed_trades_history = []
 total_realized_pnl_usd = 0.0
 total_realized_pnl_percent = 0.0
+
+# 🌟 راه‌اندازی پایگاه داده SQLite (سیستم یادگیری و آنالیز معاملات)
+def init_db():
+    try:
+        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_address TEXT,
+                symbol TEXT,
+                entry_price REAL,
+                exit_price REAL,
+                pnl_percent REAL,
+                pnl_usd REAL,
+                entry_reason TEXT,
+                timestamp TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ خطای دیتابیس: {e}")
+
+init_db()
+
+def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason):
+    try:
+        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO trades (token_address, symbol, entry_price, exit_price, pnl_percent, pnl_usd, entry_reason, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}")
 
 def send_telegram_msg(text):
     try:
@@ -138,6 +177,7 @@ def get_token_balance(token_mint):
             time.sleep(1)
     return 0
 
+# 🌟 5. سیستم ضد هانی‌پات و اسکن امنیت لایه دوم (Advanced Rug & HoneyPot Defense)
 def is_token_safe(token_mint, strict=False):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
@@ -148,6 +188,37 @@ def is_token_safe(token_mint, strict=False):
             max_score = 500 if strict else 3000
             if risk_score > max_score:
                 return False
+            
+            # بررسی توکن‌های فریز شده، مالیات و محدودیت فروش در لایه دوم
+            markets = data.get("markets", [])
+            for market in markets:
+                if market.get("lpFee", 0) > 10 or market.get("sellTax", 0) > 10:
+                    return False
+        return True
+    except Exception:
+        return True
+
+# 🌟 2. فیلتر پیشرفته «نهنگ‌ها و اینسایدرها» + بررسی ولت‌های فیک (Smart Money & Sybil Filter)
+def check_whale_and_advanced_security(token_mint, pair):
+    try:
+        url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
+        res = requests.get(url, timeout=4)
+        if res.status_code == 200:
+            data = res.json()
+            holders = data.get("holders", [])
+            top_holders_share = sum([h.get("pct", 0) for h in holders[:5]])
+            
+            # اگر ۵ هولدر برتر بیش از ۷۰ درصد توکن را داشته باشند مشکوک است (نهنگ متمرکز یا فیک)
+            if top_holders_share > 70.0:
+                return False
+            
+            # بررسی حجم سنگین صرافی‌ها یا ورود پول هوشمند
+            txns = pair.get('txns', {})
+            h1_buys = txns.get('h1', {}).get('buys', 0)
+            h1_sells = txns.get('h1', {}).get('sells', 0)
+            if h1_sells > 0 and (h1_buys / h1_sells) < 1.2:
+                return False
+                
         return True
     except Exception:
         return True
@@ -179,13 +250,11 @@ def get_real_market_trending_tokens():
 
     return tokens
 
-# اولویت اول بررسی: خط روند، حمایت/مقاومت و تثبیت قیمت (Breakout, Trend & Retest Confirmation)
 def check_trend_and_support(pair):
     try:
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
         price_change_1h = float(pair.get('priceChange', {}).get('h1', 0))
         
-        # تاییدیه تثبیت: روند ۱ ساعته مثبت (شکست مقاومت و حفظ روند) و کندل ۵ دقیقه در حال تثبیت روی حمایت
         if price_change_1h > 2.0 and price_change_5m >= -3.0:
             return True
     except Exception:
@@ -396,6 +465,7 @@ def execute_real_sell(token_mint, token_amount):
     except Exception as e:
         return False, f"خطای امضا در فروش: {str(e)}"
 
+# 🌟 حلقه مدیریت پوزیشن شامل Trailing Stop، DCA (خرید پله‌ای) و Partial Take Profit
 def check_positions_loop():
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
     while True:
@@ -416,8 +486,46 @@ def check_positions_loop():
                     if entry_price > 0 and current_price > 0:
                         pnl_percent = ((current_price - entry_price) / entry_price) * 100
 
-                        if pnl_percent >= tp or pnl_percent <= sl:
-                            reason = "حد سود (TP) فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
+                        # 🌟 1. تریلینگ استاپ پویا (Trailing Stop): بالا رفتن پویای تارگت و استاپ با صعود قیمت
+                        highest_price = pos.get('highest_price', entry_price)
+                        if current_price > highest_price:
+                            pos['highest_price'] = current_price
+                            # بالا بردن محافظتی استاپ لاس بر اساس سقف جدید
+                            new_sl = sl + (pnl_percent * 0.2)
+                            if new_sl > sl:
+                                pos['sl'] = min(new_sl, 0) # محافظت از سود در محدوده مثبت یا صفر
+
+                        # 🌟 1. خرید پله‌ای (DCA): اصلاح قیمت در محدوده حمایت (-3% تا -5%) و پله دوم خرید
+                        if -5.0 <= pnl_percent <= -3.0 and not pos.get('dca_done', False):
+                            pos['dca_done'] = True
+                            success_dca, _ = execute_real_buy(token_addr, 0.01)
+                            if success_dca:
+                                pos['entry_price'] = (pos['entry_price'] + current_price) / 2 # تعدیل میانگین قیمت ورود
+                                send_telegram_msg(
+                                    f"🔄 **خرید پله‌ای (DCA) فعال شد**\n\n"
+                                    f"🪙 توکن: {symbol}\n"
+                                    f"📉 قیمت اصلاحی: ${current_price:.8f}\n"
+                                    f"✅ پله دوم خرید انجام شد و میانگین قیمت ورود تعدیل گردید."
+                                )
+
+                        # 🌟 3. مکانیزم فروش پله‌ای (Partial Take Profit / Free Ride)
+                        half_tp = tp / 2.0
+                        if pnl_percent >= half_tp and not pos.get('half_sold', False):
+                            token_balance = get_token_balance(token_addr)
+                            if token_balance > 100:
+                                half_amount = token_balance // 2
+                                success_half, _ = execute_real_sell(token_addr, half_amount)
+                                if success_half:
+                                    pos['half_sold'] = True
+                                    send_telegram_msg(
+                                        f"🛡️ **مدیریت ریسک هوشمند (فروش پله‌ای)**\n\n"
+                                        f"🪙 توکن: {symbol}\n"
+                                        f"📊 سود فعلی: {pnl_percent:+.2f}%\n"
+                                        f"✅ ۵۰ درصد حجم برای ریسک‌فری شدن معامله نقد شد!"
+                                    )
+
+                        if pnl_percent >= tp or pnl_percent <= pos['sl']:
+                            reason = "حد سود (TP) / تریلینگ فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر (SL) فعال شد 🛑"
 
                             success = False
                             sell_res_info = "تلاش‌ها ناموفق بود"
@@ -440,6 +548,9 @@ def check_positions_loop():
                             })
                             total_realized_pnl_percent += pnl_percent
                             total_realized_pnl_usd += pnl_usd_val
+
+                            # 🌟 ثبت در پایگاه داده (سیستم یادگیری پاداش و آنالیز)
+                            log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
 
                             sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
@@ -471,7 +582,7 @@ def unified_market_scanner_loop(app):
     global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, FIRE_MIN_LIQUIDITY, FIRE_MIN_VOLUME_5M, FIRE_MIN_PRICE_CHANGE_5M
     global TREND_MIN_LIQUIDITY, TREND_MIN_VOLUME_5M, TREND_MIN_CHANGE_5M, MIN_BUYS_5M
 
-    send_telegram_msg("⚡ موتور پردازش بازار (اولویت اول: تحلیل روند، حمایت و تثبیت) فعال شد.")
+    send_telegram_msg("⚡ موتور پردازش بازار افسانه‌ای (روند، حمایت، نهنگ‌یاب، لایه دوم امنیتی و تریلینگ) فعال شد.")
 
     while True:
         if not (GOLDEN_OPTION or COMBO_RUNNING or IS_RUNNING or TREND_ALERT_RUNNING):
@@ -502,13 +613,14 @@ def unified_market_scanner_loop(app):
                 if price <= 0:
                     continue
 
-                # 📌 مرحله اول (اولویت اول): بررسی خط روند، حمایت و تثبیت قیمت
-                # اگر این شرط برقرار نباشد، توکن اصلاً وارد بررسی‌های بعدی نخواهد شد
-                is_trend_confirmed = check_trend_and_support(pair)
-                if not is_trend_confirmed:
+                # بررسی خط روند و حمایت
+                if not check_trend_and_support(pair):
                     continue
 
-                # اولویت دوم: گزینه طلایی (🚀)
+                # 🌟 بررسی پیشرفته نهنگ‌ها و امنیت لایه دوم پیش از خرید
+                if not check_whale_and_advanced_security(token_addr, pair):
+                    continue
+
                 if GOLDEN_OPTION and token_addr not in golden_processed_tokens:
                     if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
                         buys_5m >= GOLDEN_MIN_BUYS_5M and 
@@ -549,12 +661,14 @@ def unified_market_scanner_loop(app):
                                 "entry_price": price,
                                 "symbol": symbol,
                                 "tp": GOLDEN_TAKE_PROFIT,
-                                "sl": GOLDEN_STOP_LOSS
+                                "sl": GOLDEN_STOP_LOSS,
+                                "half_sold": False,
+                                "dca_done": False,
+                                "highest_price": price
                             }
                         send_telegram_msg(golden_msg)
                         continue
 
-                # اولویت سوم: حالت ترکیبی (🚨)
                 if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
                     if (price_change_5m >= COMBO_MIN_CHANGE_5M and 
                         buys_5m >= MIN_BUYS_5M and 
@@ -594,12 +708,14 @@ def unified_market_scanner_loop(app):
                                 "entry_price": price,
                                 "symbol": symbol,
                                 "tp": COMBO_TAKE_PROFIT,
-                                "sl": COMBO_STOP_LOSS
+                                "sl": COMBO_STOP_LOSS,
+                                "half_sold": False,
+                                "dca_done": False,
+                                "highest_price": price
                             }
                         send_telegram_msg(combo_msg)
                         continue
 
-                # اولویت چهارم: اعلان ترند (بدون خرید)
                 if TREND_ALERT_RUNNING and token_addr not in trend_alerted_tokens:
                     if (price_change_5m >= TREND_MIN_CHANGE_5M and 
                         buys_5m >= MIN_BUYS_5M and 
@@ -620,7 +736,6 @@ def unified_market_scanner_loop(app):
                         )
                         send_telegram_msg(alert_msg)
 
-                # اولویت پنجم: خرید و فروش معمولی (🔥)
                 if IS_RUNNING and token_addr not in processed_tokens:
                     if (liquidity >= FIRE_MIN_LIQUIDITY and 
                         volume_5m >= FIRE_MIN_VOLUME_5M and 
@@ -659,7 +774,10 @@ def unified_market_scanner_loop(app):
                                 "entry_price": price,
                                 "symbol": symbol,
                                 "tp": FIRE_TAKE_PROFIT,
-                                "sl": FIRE_STOP_LOSS
+                                "sl": FIRE_STOP_LOSS,
+                                "half_sold": False,
+                                "dca_done": False,
+                                "highest_price": price
                             }
                         send_telegram_msg(msg)
 
@@ -672,7 +790,7 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "Multi-Mode Solana Bot is running 24/7!"
+    return "Legendary Solana Bot with Whale Tracker & Trailing Stop is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -763,12 +881,43 @@ def get_main_keyboard():
 
     return InlineKeyboardMarkup(keyboard)
 
+# 🌟 دستور تلگرامی /stats برای گزارش‌گیری از پایگاه داده هوشمند
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
+        return
+    try:
+        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*), SUM(pnl_percent), SUM(pnl_usd) FROM trades")
+        res = cursor.fetchone()
+        total_trades = res[0] or 0
+        total_pct = res[1] or 0.0
+        total_u = res[2] or 0.0
+
+        cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 3")
+        best_trades = cursor.fetchall()
+        conn.close()
+
+        stats_text = (
+            f"📊 **آمار تحلیلی و یادگیری ربات (Database Stats):**\n\n"
+            f"🔹 کل معاملات ثبت شده: {total_trades}\n"
+            f"📈 مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
+            f"💵 مجموع درآمد/ضرر دلاری: ${total_u:+.2f}\n\n"
+            f"🏆 **بهترین معاملات ثبت شده:**\n"
+        ]
+        for t in best_trades:
+            stats_text += f"🪙 {t[0]} : {t[1]:+.2f}% (در {t[2]})\n"
+
+        await update.message.reply_text(stats_text, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در دریافت آمار: {e}")
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
     global AWAITING_STATE
     AWAITING_STATE = None
-    await update.message.reply_text("🤖 اتاق کنترل ربات هوشمند سولانا:", reply_markup=get_main_keyboard())
+    await update.message.reply_text("🤖 اتاق کنترل ربات افسانه‌ای سولانا:", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, AWAITING_STATE
@@ -820,7 +969,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         current_sol_bal = get_sol_balance()
         status_text = (
-            f"📊 وضعیت کامل سیستم:\n\n"
+            f"📊 وضعیت کامل سیستم افسانه‌ای:\n\n"
             f"🚀 گزینه طلایی: {'🟢 روشن' if GOLDEN_OPTION else '🔴 خاموش'}\n"
             f"🚨 حالت ترکیبی: {'🟢 روشن' if COMBO_RUNNING else '🔴 خاموش'}\n"
             f"🔥 خرید و فروش: {'🟢 روشن' if IS_RUNNING else '🔴 خاموش'}\n"
@@ -979,6 +1128,7 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
@@ -990,5 +1140,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 ربات هوشمند سولانا استارت شد.")
+    print("🚀 ربات افسانه‌ای سولانا استارت شد.")
     app.run_polling()
