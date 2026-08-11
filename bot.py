@@ -66,6 +66,11 @@ trend_alerted_tokens = set()
 golden_processed_tokens = set()
 active_positions = {}
 
+# متغیرهای ذخیره سابقه کلی سود و زیان (بسته شده + باز)
+closed_trades_history = []
+total_realized_pnl_usd = 0.0
+total_realized_pnl_percent = 0.0
+
 def send_telegram_msg(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -380,6 +385,7 @@ def execute_real_sell(token_mint, token_amount):
         return False, f"خطای امضا در فروش: {str(e)}"
 
 def check_positions_loop():
+    global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
     while True:
         try:
             tokens_to_close = []
@@ -406,6 +412,16 @@ def check_positions_loop():
                                 success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             else:
                                 success, sell_res_info = False, "موجودی یافت نشد"
+
+                            # ثبت سود/زیان این معامله بسته شده به لیست کل سوابق
+                            pnl_usd_val = 0.75 * (pnl_percent / 100)
+                            closed_trades_history.append({
+                                "symbol": symbol,
+                                "percent": pnl_percent,
+                                "usd": pnl_usd_val
+                            })
+                            total_realized_pnl_percent += pnl_percent
+                            total_realized_pnl_usd += pnl_usd_val
 
                             sell_status_str = "انجام شد (موفق ✅)" if success else f"خطا ({sell_res_info} ❌)"
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
@@ -644,13 +660,41 @@ def get_main_keyboard():
     trader_status = "🔥 خرید و فروش: در حال سوختن" if IS_RUNNING else "🔥 خرید و فروش: خاموش"
     trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
 
+    # جمع کردن سود/زیانِ پوزیشن‌های باز لحظه‌ای
+    open_pnl_usd = 0.0
+    open_pnl_percent = 0.0
+    
+    if len(active_positions) > 0:
+        for token_addr, pos in active_positions.items():
+            try:
+                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=2).json()
+                if pair_res.get('pairs'):
+                    cur_p = float(pair_res['pairs'][0].get('priceUsd', 0))
+                    entry_p = pos['entry_price']
+                    if entry_p > 0 and cur_p > 0:
+                        diff_pct = ((cur_p - entry_p) / entry_p) * 100
+                        open_pnl_percent += diff_pct
+                        open_pnl_usd += 0.75 * (diff_pct / 100)
+            except:
+                pass
+
+    # مجموع نهایی = معاملات بسته شده (Realized) + پوزیشن‌های باز (Open)
+    grand_total_percent = total_realized_pnl_percent + open_pnl_percent
+    grand_total_usd = total_realized_pnl_usd + open_pnl_usd
+
+    pnl_percent_label = f"📈 کل سود/زیان: {grand_total_percent:+.2f}%"
+    pnl_usd_label = f"💵 درآمد/ضرر دلاری: ${grand_total_usd:+.2f}"
+
     keyboard = [
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
         [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
          InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-         InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")]
+         InlineKeyboardButton("💰 موجودی ولت", callback_data="wallet_balance")],
+        # دکمه‌های شیشه‌ای تجمیعی (بسته شده + باز)
+        [InlineKeyboardButton(pnl_percent_label, callback_data="refresh_pnl"),
+         InlineKeyboardButton(pnl_usd_label, callback_data="refresh_pnl")]
     ]
 
     if GOLDEN_OPTION:
@@ -745,6 +789,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             send_telegram_msg(state_txt)
             
+    elif query.data == "refresh_pnl":
+        try:
+            await query.edit_message_text("🤖 بروزرسانی آمار کل سود/زیان:", reply_markup=get_main_keyboard())
+        except Exception:
+            pass
+
     elif query.data == "status":
         pub_display = f"{WALLET_PUBKEY[:6]}...{WALLET_PUBKEY[-4:]}" if WALLET_PUBKEY else "تنظیم نشده"
         current_sol_bal = get_sol_balance()
