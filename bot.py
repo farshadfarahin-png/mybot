@@ -1,4 +1,4 @@
-import time
+Import time
 import requests
 import json
 import base64
@@ -276,19 +276,21 @@ def check_major_support_resistance_pa(pair):
         buys_5m = int(txns_5m.get('buys', 0))
         sells_5m = int(txns_5m.get('sells', 0))
 
-        if price_change_5m < -3.5 or sells_5m > (buys_5m * 1.5):
+        # فیلتر حرفه‌ای و سخت‌گیرانه برای جلوگیری از ضرر و فیک‌بریک‌اوت
+        if price_change_5m <= 0 or sells_5m >= buys_5m:
             return False, ""
 
-        if price_change_6h < -10.0:
+        if price_change_6h < -5.0 or price_change_1h < 1.0:
             return False, ""
 
-        is_real_support_pullback = (-1.5 <= price_change_5m <= 2.5) and (buys_5m >= sells_5m) and (price_change_1h >= -2.0)
-        is_valid_resistance_breakout = (2.0 <= price_change_5m <= 8.0) and (price_change_1h >= 6.0) and (buys_5m >= sells_5m * 2.0)
+        # بررسی پولبک معتبر از حمایت و شکست سقف با حجم تاییدشده
+        is_classic_support_pullback = (0.3 <= price_change_5m <= 3.0) and (buys_5m >= sells_5m * 2.0) and (price_change_1h >= 3.0)
+        is_classic_breakout = (3.0 <= price_change_5m <= 7.0) and (price_change_1h >= 8.0) and (buys_5m >= sells_5m * 2.5)
 
-        if is_real_support_pullback:
-            return True, "پولبک واقعی و معتبر از کف / حمایت اصلی 📈"
-        elif is_valid_resistance_breakout:
-            return True, "شکست معتبر و تاییدشده سقف کلی (با تثبیت ۱ ساعته) 🚀"
+        if is_classic_support_pullback:
+            return True, "برگشت حرفه‌ای از حمایت معتبر / پولبک پاک 📈"
+        elif is_classic_breakout:
+            return True, "شکست معتبر سقف و مقاومت کلیدی با تثبیت 🚀"
 
     except Exception:
         pass
