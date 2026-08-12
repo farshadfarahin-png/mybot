@@ -1357,24 +1357,33 @@ def get_main_keyboard():
     admin_webapp_url = f"{WEBAPP_URL}/admin-panel?telegram_id={TELEGRAM_CHAT_ID}"
 
     keyboard = [
+        # دسته سوم: مدیریت و دسترسی VIP (بنفش)
         [InlineKeyboardButton("👑 پنل مدیریت و لیست کاربران VIP", web_app=WebAppInfo(url=admin_webapp_url))],
         [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
+        [InlineKeyboardButton(copy_status, callback_data="toggle_copy")],
+
+        # دسته چهارم: لایه‌های حفاظتی، امنیتی و مدیریت ریسک (آبی)
         [InlineKeyboardButton(bottom_whale_status, callback_data="toggle_bottom_whale")],
         [InlineKeyboardButton(hulk_moon_status, callback_data="toggle_hulk_moon"),
          InlineKeyboardButton(wash_status, callback_data="toggle_wash")],
         [InlineKeyboardButton(ai_learning_status, callback_data="toggle_ai_learning"),
          InlineKeyboardButton(mempool_status, callback_data="toggle_mempool")],
         [InlineKeyboardButton(ultimate_21_status, callback_data="toggle_ultimate_21")],
-        [InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
-         InlineKeyboardButton(risk_status, callback_data="toggle_risk")],
-        [InlineKeyboardButton(sync_status, callback_data="toggle_sync")], 
-        [InlineKeyboardButton(copy_status, callback_data="toggle_copy")],
-        [InlineKeyboardButton(manual_status, callback_data="toggle_manual")],
+        [InlineKeyboardButton(risk_status, callback_data="toggle_risk"),
+         InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter")],
+
+        # دسته دوم: سیگنال‌های پیشرفته و هوش مصنوعی (قرمز)
+        [InlineKeyboardButton(sync_status, callback_data="toggle_sync")],
         [InlineKeyboardButton(tech_status, callback_data="toggle_technical")],
+
+        # دسته اول: موتورها و استراتژی‌های معاملاتی (زرد)
+        [InlineKeyboardButton(manual_status, callback_data="toggle_manual")],
         [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
         [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
         [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
          InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
+
+        # بخش ثابت (که خط کشیده نشده‌اند): وضعیت سیستم، موجودی ولت، کل سود/زیان
         [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
          InlineKeyboardButton("💰 موجودی ولت ادمین", callback_data="wallet_balance")],
         [InlineKeyboardButton(pnl_percent_label, callback_data="refresh_pnl"),
