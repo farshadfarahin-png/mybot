@@ -20,10 +20,10 @@ from solders.message import MessageV0
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
 
-# آیدی عددی کانال (حتماً باید به صورت منفی و عددی باشد، مثلاً -1001234567890)
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "-100xxxxxxxxxx") 
+# آیدی عددی دقیق کانال شما
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1003840577545") 
 
-# لینک نمایشی جدید کانال برای دکمه‌ها و متن‌ها
+# لینک نمایشی کانال برای دکمه‌ها
 CHANNEL_INVITE_LINK = "https://t.me/+c_o1BlwD7Q4ZjZk"
 
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
@@ -1599,7 +1599,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif st == "combo_vol": COMBO_BUY_AMOUNT_SOL = val
             elif st == "combo_tp": COMBO_TAKE_PROFIT = val
             elif st == "combo_sl": COMBO_STOP_LOSS = val
-            elif st == "fire_vol": FIRE_BUY_AMOUNT_SOL = val
+            elif st == "fire_vol": FIRE_BUY_AMOUNT_SOL_val = val # fixed name usage
             elif st == "fire_tp": FIRE_TAKE_PROFIT = val
             elif st == "fire_sl": FIRE_STOP_LOSS = val
 
