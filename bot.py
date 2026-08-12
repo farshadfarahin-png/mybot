@@ -1,4 +1,4 @@
-Import time
+import time
 import requests
 import json
 import base64
@@ -176,6 +176,11 @@ def send_telegram_msg(text, target_chat=None):
     except Exception as e:
         print(f"❌ خطای ارسال پیام به تلگرام: {e}")
 
+def send_signal_to_vip_channel(text):
+    # ارسال سیگنال گرافیکی و با جزئیات کامل به کانال VIP
+    if CHANNEL_ID:
+        send_telegram_msg(text, target_chat=CHANNEL_ID)
+
 def register_subscription(telegram_id, wallet_addr, tx_sig):
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
@@ -318,7 +323,7 @@ def is_token_worthy(pair):
     try:
         liquidity = float(pair.get('liquidity', {}).get('usd', 0))
         volume_5m = float(pair.get('volume', {}).get('m5', 0))
-        if liquidity < 10000 or volume_5m < 2000: # بهینه‌سازی آستانه برای سرعت شکار بیشتر
+        if liquidity < 10000 or volume_5m < 2000:
             return False
         return True
     except:
@@ -339,11 +344,11 @@ def check_social_sentiment(token_mint, pair):
 def is_token_safe(token_mint, strict=False):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
-        res = requests.get(url, timeout=3) # سرعت‌بخشی به استعلام رگ‌چک
+        res = requests.get(url, timeout=3)
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            max_score = 800 if strict else 4000 # انعطاف بیشتر برای یافتن سریع‌تر توکن‌ها
+            max_score = 800 if strict else 4000
             if risk_score > max_score:
                 return False
             markets = data.get("markets", [])
@@ -422,7 +427,7 @@ def check_major_support_resistance_pa(pair):
         buys_5m = int(txns_5m.get('buys', 0))
         sells_5m = int(txns_5m.get('sells', 0))
 
-        if price_change_5m <= -2.0 or sells_5m >= buys_5m * 1.5: # تنظیم ملایم‌تر برای سرعت شکار بالا
+        if price_change_5m <= -2.0 or sells_5m >= buys_5m * 1.5:
             return False, ""
 
         is_classic_support_pullback = (price_change_5m >= -1.0) and (buys_5m >= sells_5m * 1.2)
@@ -450,7 +455,7 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         if price <= 0:
             return False, 0.0, 0.0, 0.0, "قیمت نامعتبر"
 
-        if liquidity < 20000 or volume_5m < 5000: # حدنصاب منطقی‌تر برای پیدا شدن سریع سیگنال
+        if liquidity < 20000 or volume_5m < 5000:
             return False, 0.0, 0.0, 0.0, "نقدینگی یا حجم کافی نیست"
 
         if price_change_5m < 5.0:
@@ -787,7 +792,7 @@ def check_positions_loop():
                 active_positions.pop(t_addr, None)
         except Exception as e:
             print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
-        time.sleep(1) # بهینه‌سازی سرعت بررسی پوزیشن‌ها
+        time.sleep(1)
 
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
@@ -800,7 +805,7 @@ def technical_analysis_scanner_loop(app):
 
         try:
             tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:40]: # افزایش تعداد توکن‌های بررسی‌شده برای سرعت بالاتر
+            for token_addr in tokens[:40]:
                 if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
                     continue
 
@@ -815,7 +820,7 @@ def technical_analysis_scanner_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TECH_TOKEN')
 
-                if price <= 0 or liquidity < 15000 or volume_5m < 5000: # حدنصاب بهینه‌شده برای شکار سریع‌تر
+                if price <= 0 or liquidity < 15000 or volume_5m < 5000:
                     continue
 
                 is_valid_pa, pa_reason = check_major_support_resistance_pa(pair)
@@ -869,12 +874,14 @@ def technical_analysis_scanner_loop(app):
                     "highest_price": price
                 }
                 
+                # ارسال پیام به ادمین و انتشار گرافیکی و با جزئیات کامل در کانال VIP
                 send_telegram_msg(tech_msg)
+                send_signal_to_vip_channel(tech_msg)
 
         except Exception as e:
             print(f"⚠️ خطای موتور پرایس اکشن: {e}")
 
-        time.sleep(1) # افزایش سرعت حلقه اسکن
+        time.sleep(1)
 
 def unified_market_scanner_loop(app):
     global GOLDEN_OPTION, COMBO_RUNNING, IS_RUNNING, TREND_ALERT_RUNNING, SYNCHRONIZED_MODE
@@ -892,7 +899,7 @@ def unified_market_scanner_loop(app):
 
         try:
             tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:40]: # افزایش تعداد توکن‌ها برای سرعت بیشتر در شکار
+            for token_addr in tokens[:40]:
                 if not token_addr or token_addr in active_positions:
                     continue
 
@@ -955,8 +962,7 @@ def unified_market_scanner_loop(app):
                         }
                         
                         send_telegram_msg(super_msg)
-                        if CHANNEL_ID:
-                            send_telegram_msg(super_msg, target_chat=CHANNEL_ID)
+                        send_signal_to_vip_channel(super_msg)
                         continue
 
                 if not check_whale_and_advanced_security(token_addr, pair):
@@ -1007,6 +1013,7 @@ def unified_market_scanner_loop(app):
                             "highest_price": price
                         }
                         send_telegram_msg(golden_msg)
+                        send_signal_to_vip_channel(golden_msg)
                         continue
 
                 if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
@@ -1054,6 +1061,7 @@ def unified_market_scanner_loop(app):
                             "highest_price": price
                         }
                         send_telegram_msg(combo_msg)
+                        send_signal_to_vip_channel(combo_msg)
                         continue
 
                 if IS_RUNNING and token_addr not in processed_tokens:
@@ -1101,11 +1109,12 @@ def unified_market_scanner_loop(app):
                             "highest_price": price
                         }
                         send_telegram_msg(msg)
+                        send_signal_to_vip_channel(msg)
 
         except Exception as e:
             print(f"⚠️ خطای موتور پردازش بازار: {e}")
 
-        time.sleep(1) # سرعت‌بخشی به حلقه اسکن بازار
+        time.sleep(1)
 
 web_app = Flask(__name__)
 
@@ -1161,7 +1170,6 @@ def home():
                     html += `</div>`;
                     area.innerHTML = html;
                 } else if(data.has_subscription) {
-                    // نمایش وضعیت اشتراک فعال برای کاربرانی که واریز کرده‌اند و فرم پرداخت مخفی می‌شود
                     area.innerHTML = `
                         <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
                         <div style="background: #0f172a; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #22c55e; margin-top: 15px;">
@@ -1171,7 +1179,6 @@ def home():
                         </div>
                     `;
                 } else {
-                    // نمایش فرم پرداخت برای کاربران جدید یا فاقد اشتراک
                     area.innerHTML = `
                         <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
                         <p style="word-break: break-all; font-size:11px;">🔑 ولت جهت واریز: <code>{{ wallet }}</code></p>
