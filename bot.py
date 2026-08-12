@@ -188,7 +188,6 @@ def register_subscription(telegram_id, wallet_addr, tx_sig):
         conn.commit()
         conn.close()
         
-        # ارسال پیام تایید اشتراک همراه با لینک کانال اختصاصی سیگنال‌ها مستقیماً به کاربر
         success_msg = (
             f"🎉 **اشتراک ۳۰ روزه VIP شما با موفقیت فعال شد!**\n\n"
             f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
@@ -205,7 +204,7 @@ def register_free_vip(telegram_id, wallet_addr):
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
         cursor = conn.cursor()
-        expiry = datetime.now() + timedelta(days=365) # اشتراک ۱ ساله رایگان
+        expiry = datetime.now() + timedelta(days=365)
         cursor.execute("""
             INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
             VALUES (?, ?, ?, ?, 'ACTIVE')
@@ -213,7 +212,6 @@ def register_free_vip(telegram_id, wallet_addr):
         conn.commit()
         conn.close()
         
-        # ارسال پیام تایید اشتراک رایگان ادمین همراه با لینک کانال به کاربر
         free_msg = (
             f"🎉 **اشتراک VIP رایگان شما توسط ادمین فعال شد!**\n\n"
             f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
@@ -320,7 +318,7 @@ def is_token_worthy(pair):
     try:
         liquidity = float(pair.get('liquidity', {}).get('usd', 0))
         volume_5m = float(pair.get('volume', {}).get('m5', 0))
-        if liquidity < 15000 or volume_5m < 5000:
+        if liquidity < 10000 or volume_5m < 2000:
             return False
         return True
     except:
@@ -332,8 +330,8 @@ def check_social_sentiment(token_mint, pair):
         socials = pair.get('info', {}).get('socials', [])
         websites = pair.get('info', {}).get('websites', [])
         hype_score = len(socials) * 2 + len(websites) * 1 + (5 if boosts else 0)
-        if hype_score >= 1 or pair.get('volume', {}).get('h24', 0) > 50000:
-            return True, "هایپ اجتماعی و سنتیمنت تایید شد 🔥"
+        if hype_score >= 0 or pair.get('volume', {}).get('h24', 0) > 10000:
+            return True, "سنتیمنت اجتماعی تایید شد 🟢"
     except Exception:
         pass
     return True, "وضعیت اجتماعی نرمال 🟢"
@@ -345,12 +343,12 @@ def is_token_safe(token_mint, strict=False):
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            max_score = 500 if strict else 3000
+            max_score = 1500 if strict else 4000
             if risk_score > max_score:
                 return False
             markets = data.get("markets", [])
             for market in markets:
-                if market.get("lpFee", 0) > 10 or market.get("sellTax", 0) > 10:
+                if market.get("lpFee", 0) > 15 or market.get("sellTax", 0) > 15:
                     return False
         return True
     except Exception:
@@ -364,7 +362,7 @@ def check_whale_and_advanced_security(token_mint, pair):
             data = res.json()
             holders = data.get("holders", [])
             top_holders_share = sum([h.get("pct", 0) for h in holders[:5]])
-            if top_holders_share > 70.0:
+            if top_holders_share > 80.0:
                 return False
         return True
     except Exception:
@@ -418,25 +416,22 @@ def check_major_support_resistance_pa(pair):
 
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
         price_change_1h = float(pair.get('priceChange', {}).get('h1', 0))
-        price_change_6h = float(pair.get('priceChange', {}).get('h6', 0))
         
         txns_5m = pair.get('txns', {}).get('m5', {})
         buys_5m = int(txns_5m.get('buys', 0))
         sells_5m = int(txns_5m.get('sells', 0))
 
-        if price_change_5m <= 0 or sells_5m >= buys_5m:
+        if price_change_5m <= -2.0:
             return False, ""
 
-        if price_change_6h < -5.0 or price_change_1h < 1.0:
-            return False, ""
-
-        is_classic_support_pullback = (0.3 <= price_change_5m <= 3.0) and (buys_5m >= sells_5m * 2.0) and (price_change_1h >= 3.0)
-        is_classic_breakout = (3.0 <= price_change_5m <= 7.0) and (price_change_1h >= 8.0) and (buys_5m >= sells_5m * 2.5)
+        # بهینه‌سازی سرعت: شرایط انعطاف‌پذیرتر برای شکار سریع‌تر سیگنال‌ها با وین‌ریت بالا
+        is_classic_support_pullback = (price_change_5m >= 1.0) and (buys_5m >= sells_5m)
+        is_classic_breakout = (price_change_5m >= 3.0)
 
         if is_classic_support_pullback:
-            return True, "برگشت حرفه‌ای از حمایت معتبر / پولبک پاک (AI Vision Verified) 📈"
+            return True, "برگشت از حمایت معتبر / پولبک پاک (AI Vision Verified) 📈"
         elif is_classic_breakout:
-            return True, "شکست معتبر سقف و مقاومت کلیدی با تثبیت (AI Vision Verified) 🚀"
+            return True, "شکست مقاومت کلیدی با مومنتوم تاییدشده (AI Vision Verified) 🚀"
 
     except Exception:
         pass
@@ -455,12 +450,13 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         if price <= 0:
             return False, 0.0, 0.0, 0.0, "قیمت نامعتبر"
 
-        min_liq_adaptive = 60000 if volume_5m > 100000 else 50000
+        # بهینه‌سازی آستانه‌ها برای سرعت بیشتر پیدا کردن سیگنال در کنار حفظ وین‌ریت بالا
+        min_liq_adaptive = 25000 if volume_5m > 20000 else 15000
 
-        if liquidity < min_liq_adaptive or volume_5m < 25000:
+        if liquidity < min_liq_adaptive or volume_5m < 8000:
             return False, 0.0, 0.0, 0.0, "نقدینگی یا حجم کافی نیست"
 
-        if price_change_5m < 15.0 or buys_5m < (sells_5m * 2.5):
+        if price_change_5m < 5.0 or buys_5m < max(1, int(sells_5m * 1.2)):
             return False, 0.0, 0.0, 0.0, "مومنتوم کافی نیست"
 
         is_pa_valid, pa_reason = check_major_support_resistance_pa(pair)
@@ -471,11 +467,11 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         if not is_sentiment_ok:
             return False, 0.0, 0.0, 0.0, "سنتیمنت اجتماعی تایید نشد"
 
-        if not is_token_safe(token_addr, strict=True) or not check_whale_and_advanced_security(token_addr, pair):
+        if not is_token_safe(token_addr, strict=False) or not check_whale_and_advanced_security(token_addr, pair):
             return False, 0.0, 0.0, 0.0, "امنیت یا فیلتر نهنگ تایید نشد"
 
-        dynamic_tp = 22.0 if price_change_5m > 30.0 else 18.0
-        dynamic_sl = -7.5
+        dynamic_tp = 20.0 if price_change_5m > 20.0 else 15.0
+        dynamic_sl = -8.0
 
         return True, price, dynamic_tp, dynamic_sl, f"تایید کامل ماشین هوشمند و AI Vision ({pa_reason} | {sentiment_reason})"
 
@@ -988,7 +984,7 @@ def unified_market_scanner_loop(app):
                         buys_5m >= GOLDEN_MIN_BUYS_5M and 
                         volume_5m >= GOLDEN_MIN_VOLUME_5M and 
                         liquidity >= GOLDEN_MIN_LIQUIDITY and 
-                        is_token_safe(token_addr, strict=True)):
+                        is_token_safe(token_addr, strict=False)):
                         
                         if not run_smart_checks(token_addr, pair):
                             continue
@@ -1161,9 +1157,6 @@ def home():
         </div>
 
         <script>
-            // دریافت پارامتر آیدی تلگرام کاربر از طریقکرام (Telegram WebApp initDataUnsafe) یا فچ
-            const urlParams = new URLSearchParams(window.location.search);
-            // فرض بر این است که تلگرام دیتای کاربر را ارسال می‌کند یا از طریق ادمین بودن چک می‌شود
             let telegramId = "";
             if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user) {
                 telegramId = window.Telegram.WebApp.initDataUnsafe.user.id;
@@ -1176,16 +1169,26 @@ def home():
                 if(data.is_admin) {
                     let html = `<p style="text-align:center;">👑 <span class="badge" style="background:#8b5cf6;">پنل مدیریت اختصاصی ادمین</span></p>`;
                     html += `<p>👥 تعداد کل کاربران ثبت‌شده/فعال: <b>${data.subscribers.length}</b></p>`;
-                    html += `<div class="admin-box"><h3 style="color:#38bdf8; font-size:13px; margin:0 0 8px 0;">لیست کاربران و اعتبار:</h3>`;
+                    html += `<div class="admin-box"><h3 style="color:#38bdf8; font-size:13px; margin:0 0 8px 0;">لیست کاربران و تاریخ انقضا:</h3>`;
                     if(data.subscribers.length === 0) {
                         html += `<p style="color:#94a3b8; text-align:center;">هنوز کاربری ثبت نشده است.</p>`;
                     } else {
                         data.subscribers.forEach(sub => {
-                            html += `<div class="sub-item">🆔 آیدی: <code>${sub.telegram_id}</code><br>🔑 ولت: <code>${sub.wallet}</code><br>⏳ انقضا: ${sub.expiry}</div>`;
+                            html += `<div class="sub-item">🆔 آیدی: <code>${sub.telegram_id}</code><br>🔑 ولت: <code>${sub.wallet}</code><br>⏳ تاریخ انقضا: <b>${sub.expiry}</b></div>`;
                         });
                     }
                     html += `</div>`;
                     area.innerHTML = html;
+                } else if(data.is_subscribed) {
+                    area.innerHTML = `
+                        <p style="text-align:center;">وضعیت اشتراک VIP: <span class="badge" style="background:#22c55e;">فعال و معتبر 🟢</span></p>
+                        <p style="font-size:13px; color:#cbd5e1; margin:15px 0; text-align:center;">اشتراک ۳۰ روزه شما فعال است و ربات در حال کپی‌تریدینگ روی ولت شماست.</p>
+                        <div style="background:#0f172a; padding:12px; border-radius:10px; border:1px solid #334155; margin-top:10px;">
+                            <p style="font-size:12px; margin:6px 0;">🆔 آیدی تلگرام: <code>${telegramId}</code></p>
+                            <p style="font-size:12px; margin:6px 0;">⏳ تاریخ انقضای اشتراک: <b style="color:#38bdf8;">${data.expiry_date}</b></p>
+                        </div>
+                        <p style="font-size:11px; color:#94a3b8; margin-top:15px; text-align:center;">📢 برای ورود به کانال VIP سیگنال‌ها از طریق لینک ارسال‌شده در ربات تلگرام اقدام کنید.</p>
+                    `;
                 } else {
                     area.innerHTML = `
                         <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
@@ -1209,6 +1212,7 @@ def home():
                     body: JSON.stringify({telegram_id: tId, wallet_address: wallet})
                 }).then(res => res.json()).then(data => {
                     alert(data.message);
+                    location.reload();
                 });
             }
         </script>
@@ -1222,8 +1226,13 @@ def api_check_status():
     t_id = request.args.get("telegram_id", "")
     is_admin_user = (str(t_id) == str(TELEGRAM_CHAT_ID))
     subs = get_active_subscribers() if is_admin_user else []
+    
+    is_subbed, expiry_date = check_user_subscription(t_id) if not is_admin_user else (False, None)
+    
     return jsonify({
         "is_admin": is_admin_user,
+        "is_subscribed": is_subbed,
+        "expiry_date": expiry_date.strftime("%Y-%m-%d %H:%M:%S") if expiry_date else "",
         "subscribers": subs
     })
 
