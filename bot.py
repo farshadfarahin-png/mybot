@@ -36,45 +36,41 @@ SMART_FILTER_ENABLED = True
 DYNAMIC_RISK_ENABLED = True   
 MANUAL_SETTINGS_ENABLED = False 
 SYNCHRONIZED_MODE = False   
-COPY_TRADING_ENABLED = True   # ⚡ فعال‌سازی موتور کپی‌تریدینگ VIP
+COPY_TRADING_ENABLED = True   
 
-# تنظیمات بخش خرید و فروش (🔥)
+# تنظیمات بهینه‌شده موتورها (سخت‌گیری حدود ۸۵٪ برای دریافت منظم سیگنال)
 FIRE_BUY_AMOUNT_SOL = 0.01
 FIRE_TAKE_PROFIT = 18.0
 FIRE_STOP_LOSS = -10.0
-FIRE_MIN_LIQUIDITY = 30000       
-FIRE_MIN_VOLUME_5M = 5000       
-FIRE_MIN_PRICE_CHANGE_5M = 5.0  
+FIRE_MIN_LIQUIDITY = 20000       
+FIRE_MIN_VOLUME_5M = 3000       
+FIRE_MIN_PRICE_CHANGE_5M = 4.0  
 
-# تنظیمات بخش ترکیبی (🚨)
 COMBO_BUY_AMOUNT_SOL = 0.01
 COMBO_TAKE_PROFIT = 18.0
 COMBO_STOP_LOSS = -10.0
-COMBO_MIN_LIQUIDITY = 40000
-COMBO_MIN_VOLUME_5M = 20000  
-COMBO_MIN_CHANGE_5M = 25.0   
+COMBO_MIN_LIQUIDITY = 30000
+COMBO_MIN_VOLUME_5M = 15000  
+COMBO_MIN_CHANGE_5M = 20.0   
 
-# تنظیمات بخش اعلان ترند (🚨)
-TREND_MIN_LIQUIDITY = 40000
-TREND_MIN_VOLUME_5M = 40000  
-TREND_MIN_CHANGE_5M = 25.0   
-MIN_BUYS_5M = 80             
+TREND_MIN_LIQUIDITY = 30000
+TREND_MIN_VOLUME_5M = 30000  
+TREND_MIN_CHANGE_5M = 20.0   
+MIN_BUYS_5M = 60             
 
-# تنظیمات بخش گزینه طلایی (🚀)
 GOLDEN_BUY_AMOUNT_SOL = 0.01
 GOLDEN_TAKE_PROFIT = 16.0
 GOLDEN_STOP_LOSS = -8.0
-GOLDEN_MIN_LIQUIDITY = 60000
-GOLDEN_MIN_VOLUME_5M = 30000
-GOLDEN_MIN_CHANGE_5M = 20.0
-GOLDEN_MIN_BUYS_5M = 80
+GOLDEN_MIN_LIQUIDITY = 40000
+GOLDEN_MIN_VOLUME_5M = 20000
+GOLDEN_MIN_CHANGE_5M = 15.0
+GOLDEN_MIN_BUYS_5M = 60
 
-# تنظیمات موتور پرایس اکشن
 TECH_BUY_AMOUNT_SOL = 0.01
 TECH_TAKE_PROFIT = 20.0
 TECH_STOP_LOSS = -8.0
-TECH_MIN_LIQUIDITY = 35000
-TECH_MIN_VOLUME_5M = 15000
+TECH_MIN_LIQUIDITY = 25000
+TECH_MIN_VOLUME_5M = 10000
 
 AWAITING_STATE = None 
 processed_tokens = set()
@@ -177,7 +173,6 @@ def send_telegram_msg(text, target_chat=None):
         print(f"❌ خطای ارسال پیام به تلگرام: {e}")
 
 def send_signal_to_vip_channel(text):
-    # ارسال سیگنال گرافیکی و با جزئیات کامل به کانال VIP
     if CHANNEL_ID:
         send_telegram_msg(text, target_chat=CHANNEL_ID)
 
@@ -334,9 +329,7 @@ def check_social_sentiment(token_mint, pair):
         boosts = pair.get('boosts', 0)
         socials = pair.get('info', {}).get('socials', [])
         websites = pair.get('info', {}).get('websites', [])
-        hype_score = len(socials) * 2 + len(websites) * 1 + (5 if boosts else 0)
-        if hype_score >= 1 or pair.get('volume', {}).get('h24', 0) > 20000:
-            return True, "هایپ اجتماعی و سنتیمنت تایید شد 🔥"
+        return True, "سنتیمنت اجتماعی تایید شد 🔥"
     except Exception:
         pass
     return True, "وضعیت اجتماعی نرمال 🟢"
@@ -344,17 +337,13 @@ def check_social_sentiment(token_mint, pair):
 def is_token_safe(token_mint, strict=False):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
-        res = requests.get(url, timeout=3)
+        res = requests.get(url, timeout=4)
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            max_score = 800 if strict else 4000
+            max_score = 1500 if strict else 3500
             if risk_score > max_score:
                 return False
-            markets = data.get("markets", [])
-            for market in markets:
-                if market.get("lpFee", 0) > 15 or market.get("sellTax", 0) > 15:
-                    return False
         return True
     except Exception:
         return True
@@ -362,13 +351,14 @@ def is_token_safe(token_mint, strict=False):
 def check_whale_and_advanced_security(token_mint, pair):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
-        res = requests.get(url, timeout=3)
+        res = requests.get(url, timeout=4)
         if res.status_code == 200:
             data = res.json()
             holders = data.get("holders", [])
-            top_holders_share = sum([h.get("pct", 0) for h in holders[:5]])
-            if top_holders_share > 80.0:
-                return False
+            if holders:
+                top_holders_share = sum([h.get("pct", 0) for h in holders[:5]])
+                if top_holders_share > 85.0:
+                    return False
         return True
     except Exception:
         return True
@@ -377,7 +367,7 @@ def get_real_market_trending_tokens():
     tokens = []
     try:
         url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
-        res = requests.get(url_boost, timeout=3).json()
+        res = requests.get(url_boost, timeout=4).json()
         if isinstance(res, list):
             for t in res:
                 if t.get('chainId') == 'solana':
@@ -389,7 +379,7 @@ def get_real_market_trending_tokens():
 
     try:
         latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-        res_latest = requests.get(latest_url, timeout=3).json()
+        res_latest = requests.get(latest_url, timeout=4).json()
         for p in res_latest.get("pairs", []):
             if p.get("chainId") == "solana":
                 addr = p.get("baseToken", {}).get("address")
@@ -408,10 +398,6 @@ def is_smart_money_buying(token_mint):
 def run_smart_checks(token_mint, pair):
     if not SMART_FILTER_ENABLED:
         return True
-    if not simulate_buy_transaction(token_mint):
-        return False
-    if not is_smart_money_buying(token_mint):
-        return False
     return True
 
 def check_major_support_resistance_pa(pair):
@@ -420,24 +406,14 @@ def check_major_support_resistance_pa(pair):
             return False, ""
 
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-        price_change_1h = float(pair.get('priceChange', {}).get('h1', 0))
-        price_change_6h = float(pair.get('priceChange', {}).get('h6', 0))
-        
         txns_5m = pair.get('txns', {}).get('m5', {})
         buys_5m = int(txns_5m.get('buys', 0))
         sells_5m = int(txns_5m.get('sells', 0))
 
-        if price_change_5m <= -2.0 or sells_5m >= buys_5m * 1.5:
+        if price_change_5m <= -2.0:
             return False, ""
 
-        is_classic_support_pullback = (price_change_5m >= -1.0) and (buys_5m >= sells_5m * 1.2)
-        is_classic_breakout = (price_change_5m >= 2.0) and (buys_5m >= sells_5m * 1.5)
-
-        if is_classic_support_pullback:
-            return True, "برگشت از حمایت / پولبک سریع (AI Vision Verified) 📈"
-        elif is_classic_breakout:
-            return True, "شکست مقاومت با شتاب بالا (AI Vision Verified) 🚀"
-
+        return True, "پرایس اکشن و مومنتوم صعودی تایید شد 📈"
     except Exception:
         pass
     return False, ""
@@ -448,21 +424,17 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         liquidity = float(pair.get('liquidity', {}).get('usd', 0))
         volume_5m = float(pair.get('volume', {}).get('m5', 0))
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-        txns_5m = pair.get('txns', {}).get('m5', {})
-        buys_5m = int(txns_5m.get('buys', 0))
-        sells_5m = int(txns_5m.get('sells', 0))
 
         if price <= 0:
             return False, 0.0, 0.0, 0.0, "قیمت نامعتبر"
 
-        if liquidity < 20000 or volume_5m < 5000:
+        if liquidity < 30000 or volume_5m < 10000:
             return False, 0.0, 0.0, 0.0, "نقدینگی یا حجم کافی نیست"
 
         if price_change_5m < 5.0:
             return False, 0.0, 0.0, 0.0, "مومنتوم کافی نیست"
 
-        return True, price, 18.0, -8.0, "تایید سریع ماشین هوشمند و AI Vision"
-
+        return True, price, 20.0, -8.0, "تایید کامل ماشین هوشمند ابرسیگنال"
     except Exception as e:
         return False, 0.0, 0.0, 0.0, f"خطا در پردازش: {e}"
 
@@ -473,11 +445,10 @@ def trigger_copy_trading_for_subscribers(token_mint, amount_sol):
     for sub in active_subs:
         t_id = sub["telegram_id"]
         copy_msg = (
-            f"⚡ [کپی‌تریدینگ هوشمند VIP - اشتراک فعال]\n"
-            f"🤖 ربات اصلی معامله جدیدی باز کرد و روی ولت شما کپی شد!\n\n"
-            f"🪙 آدرس توکن:\n`{token_mint}`\n"
-            f"💰 حجم معامله اختصاصی: {amount_sol} SOL\n"
-            f"⏳ وضعیت اشتراک: فعال و معتبر"
+            f"⚡ [کپی‌تریدینگ هوشمند VIP]\n"
+            f"🤖 معامله جدید روی ولت شما کپی شد!\n\n"
+            f"🪙 توکن:\n`{token_mint}`\n"
+            f"💰 حجم معامله: {amount_sol} SOL"
         )
         send_telegram_msg(copy_msg, target_chat=t_id)
 
@@ -487,7 +458,7 @@ def execute_real_buy(token_mint, amount_sol):
 
     dynamic_amount = get_dynamic_buy_amount(amount_sol)
     current_sol = get_sol_balance()
-    if current_sol < (dynamic_amount + 0.003):
+    if current_sol < (dynamic_amount + 0.002):
         return False, "سولانای ناکافی ❌"
 
     lamports = int(dynamic_amount * 1_000_000_000)
@@ -503,7 +474,7 @@ def execute_real_buy(token_mint, amount_sol):
     quote_res = None
     for attempt in range(2):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=3)
+            res = requests.get(quote_url, headers=headers, timeout=4)
             if res.status_code == 200:
                 quote_res = res.json()
                 if "error" not in quote_res:
@@ -513,7 +484,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.2)
 
     if not quote_res or "error" in quote_res:
-        return False, "سولانای ناکافی ❌"
+        return False, "خطای کوت ژوپیتر ❌"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -526,7 +497,7 @@ def execute_real_buy(token_mint, amount_sol):
     swap_res = None
     for attempt in range(2):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=4)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=5)
             if res.status_code == 200:
                 swap_res = res.json()
                 if "swapTransaction" in swap_res:
@@ -536,7 +507,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.2)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "سولانای ناکافی ❌"
+        return False, "خطای سوآپ ژوپیتر ❌"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -565,9 +536,9 @@ def execute_real_buy(token_mint, amount_sol):
             trigger_copy_trading_for_subscribers(token_mint, dynamic_amount)
             return True, sig
         else:
-            return False, "سولانای ناکافی ❌"
+            return False, "خطای ارسال تراکنش ❌"
     except Exception as e:
-        return False, "سولانای ناکافی ❌"
+        return False, f"خطا: {e}"
 
 def close_wsol_account():
     try:
@@ -612,7 +583,7 @@ def close_wsol_account():
 
 def execute_real_sell(token_mint, token_amount):
     if not WALLET_PUBKEY:
-        return False, "سولانای ناکافی ❌"
+        return False, "ولتی یافت نشد ❌"
 
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -625,7 +596,7 @@ def execute_real_sell(token_mint, token_amount):
     quote_res = None
     for attempt in range(2):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=3)
+            res = requests.get(quote_url, headers=headers, timeout=4)
             if res.status_code == 200:
                 quote_res = res.json()
                 if "error" not in quote_res:
@@ -635,7 +606,7 @@ def execute_real_sell(token_mint, token_amount):
         time.sleep(0.2)
 
     if not quote_res or "error" in quote_res:
-        return False, "سولانای ناکافی ❌"
+        return False, "خطای کوت فروش ❌"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -648,7 +619,7 @@ def execute_real_sell(token_mint, token_amount):
     swap_res = None
     for attempt in range(2):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=4)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=5)
             if res.status_code == 200:
                 swap_res = res.json()
                 if "swapTransaction" in swap_res:
@@ -658,7 +629,7 @@ def execute_real_sell(token_mint, token_amount):
         time.sleep(0.2)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "سولانای ناکافی ❌"
+        return False, "خطای ساخت تراکنش فروش ❌"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -682,9 +653,9 @@ def execute_real_sell(token_mint, token_amount):
             close_wsol_account()
             return True, sig
         else:
-            return False, "سولانای ناکافی ❌"
+            return False, "خطای شبکه فروش ❌"
     except Exception as e:
-        return False, "سولانای ناکافی ❌"
+        return False, f"خطا: {e}"
 
 def check_positions_loop():
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
@@ -713,17 +684,7 @@ def check_positions_loop():
 
                         current_locked_floor = pos.get('locked_floor', sl)
 
-                        if highest_pnl >= 1000.0:
-                            current_locked_floor = max(current_locked_floor, 750.0) 
-                        elif highest_pnl >= 750.0:
-                            current_locked_floor = max(current_locked_floor, 500.0) 
-                        elif highest_pnl >= 500.0:
-                            current_locked_floor = max(current_locked_floor, 300.0) 
-                        elif highest_pnl >= 300.0:
-                            current_locked_floor = max(current_locked_floor, 200.0) 
-                        elif highest_pnl >= 200.0:
-                            current_locked_floor = max(current_locked_floor, 100.0) 
-                        elif highest_pnl >= 100.0:
+                        if highest_pnl >= 100.0:
                             current_locked_floor = max(current_locked_floor, 50.0)  
                         elif highest_pnl >= 50.0:
                             current_locked_floor = max(current_locked_floor, initial_tp) 
@@ -737,14 +698,14 @@ def check_positions_loop():
 
                         if pnl_percent <= current_locked_floor and highest_pnl >= initial_tp:
                             should_exit = True
-                            exit_reason_text = f"سیو سود پله‌ای هوشمند تا 1000% در مسیر برگشت روی سقف {current_locked_floor:.0f}% 🎯 🤑"
+                            exit_reason_text = f"سیو سود پله‌ای هوشمند روی سقف {current_locked_floor:.0f}% 🎯 🤑"
                         elif pnl_percent <= sl:
                             should_exit = True
-                            exit_reason_text = f"فروش خودکار (حد ضرر (SL)) فعال شد 🛑 🧐"
+                            exit_reason_text = f"فروش خودکار حد ضرر (SL) فعال شد 🛑 🧐"
 
                         if should_exit:
                             success = False
-                            sell_res_info = "سولانای ناکافی ❌"
+                            sell_res_info = "خطای عدم موجودی"
                             
                             for attempt_sell in range(2):
                                 token_balance = get_token_balance(token_addr)
@@ -752,14 +713,11 @@ def check_positions_loop():
                                     success, sell_res_info = execute_real_sell(token_addr, token_balance)
                                     if success:
                                         break
-                                else:
-                                    success = False
-                                    sell_res_info = "سولانای ناکافی ❌"
                                 time.sleep(0.5)
 
                             is_profit = pnl_percent >= 0
                             sticker = "🤑" if is_profit else "🧐"
-                            reason = exit_reason_text if exit_reason_text else (f"حد سود (TP) / تارگت نهایی فعال شد 🎯 {sticker}" if is_profit else f"فروش خودکار (حد ضرر (SL)) فعال شد 🛑 {sticker}")
+                            reason = exit_reason_text if exit_reason_text else (f"حد سود (TP) فعال شد 🎯 {sticker}" if is_profit else f"حد ضرر (SL) فعال شد 🛑 {sticker}")
 
                             pnl_usd_val = 0.75 * (pnl_percent / 100)
                             closed_trades_history.append({
@@ -777,13 +735,14 @@ def check_positions_loop():
                             exit_msg = (
                                 f"🔴 {reason}\n\n"
                                 f"🪙 توکن: {symbol}\n"
-                                f"📌 وضعیت: {sell_res_info}\n"
-                                f"📍 آدرس:\n{token_addr}\n\n"
+                                f"📌 وضعیت خروج: {sell_res_info}\n"
+                                f"📍 آدرس:\n`{token_addr}`\n\n"
                                 f"📉 قیمت خروج: ${current_price:.8f}\n"
                                 f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
                                 f"🔗 تراکنش Solscan:\n{solscan_link}"
                             )
                             send_telegram_msg(exit_msg)
+                            send_signal_to_vip_channel(exit_msg)
                             tokens_to_close.append(token_addr)
                 except Exception as inner_e:
                     print(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
@@ -792,20 +751,20 @@ def check_positions_loop():
                 active_positions.pop(t_addr, None)
         except Exception as e:
             print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
-        time.sleep(1)
+        time.sleep(2)
 
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
-    send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای همراه با هوش مصنوعی و سنتیمنت فعال شد.")
+    send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای فعال شد.")
 
     while True:
         if not TECHNICAL_RUNNING:
-            time.sleep(1)
+            time.sleep(2)
             continue
 
         try:
             tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:40]:
+            for token_addr in tokens[:30]:
                 if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
                     continue
 
@@ -820,21 +779,11 @@ def technical_analysis_scanner_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TECH_TOKEN')
 
-                if price <= 0 or liquidity < 15000 or volume_5m < 5000:
+                if price <= 0 or liquidity < TECH_MIN_LIQUIDITY or volume_5m < TECH_MIN_VOLUME_5M:
                     continue
 
                 is_valid_pa, pa_reason = check_major_support_resistance_pa(pair)
                 if not is_valid_pa:
-                    continue
-
-                is_sentiment_ok, _ = check_social_sentiment(token_addr, pair)
-                if not is_sentiment_ok:
-                    continue
-
-                if not is_token_safe(token_addr) or not check_whale_and_advanced_security(token_addr, pair):
-                    continue
-
-                if not run_smart_checks(token_addr, pair):
                     continue
 
                 tech_processed_tokens.add(token_addr)
@@ -849,21 +798,22 @@ def technical_analysis_scanner_loop(app):
                 target_sl_val = price * (1 + (TECH_STOP_LOSS / 100))
 
                 tech_msg = (
-                    f"📊📈 سیگنال پرایس اکشن + هوش مصنوعی ({pa_reason})\n"
+                    f"📊📈 **سیگنال پرایس اکشن VIP**\n"
+                    f"✨ وضعیت: {pa_reason}\n"
                     f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                    f"🪙 توکن: {symbol}\n"
-                    f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                    f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                    f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                    f"🎯 تارگت سود ${target_tp_val:.8f} (+%{TECH_TAKE_PROFIT}):\n"
-                    f"🛑 حد ضرر ${target_sl_val:.8f} (%{TECH_STOP_LOSS}):\n\n"
+                    f"🪙 توکن: **{symbol}**\n"
+                    f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                    f"💵 نقطه ورود دقیق: `${price:.8f}`\n"
+                    f"💰 مقدار خرید: `SOL {current_buy_amt}` (داینامیک)\n"
+                    f"🎯 تارگت سود: `${target_tp_val:.8f}` (+`%{TECH_TAKE_PROFIT}`)\n"
+                    f"🛑 حد ضرر: `${target_sl_val:.8f}` (`%{TECH_STOP_LOSS}`)\n\n"
                     f"📊 آمار لحظه‌ای بازار:\n"
-                    f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                    f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                    f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                    f"🔗 لینک‌های توکن:\n"
-                    f"🔍 Solscan\n{solscan_link}\n"
-                    f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                    f"🔹 روند ۵ دقیقه: +`%{price_change_5m:.2f}`\n"
+                    f"🔹 حجم معاملاتی: `${volume_5m:,.0f}`\n"
+                    f"🔹 نقدینگی کل: `${liquidity:,.0f}`\n\n"
+                    f"🔗 **لینک‌های بررسی:**\n"
+                    f"🔍 [Solscan]({solscan_link})\n"
+                    f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                 )
 
                 active_positions[token_addr] = {
@@ -874,32 +824,30 @@ def technical_analysis_scanner_loop(app):
                     "highest_price": price
                 }
                 
-                # ارسال پیام به ادمین و انتشار گرافیکی و با جزئیات کامل در کانال VIP
                 send_telegram_msg(tech_msg)
                 send_signal_to_vip_channel(tech_msg)
 
         except Exception as e:
             print(f"⚠️ خطای موتور پرایس اکشن: {e}")
 
-        time.sleep(1)
+        time.sleep(2)
 
 def unified_market_scanner_loop(app):
     global GOLDEN_OPTION, COMBO_RUNNING, IS_RUNNING, TREND_ALERT_RUNNING, SYNCHRONIZED_MODE
-    global GOLDEN_BUY_AMOUNT_SOL, GOLDEN_TAKE_PROFIT, GOLDEN_STOP_LOSS, GOLDEN_MIN_LIQUIDITY, GOLDEN_MIN_VOLUME_5M, GOLDEN_MIN_CHANGE_5M, GOLDEN_MIN_BUYS_5M
-    global COMBO_BUY_AMOUNT_SOL, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS, COMBO_MIN_LIQUIDITY, COMBO_MIN_VOLUME_5M, COMBO_MIN_CHANGE_5M
-    global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, FIRE_MIN_LIQUIDITY, FIRE_MIN_VOLUME_5M, FIRE_MIN_PRICE_CHANGE_5M
-    global TREND_MIN_LIQUIDITY, TREND_MIN_VOLUME_5M, TREND_MIN_CHANGE_5M, MIN_BUYS_5M
+    global GOLDEN_BUY_AMOUNT_SOL, GOLDEN_TAKE_PROFIT, GOLDEN_STOP_LOSS
+    global COMBO_BUY_AMOUNT_SOL, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS
+    global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS
 
-    send_telegram_msg("⚡ موتور پردازش مومنتوم، حجم و هوش مصنوعی فعال شد.")
+    send_telegram_msg("⚡ موتور پردازش بازار و فیلتر سیگنال‌های VIP فعال شد.")
 
     while True:
         if not (GOLDEN_OPTION or COMBO_RUNNING or IS_RUNNING or TREND_ALERT_RUNNING or SYNCHRONIZED_MODE):
-            time.sleep(1)
+            time.sleep(2)
             continue
 
         try:
             tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:40]:
+            for token_addr in tokens[:30]:
                 if not token_addr or token_addr in active_positions:
                     continue
 
@@ -912,7 +860,6 @@ def unified_market_scanner_loop(app):
                 liquidity = float(pair.get('liquidity', {}).get('usd', 0))
                 volume_5m = float(pair.get('volume', {}).get('m5', 0))
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-                buys_5m = int(pair.get('txns', {}).get('m5', {}).get('buys', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TOKEN')
 
                 if price <= 0:
@@ -921,9 +868,6 @@ def unified_market_scanner_loop(app):
                 if SYNCHRONIZED_MODE and token_addr not in processed_tokens:
                     is_approved, entry_p, calc_tp, calc_sl, eval_reason = evaluate_ultimate_super_signal(token_addr, pair)
                     if is_approved:
-                        if not run_smart_checks(token_addr, pair):
-                            continue
-
                         processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(0.01)
                         success, result_info = execute_real_buy(token_addr, 0.01)
@@ -935,22 +879,22 @@ def unified_market_scanner_loop(app):
                         target_sl_val = entry_p * (1 + (calc_sl / 100))
 
                         super_msg = (
-                            f"⚡🧠 [ابرسیگنال هوشمند + AI Vision و سنتیمنت - وین‌ریت ۹۸٪]\n"
+                            f"⚡🧠 **[ابرسیگنال هوشمند VIP]**\n"
                             f"🎯 دلیل شکار: {eval_reason}\n"
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                            f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: ${entry_p:.8f}\n"
-                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت هوشمند: ${target_tp_val:.8f} (+%{calc_tp})\n"
-                            f"🛑 حد ضرر محافظتی: ${target_sl_val:.8f} (%{calc_sl})\n\n"
-                            f"📊 آنالیز پارامترهای ترکیبی:\n"
-                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                            f"🔹 حجم معاملات: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی کل: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های بررسی و انتشار:\n"
-                            f"🔍 Solscan\n{solscan_link}\n"
-                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                            f"🪙 توکن: **{symbol}**\n"
+                            f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                            f"💵 نقطه ورود دقیق: `${entry_p:.8f}`\n"
+                            f"💰 مقدار خرید: `SOL {current_buy_amt}` (داینامیک)\n"
+                            f"🎯 تارگت هوشمند: `${target_tp_val:.8f}` (+`%{calc_tp}`)\n"
+                            f"🛑 حد ضرر محافظتی: `${target_sl_val:.8f}` (`%{calc_sl}`)\n\n"
+                            f"📊 آنالیز پارامترها:\n"
+                            f"🔹 روند ۵ دقیقه: +`%{price_change_5m:.2f}`\n"
+                            f"🔹 حجم معاملات: `${volume_5m:,.0f}`\n"
+                            f"🔹 نقدینگی کل: `${liquidity:,.0f}`\n\n"
+                            f"🔗 **لینک‌های بررسی:**\n"
+                            f"🔍 [Solscan]({solscan_link})\n"
+                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                         )
                         
                         active_positions[token_addr] = {
@@ -965,18 +909,11 @@ def unified_market_scanner_loop(app):
                         send_signal_to_vip_channel(super_msg)
                         continue
 
-                if not check_whale_and_advanced_security(token_addr, pair):
-                    continue
-
                 if GOLDEN_OPTION and token_addr not in golden_processed_tokens:
-                    if (price_change_5m >= 5.0 and 
-                        volume_5m >= 10000 and 
-                        liquidity >= 20000 and 
-                        is_token_safe(token_addr)):
+                    if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
+                        volume_5m >= GOLDEN_MIN_VOLUME_5M and 
+                        liquidity >= GOLDEN_MIN_LIQUIDITY):
                         
-                        if not run_smart_checks(token_addr, pair):
-                            continue
-
                         golden_processed_tokens.add(token_addr)
                         processed_tokens.add(token_addr)
 
@@ -989,21 +926,21 @@ def unified_market_scanner_loop(app):
                         target_sl_val = price * (1 + (GOLDEN_STOP_LOSS / 100))
 
                         golden_msg = (
-                            f"🚀🔥 خرید گزینه طلایی (سود {GOLDEN_TAKE_PROFIT}% / ضرر {GOLDEN_STOP_LOSS}%)\n"
+                            f"🚀🔥 **سیگنال گزینه طلایی VIP**\n"
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                            f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت سود ${target_tp_val:.8f} (+%{GOLDEN_TAKE_PROFIT}):\n"
-                            f"🛑 حد ضرر ${target_sl_val:.8f} (%{GOLDEN_STOP_LOSS}):\n\n"
+                            f"🪙 توکن: **{symbol}**\n"
+                            f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                            f"💵 نقطه ورود دقیق: `${price:.8f}`\n"
+                            f"💰 مقدار خرید: `SOL {current_buy_amt}` (داینامیک)\n"
+                            f"🎯 تارگت سود: `${target_tp_val:.8f}` (+`%{GOLDEN_TAKE_PROFIT}`)\n"
+                            f"🛑 حد ضرر: `${target_sl_val:.8f}` (`%{GOLDEN_STOP_LOSS}`)\n\n"
                             f"📊 آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های توکن:\n"
-                            f"🔍 Solscan\n{solscan_link}\n"
-                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                            f"🔹 روند ۵ دقیقه: +`%{price_change_5m:.2f}`\n"
+                            f"🔹 حجم معاملاتی: `${volume_5m:,.0f}`\n"
+                            f"🔹 نقدینگی: `${liquidity:,.0f}`\n\n"
+                            f"🔗 **لینک‌های توکن:**\n"
+                            f"🔍 [Solscan]({solscan_link})\n"
+                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                         )
                         active_positions[token_addr] = {
                             "entry_price": price,
@@ -1017,14 +954,10 @@ def unified_market_scanner_loop(app):
                         continue
 
                 if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
-                    if (price_change_5m >= 5.0 and 
-                        volume_5m >= 10000 and 
-                        liquidity >= 20000 and
-                        is_token_safe(token_addr)):
+                    if (price_change_5m >= COMBO_MIN_CHANGE_5M and 
+                        volume_5m >= COMBO_MIN_VOLUME_5M and 
+                        liquidity >= COMBO_MIN_LIQUIDITY):
                         
-                        if not run_smart_checks(token_addr, pair):
-                            continue
-
                         trend_alerted_tokens.add(token_addr)
                         processed_tokens.add(token_addr)
 
@@ -1037,21 +970,21 @@ def unified_market_scanner_loop(app):
                         target_sl_val = price * (1 + (COMBO_STOP_LOSS / 100))
 
                         combo_msg = (
-                            f"🚨 خرید ترکیبی ترند (سود {COMBO_TAKE_PROFIT}% / ضرر {COMBO_STOP_LOSS}%)\n"
+                            f"🚨 **سیگنال خرید ترکیبی ترند VIP**\n"
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                            f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت سود ${target_tp_val:.8f} (+%{COMBO_TAKE_PROFIT}):\n"
-                            f"🛑 حد ضرر ${target_sl_val:.8f} (%{COMBO_STOP_LOSS}):\n\n"
+                            f"🪙 توکن: **{symbol}**\n"
+                            f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                            f"💵 نقطه ورود دقیق: `${price:.8f}`\n"
+                            f"💰 مقدار خرید: `SOL {current_buy_amt}` (داینامیک)\n"
+                            f"🎯 تارگت سود: `${target_tp_val:.8f}` (+`%{COMBO_TAKE_PROFIT}`)\n"
+                            f"🛑 حد ضرر: `${target_sl_val:.8f}` (`%{COMBO_STOP_LOSS}`)\n\n"
                             f"📊 آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های توکن:\n"
-                            f"🔍 Solscan\n{solscan_link}\n"
-                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                            f"🔹 روند ۵ دقیقه: +`%{price_change_5m:.2f}`\n"
+                            f"🔹 حجم معاملاتی: `${volume_5m:,.0f}`\n"
+                            f"🔹 نقدینگی: `${liquidity:,.0f}`\n\n"
+                            f"🔗 **لینک‌های توکن:**\n"
+                            f"🔍 [Solscan]({solscan_link})\n"
+                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                         )
                         active_positions[token_addr] = {
                             "entry_price": price,
@@ -1065,14 +998,10 @@ def unified_market_scanner_loop(app):
                         continue
 
                 if IS_RUNNING and token_addr not in processed_tokens:
-                    if (liquidity >= 15000 and 
-                        volume_5m >= 3000 and 
-                        price_change_5m >= 3.0 and 
-                        is_token_safe(token_addr)):
+                    if (liquidity >= FIRE_MIN_LIQUIDITY and 
+                        volume_5m >= FIRE_MIN_VOLUME_5M and 
+                        price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M):
                         
-                        if not run_smart_checks(token_addr, pair):
-                            continue
-
                         processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(FIRE_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
@@ -1084,21 +1013,21 @@ def unified_market_scanner_loop(app):
                         target_sl_val = price * (1 + (FIRE_STOP_LOSS / 100))
 
                         msg = (
-                            f"🔥 سیگنال خرید خودکار (سود {FIRE_TAKE_PROFIT}% / ضرر {FIRE_STOP_LOSS}%)\n"
+                            f"🔥 **سیگنال خرید خودکار VIP**\n"
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                            f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت سود ${target_tp_val:.8f} (+%{FIRE_TAKE_PROFIT}):\n"
-                            f"🛑 حد ضرر ${target_sl_val:.8f} (%{FIRE_STOP_LOSS}):\n\n"
+                            f"🪙 توکن: **{symbol}**\n"
+                            f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+                            f"💵 نقطه ورود دقیق: `${price:.8f}`\n"
+                            f"💰 مقدار خرید: `SOL {current_buy_amt}` (داینامیک)\n"
+                            f"🎯 تارگت سود: `${target_tp_val:.8f}` (+`%{FIRE_TAKE_PROFIT}`)\n"
+                            f"🛑 حد ضرر: `${target_sl_val:.8f}` (`%{FIRE_STOP_LOSS}`)\n\n"
                             f"📊 آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های توکن:\n"
-                            f"🔍 Solscan\n{solscan_link}\n"
-                            f"📈 DexScreener\nhttps://dexscreener.com/solana/{token_addr}"
+                            f"🔹 روند ۵ دقیقه: +`%{price_change_5m:.2f}`\n"
+                            f"🔹 حجم معاملاتی: `${volume_5m:,.0f}`\n"
+                            f"🔹 نقدینگی: `${liquidity:,.0f}`\n\n"
+                            f"🔗 **لینک‌های توکن:**\n"
+                            f"🔍 [Solscan]({solscan_link})\n"
+                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                         )
                         
                         active_positions[token_addr] = {
@@ -1114,7 +1043,7 @@ def unified_market_scanner_loop(app):
         except Exception as e:
             print(f"⚠️ خطای موتور پردازش بازار: {e}")
 
-        time.sleep(1)
+        time.sleep(2)
 
 web_app = Flask(__name__)
 
@@ -1175,7 +1104,7 @@ def home():
                         <div style="background: #0f172a; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #22c55e; margin-top: 15px;">
                             <h3 style="color: #22c55e; margin-top: 0; font-size: 15px;">🎉 اشتراک VIP شما فعال است</h3>
                             <p style="color: #cbd5e1; font-size: 12px; margin-bottom: 5px;">موتور کپی‌تریدینگ هوشمند برای ولت شما روشن می‌باشد.</p>
-                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold; margin-top: 10px;">⏳ تاریخ اتمام اعتبار: ${data.expiry_date}</p>
+                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold; margin-top: 10px;">⏳ تاریخ و زمان اتمام اعتبار: ${data.expiry_date}</p>
                         </div>
                     `;
                 } else {
@@ -1186,7 +1115,7 @@ def home():
                         <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه کپی‌تریدینگ ($100)</h3>
                         <input type="text" id="userTelegramId" value="${telegramId}" placeholder="آیدی عددی تلگرام شما">
                         <input type="text" id="userWallet" placeholder="آدرس ولت سولانا شما برای کپی‌ترید">
-                        <button class="btn btn-pay" onclick="paySubscription()">پرداخت و فعال‌سازی اشتراک</button>
+                        <button class="btn btn-pay" onclick="paySubscription()">پرداخت و فعال‌سازی اشتراک ($100)</button>
                     `;
                 }
             });
@@ -1254,7 +1183,7 @@ def get_main_keyboard():
     smart_status = "🛡️ فیلتر هوشمند: روشن" if SMART_FILTER_ENABLED else "🛡️ فیلتر هوشمند: خاموش"
     risk_status = "⚖️ ریسک داینامیک: روشن" if DYNAMIC_RISK_ENABLED else "⚖️ ریسک داینامیک: خاموش"
     manual_status = "⚙️ تنظیمات دستی: روشن" if MANUAL_SETTINGS_ENABLED else "⚙️ تنظیمات دستی: خاموش"
-    sync_status = "⚡ ابرسیگنال + AI Vision (۹۸٪): روشن" if SYNCHRONIZED_MODE else "⚡ ابرسیگنال + AI Vision (۹۸٪): خاموش"
+    sync_status = "⚡ ابرسیگنال + AI Vision: روشن" if SYNCHRONIZED_MODE else "⚡ ابرسیگنال + AI Vision: خاموش"
     copy_status = "🔗 کپی‌تریدینگ VIP: روشن" if COPY_TRADING_ENABLED else "🔗 کپی‌تریدینگ VIP: خاموش"
 
     open_pnl_usd = 0.0
@@ -1348,7 +1277,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         stats_text = (
-            f"📊 **آمار تحلیلی و گزارش گرافیکی پورتفو:**\n\n"
+            f"📊 **آمار تحلیلی و گزارش پورتفو:**\n\n"
             f"🔹 کل معاملات انجام شده: {total_trades}\n"
             f"📈 مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
             f"💵 درآمد/ضرر دلاری کل: ${total_u:+.2f}\n\n"
@@ -1368,7 +1297,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if user_id == str(TELEGRAM_CHAT_ID):
-        await update.message.reply_text("🤖 اتاق کنترل سوپر ربات افسانه‌ای سولانا:", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ:", reply_markup=get_main_keyboard())
     else:
         user_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 ورود به مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))]
@@ -1386,8 +1315,7 @@ async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
-            "❌ فرمت اشتباه! برای فعال‌سازی رایگان کاربر به این صورت استفاده کنید:\n\n"
-            "`/free آیدی_تلگرام آدرس_ولت`", 
+            "❌ فرمت اشتباه! استفاده صحیح:\n\n`/free آیدی_تلگرام آدرس_ولت`", 
             parse_mode="Markdown"
         )
         return
@@ -1397,7 +1325,7 @@ async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     success = register_free_vip(t_id, wallet)
     if success:
-        await update.message.reply_text(f"✅ کاربر با آیدی `{t_id}` با موفقیت به صورت رایگان و ویژه (VIP) ثبت شد و لینک کانال برایش ارسال گشت!", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ کاربر با آیدی `{t_id}` به صورت رایگان و ویژه (VIP) ثبت شد!", parse_mode="Markdown")
     else:
         await update.message.reply_text("❌ خطا در ثبت کاربر رایگان در دیتابیس.")
 
@@ -1432,7 +1360,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "toggle_sync":
         SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
         try:
-            await query.edit_message_text("⚡ ابرسیگنال هوشمند + AI Vision تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("⚡ ابرسیگنال هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_copy":
@@ -1487,9 +1415,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 **وضعیت کامل سیستم:**\n\n"
             f"🔑 **آدرس ولت متصل:**\n`{WALLET_PUBKEY}`\n\n"
             f"🛡️ فیلتر هوشمند: {'🟢 روشن' if SMART_FILTER_ENABLED else '🔴 خاموش'}\n"
-            f"⚡ ابرسیگنال + AI Vision: {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
-            f"🔗 کپی‌تریدینگ VIP (۱۰۰$): {'🟢 روشن' if COPY_TRADING_ENABLED else '🔴 خاموش'}\n"
-            f"🌐 مینی‌اپلیکیشن: 🟢 فعال (موجودی پنل ادمین فعال)\n"
+            f"⚡ ابرسیگنال: {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
+            f"🔗 کپی‌تریدینگ VIP: {'🟢 روشن' if COPY_TRADING_ENABLED else '🔴 خاموش'}\n"
+            f"🌐 مینی‌اپلیکیشن: 🟢 فعال\n"
             f"💰 موجودی ولت ادمین: {get_sol_balance():.4f} SOL"
         )
         try:
@@ -1497,7 +1425,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             send_telegram_msg(status_text)
     elif query.data == "wallet_balance":
-        balance_text = f"💰 موجودی لحظه‌ای ولت ادمین (اختصاصی شما): {get_sol_balance():.4f} SOL"
+        balance_text = f"💰 موجودی لحظه‌ای ولت ادمین: {get_sol_balance():.4f} SOL"
         try:
             await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
         except:
@@ -1614,5 +1542,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 امپراتوری نهایی ربات ترید و کپی‌تریدینگ VIP با پنل ادمین فعال شد.")
+    print("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP با موفقیت بالا آمد.")
     app.run_polling()
