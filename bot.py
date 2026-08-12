@@ -55,18 +55,20 @@ FIRE_TAKE_PROFIT = 18.0
 FIRE_STOP_LOSS = -10.0
 FIRE_MIN_LIQUIDITY = 35000       
 FIRE_MIN_VOLUME_5M = 8000       
-FIRE_MIN_PRICE_CHANGE_5M = 8.0  
+# اصلاح شرط ورود: به جای پامپ سنگین، به دنبال استراحت/کف تثبیت‌شده هستیم
+FIRE_MIN_PRICE_CHANGE_5M = -3.0  
+FIRE_MAX_PRICE_CHANGE_5M = 5.0   
 
 COMBO_BUY_AMOUNT_SOL = 0.01
 COMBO_TAKE_PROFIT = 18.0
 COMBO_STOP_LOSS = -10.0
 COMBO_MIN_LIQUIDITY = 45000
 COMBO_MIN_VOLUME_5M = 25000  
-COMBO_MIN_CHANGE_5M = 30.0   
+COMBO_MIN_CHANGE_5M = -2.0
+COMBO_MAX_CHANGE_5M = 6.0   
 
 TREND_MIN_LIQUIDITY = 45000
 TREND_MIN_VOLUME_5M = 45000  
-TREND_MIN_CHANGE_5M = 30.0   
 MIN_BUYS_5M = 80             
 
 GOLDEN_BUY_AMOUNT_SOL = 0.01
@@ -74,8 +76,8 @@ GOLDEN_TAKE_PROFIT = 16.0
 GOLDEN_STOP_LOSS = -8.0
 GOLDEN_MIN_LIQUIDITY = 55000
 GOLDEN_MIN_VOLUME_5M = 35000
-GOLDEN_MIN_CHANGE_5M = 25.0
-GOLDEN_MIN_BUYS_5M = 80
+GOLDEN_MIN_CHANGE_5M = -2.0
+GOLDEN_MAX_CHANGE_5M = 5.0
 
 TECH_BUY_AMOUNT_SOL = 0.01
 TECH_TAKE_PROFIT = 20.0
@@ -195,8 +197,10 @@ def mempool_smart_money_scanner_loop(app):
                 volume_5m = float(pair.get('volume', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'SMART')
                 price = float(pair.get('priceUsd', 0))
+                p_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
 
-                if liquidity > 30000 and volume_5m > 10000 and price > 0:
+                # شکار در کف و استراحت قیمت با تأیید حجم نهنگ‌ها
+                if liquidity > 30000 and volume_5m > 10000 and price > 0 and (-3.0 <= p_change_5m <= 4.0):
                     mempool_processed_tokens.add(token_addr)
                     processed_tokens.add(token_addr)
 
@@ -207,7 +211,7 @@ def mempool_smart_money_scanner_loop(app):
 
                     mempool_msg = (
                         f"⚡🕵️ [شکارچی ممپول & اسمارت مانی هالکی]\n"
-                        f"🎯 ورود پیش از عموم بازار با تایید نهنگ‌ها!\n"
+                        f"🎯 ورود در کف حمایتی پیش از انفجار!\n"
                         f"📌 وضعیت: {buy_status_str}\n\n"
                         f"🪙 توکن: {symbol}\n"
                         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -227,7 +231,7 @@ def mempool_smart_money_scanner_loop(app):
                     send_graphic_signal_to_vip_channel(
                         token_addr=token_addr, symbol=symbol, price=price, tp=25.0, sl=-8.0,
                         buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
-                        p_change=15.0, solscan_link=solscan_link, signal_title="⚡🕵️ شکار ممپول اسمارت‌مانی هالکی VIP"
+                        p_change=p_change_5m, solscan_link=solscan_link, signal_title="⚡🕵️ شکار ممپول اسمارت‌مانی هالکی VIP"
                     )
         except Exception as e:
             print(f"⚠️ خطای اسکن ممپول: {e}")
@@ -514,9 +518,10 @@ def check_major_support_resistance_pa(pair):
         if not is_token_worthy(pair):
             return False, ""
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-        if price_change_5m <= -2.0:
+        # اصلاح پرایس اکشن: جلوگیری از ورود در ریزش عمیق یا پامپ سنگین، تأیید در محدوده کف تثبیت‌شده
+        if not (-3.0 <= price_change_5m <= 4.0):
             return False, ""
-        return True, "پرایس اکشن صعودی تایید شد 📈"
+        return True, "پرایس اکشن صعودی از کف و حمایت تایید شد 📈"
     except Exception:
         pass
     return False, ""
@@ -545,14 +550,16 @@ def evaluate_ultimate_super_signal(token_addr, pair):
             return False, 0.0, 0.0, 0.0, "قیمت نامعتبر"
         if liquidity < 45000 or volume_5m < 20000:
             return False, 0.0, 0.0, 0.0, "نقدینگی یا حجم کافی نیست"
-        if price_change_5m < 8.0:
-            return False, 0.0, 0.0, 0.0, "مومنتوم کافی نیست"
+        
+        # اصلاح اساسی ابرسیگنال: به جای شرط پامپ (>8%)، روی استراحت در کف و انباشت حجم تنظیم شد (-2% تا +4%)
+        if not (-2.0 <= price_change_5m <= 4.0):
+            return False, 0.0, 0.0, 0.0, "خارج از محدوده کف امن برای ورود"
 
         is_21_valid, msg_21 = validate_ultimate_21_layers(token_addr, pair)
         if not is_21_valid:
             return False, 0.0, 0.0, 0.0, msg_21
 
-        return True, price, 20.0, -8.0, f"تایید کامل ماشین هوشمند ابرسیگنال + {msg_21}"
+        return True, price, 20.0, -8.0, f"تایید کامل ورود از کف و انباشت حجم هوشمند + {msg_21}"
     except Exception as e:
         return False, 0.0, 0.0, 0.0, f"خطا در پردازش: {e}"
 
@@ -1046,7 +1053,7 @@ def unified_market_scanner_loop(app):
                         continue
 
                 if GOLDEN_OPTION and token_addr not in golden_processed_tokens:
-                    if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
+                    if (GOLDEN_MIN_CHANGE_5M <= price_change_5m <= GOLDEN_MAX_CHANGE_5M and 
                         volume_5m >= GOLDEN_MIN_VOLUME_5M and 
                         liquidity >= GOLDEN_MIN_LIQUIDITY):
                         
@@ -1079,7 +1086,7 @@ def unified_market_scanner_loop(app):
                         continue
 
                 if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
-                    if (price_change_5m >= COMBO_MIN_CHANGE_5M and 
+                    if (COMBO_MIN_CHANGE_5M <= price_change_5m <= COMBO_MAX_CHANGE_5M and 
                         volume_5m >= COMBO_MIN_VOLUME_5M and 
                         liquidity >= COMBO_MIN_LIQUIDITY):
                         
@@ -1107,7 +1114,7 @@ def unified_market_scanner_loop(app):
                 if IS_RUNNING and token_addr not in processed_tokens:
                     if (liquidity >= FIRE_MIN_LIQUIDITY and 
                         volume_5m >= FIRE_MIN_VOLUME_5M and 
-                        price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M):
+                        FIRE_MIN_PRICE_CHANGE_5M <= price_change_5m <= FIRE_MAX_PRICE_CHANGE_5M):
                         
                         processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(FIRE_BUY_AMOUNT_SOL)
@@ -1392,7 +1399,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AWAITING_STATE = None
     user_id = str(update.effective_user.id)
     if user_id == str(TELEGRAM_CHAT_ID):
-        await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ (نسخه هالکی شکست‌ناپذیر):", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ (نسخه هالکی شکست‌ناپذیر - شکار از کف):", reply_markup=get_main_keyboard())
     else:
         user_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))]])
         await update.message.reply_text("👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.", reply_markup=user_keyboard)
@@ -1608,5 +1615,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP (نسخه هالکی شکست‌ناپذیر) با موفقیت اجرا شد.")
+    print("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP (نسخه هالکی شکست‌ناپذیر - شکار از کف) با موفقیت اجرا شد.")
     app.run_polling()
