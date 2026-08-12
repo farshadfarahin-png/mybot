@@ -323,15 +323,6 @@ def is_token_worthy(pair):
     except:
         return False
 
-def check_social_sentiment(token_mint, pair):
-    return True, "سنتیمنت اجتماعی تایید شد 🔥"
-
-def is_token_safe(token_mint, strict=False):
-    return True
-
-def check_whale_and_advanced_security(token_mint, pair):
-    return True
-
 def get_real_market_trending_tokens():
     tokens = []
     try:
@@ -997,6 +988,7 @@ def unified_market_scanner_loop(app):
 
 web_app = Flask(__name__)
 
+# مسیر مینی‌اپلیکیشن عمومی (مخصوص کاربران عادی و خرید اشتراک)
 @web_app.route('/')
 def home():
     html_template = """
@@ -1012,8 +1004,6 @@ def home():
             h1 { color: #38bdf8; font-size: 16px; text-align: center; }
             p { font-size: 13px; color: #cbd5e1; }
             .badge { background: #22c55e; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }
-            .admin-box { background: #0f172a; padding: 12px; border-radius: 10px; margin-top: 10px; border: 1px solid #334155; }
-            .sub-item { background: #1e293b; border-bottom: 1px solid #334155; padding: 8px; font-size: 12px; word-break: break-all; }
             .btn { background: #0284c7; color: white; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 10px; text-align: center; display: block; text-decoration: none; box-sizing: border-box; }
             .btn-pay { background: #10b981; }
             input { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }
@@ -1043,20 +1033,7 @@ def home():
             .then(res => res.json())
             .then(data => {
                 const area = document.getElementById('contentArea');
-                if(data.is_admin) {
-                    let html = `<p style="text-align:center;">👑 <span class="badge" style="background:#8b5cf6;">پنل مدیریت اختصاصی ادمین</span></p>`;
-                    html += `<p>👥 تعداد کل کاربران ثبت‌شده/فعال: <b>${data.subscribers.length}</b></p>`;
-                    html += `<div class="admin-box"><h3 style="color:#38bdf8; font-size:13px; margin:0 0 8px 0;">لیست کاربران و اعتبار:</h3>`;
-                    if(data.subscribers.length === 0) {
-                        html += `<p style="color:#94a3b8; text-align:center;">هنوز کاربری ثبت نشده است.</p>`;
-                    } else {
-                        data.subscribers.forEach(sub => {
-                            html += `<div class="sub-item">🆔 آیدی: <code>${sub.telegram_id}</code><br>🔑 ولت: <code>${sub.wallet}</code><br>⏳ انقضا: ${sub.expiry}</div>`;
-                        });
-                    }
-                    html += `</div>`;
-                    area.innerHTML = html;
-                } else if(data.has_subscription) {
+                if(data.has_subscription) {
                     area.innerHTML = `
                         <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
                         <div style="background: #0f172a; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #22c55e; margin-top: 15px;">
@@ -1098,26 +1075,75 @@ def home():
     """
     return render_template_string(html_template, wallet=WALLET_PUBKEY)
 
+# مسیر کاملاً جداگانه و اختصاصی پنل مدیریت ادمین (دارای لیست کامل کاربران و جزئیات)
+@web_app.route('/admin-panel')
+def admin_panel():
+    t_id = request.args.get("telegram_id", "")
+    if not t_id or str(t_id) != str(TELEGRAM_CHAT_ID):
+        return "<h3 style='color:red; text-align:center; font-family:Tahoma; margin-top:50px;'>⛔ دسترسی غیرمجاز! شما ادمین این ربات نیستید.</h3>"
+    
+    subs = get_active_subscribers()
+    
+    admin_html = f"""
+    <!DOCTYPE html>
+    <html lang="fa" dir="rtl">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>پنل مدیریت ادمین</title>
+        <style>
+            body {{ font-family: Tahoma, sans-serif; background: #0f172a; color: #f8fafc; padding: 15px; text-align: center; margin: 0; }}
+            .card {{ background: #1e293b; border-radius: 16px; padding: 20px; margin: 10px auto; max-width: 480px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); text-align: right; }}
+            h1 {{ color: #a855f7; font-size: 16px; text-align: center; }}
+            p {{ font-size: 13px; color: #cbd5e1; }}
+            .badge {{ background: #8b5cf6; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }}
+            .admin-box {{ background: #0f172a; padding: 12px; border-radius: 10px; margin-top: 10px; border: 1px solid #334155; }}
+            .sub-item {{ background: #1e293b; border-bottom: 1px solid #334155; padding: 10px; font-size: 12px; word-break: break-all; margin-bottom: 5px; border-radius: 6px; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>👑 پنل مدیریت اختصاصی ادمین</h1>
+            <p style="text-align:center;"><span class="badge">سیستم نظارت بر کاربران VIP</span></p>
+            <p>👥 تعداد کل کاربران فعال: <b>{len(subs)}</b></p>
+            <div class="admin-box">
+                <h3 style="color:#38bdf8; font-size:13px; margin:0 0 8px 0;">لیست کامل کاربران و جزئیات ولت:</h3>
+    """
+    
+    if len(subs) == 0:
+        admin_html += '<p style="color:#94a3b8; text-align:center;">هنوز کاربری ثبت نشده است.</p>'
+    else:
+        for sub in subs:
+            admin_html += f"""
+                <div class="sub-item">
+                    🆔 آیدی تلگرام: <code>{sub['telegram_id']}</code><br>
+                    🔑 آدرس ولت: <code>{sub['wallet']}</code><br>
+                    ⏳ تاریخ انقضا: <b>{sub['expiry']}</b>
+                </div>
+            """
+            
+    admin_html += """
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return admin_html
+
 @web_app.route('/api/check-status')
 def api_check_status():
     t_id = request.args.get("telegram_id", "")
-    
-    is_admin_user = bool(t_id and str(t_id) == str(TELEGRAM_CHAT_ID))
-    subs = get_active_subscribers() if is_admin_user else []
-    
     has_sub = False
     expiry_str = ""
-    if not is_admin_user and t_id:
+    if t_id:
         active, exp_date = check_user_subscription(t_id)
         if active and exp_date:
             has_sub = True
             expiry_str = exp_date.strftime("%Y-%m-%d %H:%M:%S")
 
     return jsonify({
-        "is_admin": is_admin_user,
         "has_subscription": has_sub,
-        "expiry_date": expiry_str,
-        "subscribers": subs
+        "expiry_date": expiry_str
     })
 
 @web_app.route('/api/subscribe', methods=['POST'])
@@ -1169,7 +1195,10 @@ def get_main_keyboard():
     pnl_percent_label = f"📈 کل سود/زیان: {grand_total_percent:+.2f}%"
     pnl_usd_label = f"💵 درآمد/ضرر دلاری: ${grand_total_usd:+.2f}"
 
+    admin_webapp_url = f"{WEBAPP_URL}/admin-panel?telegram_id={TELEGRAM_CHAT_ID}"
+
     keyboard = [
+        [InlineKeyboardButton("👑 پنل مدیریت و لیست کاربران VIP", web_app=WebAppInfo(url=admin_webapp_url))],
         [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
         [InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
          InlineKeyboardButton(risk_status, callback_data="toggle_risk")],
