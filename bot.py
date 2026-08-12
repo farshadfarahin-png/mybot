@@ -1014,7 +1014,7 @@ def home():
             .badge { background: #22c55e; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }
             .admin-box { background: #0f172a; padding: 12px; border-radius: 10px; margin-top: 10px; border: 1px solid #334155; }
             .sub-item { background: #1e293b; border-bottom: 1px solid #334155; padding: 8px; font-size: 12px; word-break: break-all; }
-            .btn { background: #0284c7; color: white; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 10px; }
+            .btn { background: #0284c7; color: white; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 10px; text-align: center; display: block; text-decoration: none; box-sizing: border-box; }
             .btn-pay { background: #10b981; }
             input { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }
         </style>
@@ -1063,6 +1063,7 @@ def home():
                             <h3 style="color: #22c55e; margin-top: 0; font-size: 15px;">🎉 اشتراک VIP شما فعال است</h3>
                             <p style="color: #cbd5e1; font-size: 12px; margin-bottom: 5px;">موتور کپی‌تریدینگ هوشمند برای ولت شما روشن می‌باشد.</p>
                             <p style="color: #38bdf8; font-size: 13px; font-weight: bold; margin-top: 10px;">⏳ تاریخ و زمان اتمام اعتبار: ${data.expiry_date}</p>
+                            <a href="https://t.me/+c_o1BlwD7_Q4ZjZk" target="_blank" class="btn" style="background: #8b5cf6; margin-top: 15px;">📢 ورود به کانال VIP سیگنال‌ها</a>
                         </div>
                     `;
                 } else {
@@ -1100,7 +1101,10 @@ def home():
 @web_app.route('/api/check-status')
 def api_check_status():
     t_id = request.args.get("telegram_id", "")
-    is_admin_user = (not t_id or str(t_id) == str(TELEGRAM_CHAT_ID))
+    
+    # تفکیک دقیق امنیتی ادمین و کاربر
+    is_admin_user = bool(t_id and str(t_id) == str(TELEGRAM_CHAT_ID))
+    
     subs = get_active_subscribers() if is_admin_user else []
     
     has_sub = False
