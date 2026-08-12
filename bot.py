@@ -41,9 +41,9 @@ COPY_TRADING_ENABLED = True
 FIRE_BUY_AMOUNT_SOL = 0.01
 FIRE_TAKE_PROFIT = 18.0
 FIRE_STOP_LOSS = -10.0
-FIRE_MIN_LIQUIDITY = 35000       # اعمال سخت‌گیری روی ۹۵ درصد
-FIRE_MIN_VOLUME_5M = 8000       # اعمال سخت‌گیری روی ۹۵ درصد
-FIRE_MIN_PRICE_CHANGE_5M = 8.0  # اعمال سخت‌گیری روی ۹۵ درصد
+FIRE_MIN_LIQUIDITY = 35000       # سخت‌گیری ۹۵ درصد
+FIRE_MIN_VOLUME_5M = 8000       # سخت‌گیری ۹۵ درصد
+FIRE_MIN_PRICE_CHANGE_5M = 8.0  # سخت‌گیری ۹۵ درصد
 
 COMBO_BUY_AMOUNT_SOL = 0.01
 COMBO_TAKE_PROFIT = 18.0
