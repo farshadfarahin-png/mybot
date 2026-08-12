@@ -1266,16 +1266,16 @@ def run_web():
     web_app.run(host="0.0.0.0", port=port)
 
 def get_main_keyboard():
-    golden_status = "<tg-emoji emoji-id=\"5368324170671202286\">🚀</tg-emoji> گزینه طلایی: روشن" if GOLDEN_OPTION else "<tg-emoji emoji-id=\"5368324170671202286\">⭐</tg-emoji> گزینه طلایی: خاموش"
-    combo_status = "<tg-emoji emoji-id=\"5368324170671202286\">🚨</tg-emoji> حالت ترکیبی: روشن" if COMBO_RUNNING else "<tg-emoji emoji-id=\"5368324170671202286\">🔴</tg-emoji> حالت ترکیبی: خاموش"
-    trader_status = "<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> خرید و فروش: روشن" if IS_RUNNING else "<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> خرید و فروش: خاموش"
-    trend_status = "<tg-emoji emoji-id=\"5368324170671202286\">🚨</tg-emoji> اعلان ترند: روشن" if TREND_ALERT_RUNNING else "<tg-emoji emoji-id=\"5368324170671202286\">🔴</tg-emoji> اعلان ترند: خاموش"
-    tech_status = "<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> پرایس اکشن + AI: روشن" if TECHNICAL_RUNNING else "<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> پرایس اکشن + AI: خاموش"
-    smart_status = "<tg-emoji emoji-id=\"5368324170671202286\">🛡️</tg-emoji> فیلتر هوشمند: روشن" if SMART_FILTER_ENABLED else "<tg-emoji emoji-id=\"5368324170671202286\">🛡️</tg-emoji> فیلتر هوشمند: خاموش"
-    risk_status = "<tg-emoji emoji-id=\"5368324170671202286\">⚖️</tg-emoji> ریسک داینامیک: روشن" if DYNAMIC_RISK_ENABLED else "<tg-emoji emoji-id=\"5368324170671202286\">⚖️</tg-emoji> ریسک داینامیک: خاموش"
-    manual_status = "<tg-emoji emoji-id=\"5368324170671202286\">⚙️</tg-emoji> تنظیمات دستی: روشن" if MANUAL_SETTINGS_ENABLED else "<tg-emoji emoji-id=\"5368324170671202286\">⚙️</tg-emoji> تنظیمات دستی: خاموش"
-    sync_status = "<tg-emoji emoji-id=\"5368324170671202286\">⚡</tg-emoji> ابرسیگنال + AI Vision: روشن" if SYNCHRONIZED_MODE else "<tg-emoji emoji-id=\"5368324170671202286\">⚡</tg-emoji> ابرسیگنال + AI Vision: خاموش"
-    copy_status = "<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> کپی‌تریدینگ VIP: روشن" if COPY_TRADING_ENABLED else "<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> کپی‌تریدینگ VIP: خاموش"
+    golden_status = "🚀 گزینه طلایی: روشن" if GOLDEN_OPTION else "⭐ گزینه طلایی: خاموش"
+    combo_status = "🚨 حالت ترکیبی: روشن" if COMBO_RUNNING else "🔴 حالت ترکیبی: خاموش"
+    trader_status = "🔥 خرید و فروش: روشن" if IS_RUNNING else "🔥 خرید و فروش: خاموش"
+    trend_status = "🚨 اعلان ترند: روشن" if TREND_ALERT_RUNNING else "🔴 اعلان ترند: خاموش"
+    tech_status = "📊 پرایس اکشن + AI: روشن" if TECHNICAL_RUNNING else "📊 پرایس اکشن + AI: خاموش"
+    smart_status = "🛡️ فیلتر هوشمند: روشن" if SMART_FILTER_ENABLED else "🛡️ فیلتر هوشمند: خاموش"
+    risk_status = "⚖️ ریسک داینامیک: روشن" if DYNAMIC_RISK_ENABLED else "⚖️ ریسک داینامیک: خاموش"
+    manual_status = "⚙️ تنظیمات دستی: روشن" if MANUAL_SETTINGS_ENABLED else "⚙️ تنظیمات دستی: خاموش"
+    sync_status = "⚡ ابرسیگنال + AI Vision: روشن" if SYNCHRONIZED_MODE else "⚡ ابرسیگنال + AI Vision: خاموش"
+    copy_status = "🔗 کپی‌تریدینگ VIP: روشن" if COPY_TRADING_ENABLED else "🔗 کپی‌تریدینگ VIP: خاموش"
 
     open_pnl_usd = 0.0
     open_pnl_percent = 0.0
@@ -1371,15 +1371,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         stats_text = (
-            f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> <b>آمار تحلیلی و گزارش پورتفو:</b>\n\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🔹</tg-emoji> کل معاملات انجام شده: {total_trades}\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">📈</tg-emoji> مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">💵</tg-emoji> درآمد/ضرر دلاری کل: ${total_u:+.2f}\n\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">📉</tg-emoji> <b>نمودار روند عملکرد:</b>\n<code>[{chart_bars}]</code>\n\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🏆</tg-emoji> <b>برترین معاملات ثبت‌شده:</b>\n"
+            f"📊 <b>آمار تحلیلی و گزارش پورتفو:</b>\n\n"
+            f"🔹 کل معاملات انجام شده: {total_trades}\n"
+            f"📈 مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
+            f"💵 درآمد/ضرر دلاری کل: ${total_u:+.2f}\n\n"
+            f"📉 <b>نمودار روند عملکرد:</b>\n<code>[{chart_bars}]</code>\n\n"
+            f"🏆 <b>برترین معاملات ثبت‌شده:</b>\n"
         )
         for t in best_trades:
-            stats_text += f"<tg-emoji emoji-id=\"5368324170671202286\">🪙</tg-emoji> {t[0]} : {t[1]:+.2f}% (در {t[2]})\n"
+            stats_text += f"🪙 {t[0]} : {t[1]:+.2f}% (در {t[2]})\n"
 
         await update.message.reply_text(stats_text, parse_mode="HTML")
     except Exception as e:
@@ -1391,16 +1391,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     if user_id == str(TELEGRAM_CHAT_ID):
-        await update.message.reply_text("<tg-emoji emoji-id=\"5368324170671202286\">🤖</tg-emoji> اتاق کنترل ربات ترید و کپی‌تریدینگ:", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ:", reply_markup=get_main_keyboard())
     else:
         user_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 ورود به مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))]
         ])
         await update.message.reply_text(
-            "<tg-emoji emoji-id=\"5368324170671202286\">👋</tg-emoji> به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.\n\n"
-            "<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> برای اتصال ولت خود و دریافت سرویس کپی‌تریدینگ VIP، روی دکمه زیر کلیک کنید:",
-            reply_markup=user_keyboard,
-            parse_mode="HTML"
+            "👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.\n\n"
+            "برای اتصال ولت خود و دریافت سرویس کپی‌تریدینگ VIP، روی دکمه زیر کلیک کنید:",
+            reply_markup=user_keyboard
         )
 
 async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1410,7 +1409,7 @@ async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
-            "<tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji> فرمت اشتباه! استفاده صحیح:\n\n<code>/free آیدی_تلگرام آدرس_ولت</code>", 
+            "❌ فرمت اشتباه! استفاده صحیح:\n\n<code>/free آیدی_تلگرام آدرس_ولت</code>", 
             parse_mode="HTML"
         )
         return
@@ -1420,9 +1419,9 @@ async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     success = register_free_vip(t_id, wallet)
     if success:
-        await update.message.reply_text(f"<tg-emoji emoji-id=\"5368324170671202286\">✅</tg-emoji> کاربر با آیدی <code>{t_id}</code> به صورت رایگان و ویژه (VIP) ثبت شد!", parse_mode="HTML")
+        await update.message.reply_text(f"✅ کاربر با آیدی <code>{t_id}</code> به صورت رایگان و ویژه (VIP) ثبت شد!", parse_mode="HTML")
     else:
-        await update.message.reply_text("<tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji> خطا در ثبت کاربر رایگان در دیتابیس.", parse_mode="HTML")
+        await update.message.reply_text("❌ خطا در ثبت کاربر رایگان در دیتابیس.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE, COPY_TRADING_ENABLED, AWAITING_STATE
@@ -1443,136 +1442,136 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "toggle_smart_filter":
         SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">🛡️</tg-emoji> فیلتر هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🛡️ فیلتر هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except Exception:
             pass
     elif query.data == "toggle_risk":
         DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">⚖️</tg-emoji> مدیریت ریسک داینامیک تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("⚖️ مدیریت ریسک داینامیک تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_sync":
         SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">⚡</tg-emoji> ابرسیگنال هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("⚡ ابرسیگنال هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_copy":
         COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> کپی‌تریدینگ VIP تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🔗 کپی‌تریدینگ VIP تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_manual":
         MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">⚙️</tg-emoji> تنظیمات دستی تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("⚙️ تنظیمات دستی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_technical":
         TECHNICAL_RUNNING = not TECHNICAL_RUNNING
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> موتور پرایس اکشن تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("📊 موتور پرایس اکشن تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">🚀</tg-emoji> گزینه طلایی تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🚀 گزینه طلایی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_combo":
         COMBO_RUNNING = not COMBO_RUNNING
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">🚨</tg-emoji> حالت ترکیبی تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🚨 حالت ترکیبی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_trader":
         IS_RUNNING = not IS_RUNNING
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> خرید و فروش خودکار تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🔥 خرید و فروش خودکار تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_trend":
         TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">🚨</tg-emoji> اعلان ترند تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🚨 اعلان ترند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "refresh_pnl":
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">🤖</tg-emoji> بروزرسانی آمار سود/زیان:", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🤖 بروزرسانی آمار سود/زیان:", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "status":
         status_text = (
-            f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> <b>وضعیت کامل سیستم:</b>\n\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🔑</tg-emoji> <b>آدرس ولت متصل:</b>\n<code>{WALLET_PUBKEY}</code>\n\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🛡️</tg-emoji> فیلتر هوشمند: {'🟢 روشن' if SMART_FILTER_ENABLED else '🔴 خاموش'}\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">⚡</tg-emoji> ابرسیگنال: {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> کپی‌تریدینگ VIP: {'🟢 روشن' if COPY_TRADING_ENABLED else '🔴 خاموش'}\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🌐</tg-emoji> مینی‌اپلیکیشن: 🟢 فعال\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">💰</tg-emoji> موجودی ولت ادمین: {get_sol_balance():.4f} SOL"
+            f"📊 <b>وضعیت کامل سیستم:</b>\n\n"
+            f"🔑 <b>آدرس ولت متصل:</b>\n<code>{WALLET_PUBKEY}</code>\n\n"
+            f"🛡️ فیلتر هوشمند: {'🟢 روشن' if SMART_FILTER_ENABLED else '🔴 خاموش'}\n"
+            f"⚡ ابرسیگنال: {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
+            f"🔗 کپی‌تریدینگ VIP: {'🟢 روشن' if COPY_TRADING_ENABLED else '🔴 خاموش'}\n"
+            f"🌐 مینی‌اپلیکیشن: 🟢 فعال\n"
+            f"💰 موجودی ولت ادمین: {get_sol_balance():.4f} SOL"
         )
         try:
             await query.edit_message_text(status_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             send_telegram_msg(status_text)
     elif query.data == "wallet_balance":
-        balance_text = f"<tg-emoji emoji-id=\"5368324170671202286\">💰</tg-emoji> موجودی لحظه‌ای ولت ادمین: {get_sol_balance():.4f} SOL"
+        balance_text = f"💰 موجودی لحظه‌ای ولت ادمین: {get_sol_balance():.4f} SOL"
         try:
-            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
         except:
             pass
 
     elif query.data == "menu_t_vol":
-        AWAITING_STATE, cur_val, prefix = "tech_vol", TECH_BUY_AMOUNT_SOL, "<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> [پرایس اکشن] حجم معامله"
+        AWAITING_STATE, cur_val, prefix = "tech_vol", TECH_BUY_AMOUNT_SOL, "📊 [پرایس اکشن] حجم معامله"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_t_tp":
-        AWAITING_STATE, cur_val, prefix = "tech_tp", TECH_TAKE_PROFIT, "<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> [پرایس اکشن] تارگت سود"
+        AWAITING_STATE, cur_val, prefix = "tech_tp", TECH_TAKE_PROFIT, "📊 [پرایس اکشن] تارگت سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_t_sl":
-        AWAITING_STATE, cur_val, prefix = "tech_sl", TECH_STOP_LOSS, "<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> [پرایس اکشن] حد ضرر"
+        AWAITING_STATE, cur_val, prefix = "tech_sl", TECH_STOP_LOSS, "📊 [پرایس اکشن] حد ضرر"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_vol":
-        AWAITING_STATE, cur_val, prefix = "golden_vol", GOLDEN_BUY_AMOUNT_SOL, "<tg-emoji emoji-id=\"5368324170671202286\">🚀</tg-emoji> [گزینه طلایی] حجم معامله"
+        AWAITING_STATE, cur_val, prefix = "golden_vol", GOLDEN_BUY_AMOUNT_SOL, "🚀 [گزینه طلایی] حجم معامله"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_tp":
-        AWAITING_STATE, cur_val, prefix = "golden_tp", GOLDEN_TAKE_PROFIT, "<tg-emoji emoji-id=\"5368324170671202286\">🚀</tg-emoji> [گزینه طلایی] تارگت سود"
+        AWAITING_STATE, cur_val, prefix = "golden_tp", GOLDEN_TAKE_PROFIT, "🚀 [گزینه طلایی] تارگت سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_g_sl":
-        AWAITING_STATE, cur_val, prefix = "golden_sl", GOLDEN_STOP_LOSS, "<tg-emoji emoji-id=\"5368324170671202286\">🚀</tg-emoji> [گزینه طلایی] حد ضرر"
+        AWAITING_STATE, cur_val, prefix = "golden_sl", GOLDEN_STOP_LOSS, "🚀 [گزینه طلایی] حد ضرر"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_vol":
-        AWAITING_STATE, cur_val, prefix = "combo_vol", COMBO_BUY_AMOUNT_SOL, "<tg-emoji emoji-id=\"5368324170671202286\">🚨</tg-emoji> [حالت ترکیبی] حجم معامله"
+        AWAITING_STATE, cur_val, prefix = "combo_vol", COMBO_BUY_AMOUNT_SOL, "🚨 [حالت ترکیبی] حجم معامله"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_tp":
-        AWAITING_STATE, cur_val, prefix = "combo_tp", COMBO_TAKE_PROFIT, "<tg-emoji emoji-id=\"5368324170671202286\">🚨</tg-emoji> [حالت ترکیبی] تارگت سود"
+        AWAITING_STATE, cur_val, prefix = "combo_tp", COMBO_TAKE_PROFIT, "🚨 [حالت ترکیبی] تارگت سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_c_sl":
-        AWAITING_STATE, cur_val, prefix = "combo_sl", COMBO_STOP_LOSS, "<tg-emoji emoji-id=\"5368324170671202286\">🚨</tg-emoji> [حالت ترکیبی] حد ضرر"
+        AWAITING_STATE, cur_val, prefix = "combo_sl", COMBO_STOP_LOSS, "🚨 [حالت ترکیبی] حد ضرر"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_f_vol":
-        AWAITING_STATE, cur_val, prefix = "fire_vol", FIRE_BUY_AMOUNT_SOL, "<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> [خرید و فروش] حجم معامله"
+        AWAITING_STATE, cur_val, prefix = "fire_vol", FIRE_BUY_AMOUNT_SOL, "🔥 [خرید و فروش] حجم معامله"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_f_tp":
-        AWAITING_STATE, cur_val, prefix = "fire_tp", FIRE_TAKE_PROFIT, "<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> [خرید و فروش] تارگت سود"
+        AWAITING_STATE, cur_val, prefix = "fire_tp", FIRE_TAKE_PROFIT, "🔥 [خرید و فروش] تارگت سود"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "menu_f_sl":
-        AWAITING_STATE, cur_val, prefix = "fire_sl", FIRE_STOP_LOSS, "<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> [خرید و فروش] حد ضرر"
+        AWAITING_STATE, cur_val, prefix = "fire_sl", FIRE_STOP_LOSS, "🔥 [خرید و فروش] حد ضرر"
         await prompt_input(query, prefix, cur_val)
     elif query.data == "cancel_input":
         AWAITING_STATE = None
         try:
-            await query.edit_message_text("<tg-emoji emoji-id=\"5368324170671202286\">🤖</tg-emoji> لغو شد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
         except:
             pass
 
 async def prompt_input(query, prefix, cur_val):
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
     try:
-        await query.edit_message_text(f"{prefix} فعلی: {cur_val}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb, parse_mode="HTML")
+        await query.edit_message_text(f"{prefix} فعلی: {cur_val}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
     except:
         pass
 
@@ -1604,13 +1603,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif st == "fire_tp": FIRE_TAKE_PROFIT = val
             elif st == "fire_sl": FIRE_STOP_LOSS = val
 
-            msg = f"<tg-emoji emoji-id=\"5368324170671202286\">✅</tg-emoji> تنظیمات با موفقیت به {val} بروزرسانی شد."
+            msg = f"✅ تنظیمات با موفقیت به {val} بروزرسانی شد."
             AWAITING_STATE = None
-            await update.message.reply_text(msg, reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await update.message.reply_text(msg, reply_markup=get_main_keyboard())
         except ValueError:
-            await update.message.reply_text("<tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji> عدد نامعتبر است. مجدد وارد کنید:", parse_mode="HTML")
+            await update.message.reply_text("❌ عدد نامعتبر است. مجدد وارد کنید:")
     else:
-        await update.message.reply_text("<tg-emoji emoji-id=\"5368324170671202286\">🤖</tg-emoji> از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard(), parse_mode="HTML")
+        await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
 
 if __name__ == "__main__":
     web_thread = Thread(target=run_web)
