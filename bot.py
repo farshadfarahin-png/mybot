@@ -19,7 +19,13 @@ from solders.message import MessageV0
 # تنظیمات کلیدی محیطی و کانال انتشار سیگنال
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "https://t.me/+c_o1BlwD7_Q4ZjZk") 
+
+# آیدی عددی کانال (حتماً باید به صورت منفی و عددی باشد، مثلاً -1001234567890)
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "-100xxxxxxxxxx") 
+
+# لینک نمایشی جدید کانال برای دکمه‌ها و متن‌ها
+CHANNEL_INVITE_LINK = "https://t.me/+c_o1BlwD7Q4ZjZk"
+
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://your-render-or-hosting-url.com")
 
@@ -171,7 +177,6 @@ def send_telegram_msg(text, target_chat=None):
     except Exception as e:
         print(f"❌ خطای ارسال پیام به تلگرام: {e}")
 
-# تابع جدید و فوق‌العاده شیک برای ارسال سیگنال‌های گرافیکی و کارتی به کانال VIP
 def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 **سیگنال ویژه VIP**"):
     if not CHANNEL_ID:
         return
@@ -233,7 +238,7 @@ def register_subscription(telegram_id, wallet_addr, tx_sig):
             f"🎉 **اشتراک ۳۰ روزه VIP شما با موفقیت فعال شد!**\n\n"
             f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
             f"📢 برای دریافت لحظه‌ای سیگنال‌ها و گزارش‌های گرافیکی، از طریق لینک زیر وارد کانال VIP شوید:\n\n"
-            f"{CHANNEL_ID}"
+            f"{CHANNEL_INVITE_LINK}"
         )
         send_telegram_msg(success_msg, target_chat=str(telegram_id))
         return True
@@ -257,7 +262,7 @@ def register_free_vip(telegram_id, wallet_addr):
             f"🎉 **اشتراک VIP رایگان شما توسط ادمین فعال شد!**\n\n"
             f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
             f"📢 از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
-            f"{CHANNEL_ID}"
+            f"{CHANNEL_INVITE_LINK}"
         )
         send_telegram_msg(free_msg, target_chat=str(telegram_id))
         return True
@@ -808,7 +813,6 @@ def technical_analysis_scanner_loop(app):
                 }
                 
                 send_telegram_msg(tech_msg)
-                # ارسال سیگنال گرافیکی جدید به کانال VIP
                 send_graphic_signal_to_vip_channel(
                     token_addr=token_addr,
                     symbol=symbol,
@@ -1142,7 +1146,7 @@ def home():
                             <h3 style="color: #22c55e; margin-top: 0; font-size: 15px;">🎉 اشتراک VIP شما فعال است</h3>
                             <p style="color: #cbd5e1; font-size: 12px; margin-bottom: 5px;">موتور کپی‌تریدینگ هوشمند برای ولت شما روشن می‌باشد.</p>
                             <p style="color: #38bdf8; font-size: 13px; font-weight: bold; margin-top: 10px;">⏳ تاریخ و زمان اتمام اعتبار: ${data.expiry_date}</p>
-                            <a href="https://t.me/+c_o1BlwD7_Q4ZjZk" target="_blank" class="btn" style="background: #8b5cf6; margin-top: 15px;">📢 ورود به کانال VIP سیگنال‌ها</a>
+                            <a href="https://t.me/+c_o1BlwD7Q4ZjZk" target="_blank" class="btn" style="background: #8b5cf6; margin-top: 15px;">📢 ورود به کانال VIP سیگنال‌ها</a>
                         </div>
                     `;
                 } else {
