@@ -181,6 +181,7 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
     if not CHANNEL_ID:
         return
     
+    # قالب کاملاً اختصاصی و جدا از متن ربات (بدون خطاهای داخلی مثل سولانای ناکافی)
     graphic_text = (
         f"╔══════════════════════╗\n"
         f"  {signal_title}\n"
@@ -1390,16 +1391,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AWAITING_STATE = None
     user_id = str(update.effective_user.id)
     
+    welcome_text = '<tg-emoji emoji-id="5368324170671202286">🤖</tg-emoji> <b>اتاق کنترل ربات ترید و کپی‌تریدینگ:</b>'
+    
     if user_id == str(TELEGRAM_CHAT_ID):
-        await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ:", reply_markup=get_main_keyboard())
+        await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
     else:
         user_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 ورود به مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))]
         ])
         await update.message.reply_text(
             "👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.\n\n"
-            "برای اتصال ولت خود و دریافت سرویس کپی‌تریدینگ VIP، روی دکمه زیر کلیک کنید:",
-            reply_markup=user_keyboard
+            "🔗 برای اتصال ولت خود و دریافت سرویس کپی‌تریدینگ VIP، روی دکمه زیر کلیک کنید:",
+            reply_markup=user_keyboard,
+            parse_mode="HTML"
         )
 
 async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1421,7 +1425,7 @@ async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if success:
         await update.message.reply_text(f"✅ کاربر با آیدی <code>{t_id}</code> به صورت رایگان و ویژه (VIP) ثبت شد!", parse_mode="HTML")
     else:
-        await update.message.reply_text("❌ خطا در ثبت کاربر رایگان در دیتابیس.")
+        await update.message.reply_text("❌ خطا در ثبت کاربر رایگان در دیتابیس.", parse_mode="HTML")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE, COPY_TRADING_ENABLED, AWAITING_STATE
@@ -1442,66 +1446,66 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "toggle_smart_filter":
         SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
         try:
-            await query.edit_message_text("🛡️ فیلتر هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🛡️ فیلتر هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except Exception:
             pass
     elif query.data == "toggle_risk":
         DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
         try:
-            await query.edit_message_text("⚖️ مدیریت ریسک داینامیک تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("⚖️ مدیریت ریسک داینامیک تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "toggle_sync":
         SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
         try:
-            await query.edit_message_text("⚡ ابرسیگنال هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("⚡ ابرسیگنال هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "toggle_copy":
         COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
         try:
-            await query.edit_message_text("🔗 کپی‌تریدینگ VIP تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🔗 کپی‌تریدینگ VIP تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "toggle_manual":
         MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
         try:
-            await query.edit_message_text("⚙️ تنظیمات دستی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("⚙️ تنظیمات دستی تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "toggle_technical":
         TECHNICAL_RUNNING = not TECHNICAL_RUNNING
         try:
-            await query.edit_message_text("📊 موتور پرایس اکشن تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("📊 موتور پرایس اکشن تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
         try:
-            await query.edit_message_text("🚀 گزینه طلایی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🚀 گزینه طلایی تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "toggle_combo":
         COMBO_RUNNING = not COMBO_RUNNING
         try:
-            await query.edit_message_text("🚨 حالت ترکیبی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🚨 حالت ترکیبی تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "toggle_trader":
         IS_RUNNING = not IS_RUNNING
         try:
-            await query.edit_message_text("🔥 خرید و فروش خودکار تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🔥 خرید و فروش خودکار تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "toggle_trend":
         TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
         try:
-            await query.edit_message_text("🚨 اعلان ترند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🚨 اعلان ترند تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "refresh_pnl":
         try:
-            await query.edit_message_text("🤖 بروزرسانی آمار سود/زیان:", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🤖 بروزرسانی آمار سود/زیان:", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
     elif query.data == "status":
@@ -1521,7 +1525,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "wallet_balance":
         balance_text = f"💰 موجودی لحظه‌ای ولت ادمین: {get_sol_balance():.4f} SOL"
         try:
-            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
+            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
 
@@ -1564,14 +1568,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "cancel_input":
         AWAITING_STATE = None
         try:
-            await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
+            await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
         except:
             pass
 
 async def prompt_input(query, prefix, cur_val):
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
     try:
-        await query.edit_message_text(f"{prefix} فعلی: {cur_val}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
+        await query.edit_message_text(f"{prefix} فعلی: {cur_val}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb, parse_mode="HTML")
     except:
         pass
 
@@ -1605,11 +1609,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             msg = f"✅ تنظیمات با موفقیت به {val} بروزرسانی شد."
             AWAITING_STATE = None
-            await update.message.reply_text(msg, reply_markup=get_main_keyboard())
+            await update.message.reply_text(msg, reply_markup=get_main_keyboard(), parse_mode="HTML")
         except ValueError:
-            await update.message.reply_text("❌ عدد نامعتبر است. مجدد وارد کنید:")
+            await update.message.reply_text("❌ عدد نامعتبر است. مجدد وارد کنید:", parse_mode="HTML")
     else:
-        await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 if __name__ == "__main__":
     web_thread = Thread(target=run_web)
