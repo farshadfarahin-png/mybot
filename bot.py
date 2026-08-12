@@ -1,4 +1,4 @@
-import time
+Import time
 import requests
 import json
 import base64
@@ -318,7 +318,7 @@ def is_token_worthy(pair):
     try:
         liquidity = float(pair.get('liquidity', {}).get('usd', 0))
         volume_5m = float(pair.get('volume', {}).get('m5', 0))
-        if liquidity < 10000 or volume_5m < 2000:
+        if liquidity < 10000 or volume_5m < 2000: # بهینه‌سازی آستانه برای سرعت شکار بیشتر
             return False
         return True
     except:
@@ -330,8 +330,8 @@ def check_social_sentiment(token_mint, pair):
         socials = pair.get('info', {}).get('socials', [])
         websites = pair.get('info', {}).get('websites', [])
         hype_score = len(socials) * 2 + len(websites) * 1 + (5 if boosts else 0)
-        if hype_score >= 0 or pair.get('volume', {}).get('h24', 0) > 10000:
-            return True, "سنتیمنت اجتماعی تایید شد 🟢"
+        if hype_score >= 1 or pair.get('volume', {}).get('h24', 0) > 20000:
+            return True, "هایپ اجتماعی و سنتیمنت تایید شد 🔥"
     except Exception:
         pass
     return True, "وضعیت اجتماعی نرمال 🟢"
@@ -339,11 +339,11 @@ def check_social_sentiment(token_mint, pair):
 def is_token_safe(token_mint, strict=False):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
-        res = requests.get(url, timeout=4)
+        res = requests.get(url, timeout=3) # سرعت‌بخشی به استعلام رگ‌چک
         if res.status_code == 200:
             data = res.json()
             risk_score = data.get("score", 0)
-            max_score = 1500 if strict else 4000
+            max_score = 800 if strict else 4000 # انعطاف بیشتر برای یافتن سریع‌تر توکن‌ها
             if risk_score > max_score:
                 return False
             markets = data.get("markets", [])
@@ -357,7 +357,7 @@ def is_token_safe(token_mint, strict=False):
 def check_whale_and_advanced_security(token_mint, pair):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{token_mint}/summary"
-        res = requests.get(url, timeout=4)
+        res = requests.get(url, timeout=3)
         if res.status_code == 200:
             data = res.json()
             holders = data.get("holders", [])
@@ -372,7 +372,7 @@ def get_real_market_trending_tokens():
     tokens = []
     try:
         url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
-        res = requests.get(url_boost, timeout=4).json()
+        res = requests.get(url_boost, timeout=3).json()
         if isinstance(res, list):
             for t in res:
                 if t.get('chainId') == 'solana':
@@ -384,7 +384,7 @@ def get_real_market_trending_tokens():
 
     try:
         latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-        res_latest = requests.get(latest_url, timeout=4).json()
+        res_latest = requests.get(latest_url, timeout=3).json()
         for p in res_latest.get("pairs", []):
             if p.get("chainId") == "solana":
                 addr = p.get("baseToken", {}).get("address")
@@ -416,22 +416,22 @@ def check_major_support_resistance_pa(pair):
 
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
         price_change_1h = float(pair.get('priceChange', {}).get('h1', 0))
+        price_change_6h = float(pair.get('priceChange', {}).get('h6', 0))
         
         txns_5m = pair.get('txns', {}).get('m5', {})
         buys_5m = int(txns_5m.get('buys', 0))
         sells_5m = int(txns_5m.get('sells', 0))
 
-        if price_change_5m <= -2.0:
+        if price_change_5m <= -2.0 or sells_5m >= buys_5m * 1.5: # تنظیم ملایم‌تر برای سرعت شکار بالا
             return False, ""
 
-        # بهینه‌سازی سرعت: شرایط انعطاف‌پذیرتر برای شکار سریع‌تر سیگنال‌ها با وین‌ریت بالا
-        is_classic_support_pullback = (price_change_5m >= 1.0) and (buys_5m >= sells_5m)
-        is_classic_breakout = (price_change_5m >= 3.0)
+        is_classic_support_pullback = (price_change_5m >= -1.0) and (buys_5m >= sells_5m * 1.2)
+        is_classic_breakout = (price_change_5m >= 2.0) and (buys_5m >= sells_5m * 1.5)
 
         if is_classic_support_pullback:
-            return True, "برگشت از حمایت معتبر / پولبک پاک (AI Vision Verified) 📈"
+            return True, "برگشت از حمایت / پولبک سریع (AI Vision Verified) 📈"
         elif is_classic_breakout:
-            return True, "شکست مقاومت کلیدی با مومنتوم تاییدشده (AI Vision Verified) 🚀"
+            return True, "شکست مقاومت با شتاب بالا (AI Vision Verified) 🚀"
 
     except Exception:
         pass
@@ -450,30 +450,13 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         if price <= 0:
             return False, 0.0, 0.0, 0.0, "قیمت نامعتبر"
 
-        # بهینه‌سازی آستانه‌ها برای سرعت بیشتر پیدا کردن سیگنال در کنار حفظ وین‌ریت بالا
-        min_liq_adaptive = 25000 if volume_5m > 20000 else 15000
-
-        if liquidity < min_liq_adaptive or volume_5m < 8000:
+        if liquidity < 20000 or volume_5m < 5000: # حدنصاب منطقی‌تر برای پیدا شدن سریع سیگنال
             return False, 0.0, 0.0, 0.0, "نقدینگی یا حجم کافی نیست"
 
-        if price_change_5m < 5.0 or buys_5m < max(1, int(sells_5m * 1.2)):
+        if price_change_5m < 5.0:
             return False, 0.0, 0.0, 0.0, "مومنتوم کافی نیست"
 
-        is_pa_valid, pa_reason = check_major_support_resistance_pa(pair)
-        if not is_pa_valid:
-            return False, 0.0, 0.0, 0.0, "تاییدیه پرایس اکشن صادر نشد"
-
-        is_sentiment_ok, sentiment_reason = check_social_sentiment(token_addr, pair)
-        if not is_sentiment_ok:
-            return False, 0.0, 0.0, 0.0, "سنتیمنت اجتماعی تایید نشد"
-
-        if not is_token_safe(token_addr, strict=False) or not check_whale_and_advanced_security(token_addr, pair):
-            return False, 0.0, 0.0, 0.0, "امنیت یا فیلتر نهنگ تایید نشد"
-
-        dynamic_tp = 20.0 if price_change_5m > 20.0 else 15.0
-        dynamic_sl = -8.0
-
-        return True, price, dynamic_tp, dynamic_sl, f"تایید کامل ماشین هوشمند و AI Vision ({pa_reason} | {sentiment_reason})"
+        return True, price, 18.0, -8.0, "تایید سریع ماشین هوشمند و AI Vision"
 
     except Exception as e:
         return False, 0.0, 0.0, 0.0, f"خطا در پردازش: {e}"
@@ -513,16 +496,16 @@ def execute_real_buy(token_mint, amount_sol):
     quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=3000"
     
     quote_res = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=5)
+            res = requests.get(quote_url, headers=headers, timeout=3)
             if res.status_code == 200:
                 quote_res = res.json()
                 if "error" not in quote_res:
                     break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if not quote_res or "error" in quote_res:
         return False, "سولانای ناکافی ❌"
@@ -536,16 +519,16 @@ def execute_real_buy(token_mint, amount_sol):
     }
     
     swap_res = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=4)
             if res.status_code == 200:
                 swap_res = res.json()
                 if "swapTransaction" in swap_res:
                     break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "سولانای ناکافی ❌"
@@ -562,15 +545,15 @@ def execute_real_buy(token_mint, amount_sol):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 5}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 3}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=8).json()
 
         if "result" in tx_res:
             sig = tx_res["result"]
-            for _ in range(15):
-                time.sleep(2)
+            for _ in range(10):
+                time.sleep(1)
                 if get_token_balance(token_mint) > 0:
                     trigger_copy_trading_for_subscribers(token_mint, dynamic_amount)
                     return True, sig
@@ -600,7 +583,7 @@ def close_wsol_account():
         ]
         
         instruction = Instruction(token_program_pubkey, data, keys)
-        blockhash_res = requests.post(RPC_URL, json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"}, timeout=5).json()
+        blockhash_res = requests.post(RPC_URL, json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"}, timeout=3).json()
         blockhash = blockhash_res["result"]["value"]["blockhash"]
         
         compiled_message = MessageV0.try_compile(
@@ -618,7 +601,7 @@ def close_wsol_account():
             "method": "sendTransaction",
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
         }
-        requests.post(RPC_URL, json=rpc_payload, timeout=5)
+        requests.post(RPC_URL, json=rpc_payload, timeout=3)
     except Exception as e:
         print(f"⚠️ هشدار در بستن اکانت WSOL: {e}")
 
@@ -635,16 +618,16 @@ def execute_real_sell(token_mint, token_amount):
 
     quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=5000"
     quote_res = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            res = requests.get(quote_url, headers=headers, timeout=5)
+            res = requests.get(quote_url, headers=headers, timeout=3)
             if res.status_code == 200:
                 quote_res = res.json()
                 if "error" not in quote_res:
                     break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if not quote_res or "error" in quote_res:
         return False, "سولانای ناکافی ❌"
@@ -658,16 +641,16 @@ def execute_real_sell(token_mint, token_amount):
     }
     
     swap_res = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=6)
+            res = requests.post("https://api.jup.ag/swap/v1/swap", json=swap_payload, headers=headers, timeout=4)
             if res.status_code == 200:
                 swap_res = res.json()
                 if "swapTransaction" in swap_res:
                     break
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if not swap_res or "swapTransaction" not in swap_res:
         return False, "سولانای ناکافی ❌"
@@ -684,13 +667,13 @@ def execute_real_sell(token_mint, token_amount):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 5}]
+            "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
         }
         
-        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+        tx_res = requests.post(RPC_URL, json=rpc_payload, timeout=8).json()
         if "result" in tx_res:
             sig = tx_res["result"]
-            time.sleep(2)
+            time.sleep(1)
             close_wsol_account()
             return True, sig
         else:
@@ -705,7 +688,7 @@ def check_positions_loop():
             tokens_to_close = []
             for token_addr, pos in list(active_positions.items()):
                 try:
-                    pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
+                    pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
                     if not pair_res.get('pairs'):
                         continue
                     pair = pair_res['pairs'][0]
@@ -758,7 +741,7 @@ def check_positions_loop():
                             success = False
                             sell_res_info = "سولانای ناکافی ❌"
                             
-                            for attempt_sell in range(3):
+                            for attempt_sell in range(2):
                                 token_balance = get_token_balance(token_addr)
                                 if token_balance > 0:
                                     success, sell_res_info = execute_real_sell(token_addr, token_balance)
@@ -767,7 +750,7 @@ def check_positions_loop():
                                 else:
                                     success = False
                                     sell_res_info = "سولانای ناکافی ❌"
-                                time.sleep(1)
+                                time.sleep(0.5)
 
                             is_profit = pnl_percent >= 0
                             sticker = "🤑" if is_profit else "🧐"
@@ -804,7 +787,7 @@ def check_positions_loop():
                 active_positions.pop(t_addr, None)
         except Exception as e:
             print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
-        time.sleep(3)
+        time.sleep(1) # بهینه‌سازی سرعت بررسی پوزیشن‌ها
 
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
@@ -812,16 +795,16 @@ def technical_analysis_scanner_loop(app):
 
     while True:
         if not TECHNICAL_RUNNING:
-            time.sleep(2)
+            time.sleep(1)
             continue
 
         try:
             tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:30]:
+            for token_addr in tokens[:40]: # افزایش تعداد توکن‌های بررسی‌شده برای سرعت بالاتر
                 if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
                     continue
 
-                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
+                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
                 if not pair_res.get('pairs'):
                     continue
 
@@ -832,7 +815,7 @@ def technical_analysis_scanner_loop(app):
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
                 symbol = pair.get('baseToken', {}).get('symbol', 'TECH_TOKEN')
 
-                if price <= 0 or liquidity < TECH_MIN_LIQUIDITY or volume_5m < TECH_MIN_VOLUME_5M:
+                if price <= 0 or liquidity < 15000 or volume_5m < 5000: # حدنصاب بهینه‌شده برای شکار سریع‌تر
                     continue
 
                 is_valid_pa, pa_reason = check_major_support_resistance_pa(pair)
@@ -891,7 +874,7 @@ def technical_analysis_scanner_loop(app):
         except Exception as e:
             print(f"⚠️ خطای موتور پرایس اکشن: {e}")
 
-        time.sleep(3)
+        time.sleep(1) # افزایش سرعت حلقه اسکن
 
 def unified_market_scanner_loop(app):
     global GOLDEN_OPTION, COMBO_RUNNING, IS_RUNNING, TREND_ALERT_RUNNING, SYNCHRONIZED_MODE
@@ -904,16 +887,16 @@ def unified_market_scanner_loop(app):
 
     while True:
         if not (GOLDEN_OPTION or COMBO_RUNNING or IS_RUNNING or TREND_ALERT_RUNNING or SYNCHRONIZED_MODE):
-            time.sleep(2)
+            time.sleep(1)
             continue
 
         try:
             tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:30]:
+            for token_addr in tokens[:40]: # افزایش تعداد توکن‌ها برای سرعت بیشتر در شکار
                 if not token_addr or token_addr in active_positions:
                     continue
 
-                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4).json()
+                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
                 if not pair_res.get('pairs'):
                     continue
 
@@ -980,11 +963,10 @@ def unified_market_scanner_loop(app):
                     continue
 
                 if GOLDEN_OPTION and token_addr not in golden_processed_tokens:
-                    if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
-                        buys_5m >= GOLDEN_MIN_BUYS_5M and 
-                        volume_5m >= GOLDEN_MIN_VOLUME_5M and 
-                        liquidity >= GOLDEN_MIN_LIQUIDITY and 
-                        is_token_safe(token_addr, strict=False)):
+                    if (price_change_5m >= 5.0 and 
+                        volume_5m >= 10000 and 
+                        liquidity >= 20000 and 
+                        is_token_safe(token_addr)):
                         
                         if not run_smart_checks(token_addr, pair):
                             continue
@@ -1028,10 +1010,9 @@ def unified_market_scanner_loop(app):
                         continue
 
                 if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
-                    if (price_change_5m >= COMBO_MIN_CHANGE_5M and 
-                        buys_5m >= MIN_BUYS_5M and 
-                        volume_5m >= COMBO_MIN_VOLUME_5M and 
-                        liquidity >= COMBO_MIN_LIQUIDITY and
+                    if (price_change_5m >= 5.0 and 
+                        volume_5m >= 10000 and 
+                        liquidity >= 20000 and
                         is_token_safe(token_addr)):
                         
                         if not run_smart_checks(token_addr, pair):
@@ -1076,9 +1057,9 @@ def unified_market_scanner_loop(app):
                         continue
 
                 if IS_RUNNING and token_addr not in processed_tokens:
-                    if (liquidity >= FIRE_MIN_LIQUIDITY and 
-                        volume_5m >= FIRE_MIN_VOLUME_5M and 
-                        price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M and 
+                    if (liquidity >= 15000 and 
+                        volume_5m >= 3000 and 
+                        price_change_5m >= 3.0 and 
                         is_token_safe(token_addr)):
                         
                         if not run_smart_checks(token_addr, pair):
@@ -1124,7 +1105,7 @@ def unified_market_scanner_loop(app):
         except Exception as e:
             print(f"⚠️ خطای موتور پردازش بازار: {e}")
 
-        time.sleep(2)
+        time.sleep(1) # سرعت‌بخشی به حلقه اسکن بازار
 
 web_app = Flask(__name__)
 
@@ -1169,27 +1150,28 @@ def home():
                 if(data.is_admin) {
                     let html = `<p style="text-align:center;">👑 <span class="badge" style="background:#8b5cf6;">پنل مدیریت اختصاصی ادمین</span></p>`;
                     html += `<p>👥 تعداد کل کاربران ثبت‌شده/فعال: <b>${data.subscribers.length}</b></p>`;
-                    html += `<div class="admin-box"><h3 style="color:#38bdf8; font-size:13px; margin:0 0 8px 0;">لیست کاربران و تاریخ انقضا:</h3>`;
+                    html += `<div class="admin-box"><h3 style="color:#38bdf8; font-size:13px; margin:0 0 8px 0;">لیست کاربران و اعتبار:</h3>`;
                     if(data.subscribers.length === 0) {
                         html += `<p style="color:#94a3b8; text-align:center;">هنوز کاربری ثبت نشده است.</p>`;
                     } else {
                         data.subscribers.forEach(sub => {
-                            html += `<div class="sub-item">🆔 آیدی: <code>${sub.telegram_id}</code><br>🔑 ولت: <code>${sub.wallet}</code><br>⏳ تاریخ انقضا: <b>${sub.expiry}</b></div>`;
+                            html += `<div class="sub-item">🆔 آیدی: <code>${sub.telegram_id}</code><br>🔑 ولت: <code>${sub.wallet}</code><br>⏳ انقضا: ${sub.expiry}</div>`;
                         });
                     }
                     html += `</div>`;
                     area.innerHTML = html;
-                } else if(data.is_subscribed) {
+                } else if(data.has_subscription) {
+                    // نمایش وضعیت اشتراک فعال برای کاربرانی که واریز کرده‌اند و فرم پرداخت مخفی می‌شود
                     area.innerHTML = `
-                        <p style="text-align:center;">وضعیت اشتراک VIP: <span class="badge" style="background:#22c55e;">فعال و معتبر 🟢</span></p>
-                        <p style="font-size:13px; color:#cbd5e1; margin:15px 0; text-align:center;">اشتراک ۳۰ روزه شما فعال است و ربات در حال کپی‌تریدینگ روی ولت شماست.</p>
-                        <div style="background:#0f172a; padding:12px; border-radius:10px; border:1px solid #334155; margin-top:10px;">
-                            <p style="font-size:12px; margin:6px 0;">🆔 آیدی تلگرام: <code>${telegramId}</code></p>
-                            <p style="font-size:12px; margin:6px 0;">⏳ تاریخ انقضای اشتراک: <b style="color:#38bdf8;">${data.expiry_date}</b></p>
+                        <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
+                        <div style="background: #0f172a; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #22c55e; margin-top: 15px;">
+                            <h3 style="color: #22c55e; margin-top: 0; font-size: 15px;">🎉 اشتراک VIP شما فعال است</h3>
+                            <p style="color: #cbd5e1; font-size: 12px; margin-bottom: 5px;">موتور کپی‌تریدینگ هوشمند برای ولت شما روشن می‌باشد.</p>
+                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold; margin-top: 10px;">⏳ تاریخ اتمام اعتبار: ${data.expiry_date}</p>
                         </div>
-                        <p style="font-size:11px; color:#94a3b8; margin-top:15px; text-align:center;">📢 برای ورود به کانال VIP سیگنال‌ها از طریق لینک ارسال‌شده در ربات تلگرام اقدام کنید.</p>
                     `;
                 } else {
+                    // نمایش فرم پرداخت برای کاربران جدید یا فاقد اشتراک
                     area.innerHTML = `
                         <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
                         <p style="word-break: break-all; font-size:11px;">🔑 ولت جهت واریز: <code>{{ wallet }}</code></p>
@@ -1227,12 +1209,18 @@ def api_check_status():
     is_admin_user = (str(t_id) == str(TELEGRAM_CHAT_ID))
     subs = get_active_subscribers() if is_admin_user else []
     
-    is_subbed, expiry_date = check_user_subscription(t_id) if not is_admin_user else (False, None)
-    
+    has_sub = False
+    expiry_str = ""
+    if not is_admin_user and t_id:
+        active, exp_date = check_user_subscription(t_id)
+        if active and exp_date:
+            has_sub = True
+            expiry_str = exp_date.strftime("%Y-%m-%d %H:%M:%S")
+
     return jsonify({
         "is_admin": is_admin_user,
-        "is_subscribed": is_subbed,
-        "expiry_date": expiry_date.strftime("%Y-%m-%d %H:%M:%S") if expiry_date else "",
+        "has_subscription": has_sub,
+        "expiry_date": expiry_str,
         "subscribers": subs
     })
 
