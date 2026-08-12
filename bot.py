@@ -171,32 +171,31 @@ def send_telegram_msg(text, target_chat=None):
             "chat_id": chat_target,
             "text": text,
             "disable_web_page_preview": True,
-            "parse_mode": "HTML"
+            "parse_mode": "Markdown"
         }
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
         print(f"❌ خطای ارسال پیام به تلگرام: {e}")
 
-def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="<tg-emoji emoji-id=\"5368324170671202286\">🚀</tg-emoji> <b>سیگنال ویژه VIP</b>"):
+def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP"):
     if not CHANNEL_ID:
         return
     
-    # قالب کاملاً اختصاصی و جدا از متن ربات (بدون خطاهای داخلی مثل سولانای ناکافی)
     graphic_text = (
         f"╔══════════════════════╗\n"
         f"  {signal_title}\n"
         f"╚══════════════════════╝\n\n"
-        f"<tg-emoji emoji-id=\"5368324170671202286\">🪙</tg-emoji> نام توکن: <code>#{symbol}</code>\n"
-        f"<tg-emoji emoji-id=\"5368324170671202286\">📍</tg-emoji> آدرس قرارداد:\n<code>{token_addr}</code>\n\n"
-        f"<tg-emoji emoji-id=\"5368324170671202286\">💵</tg-emoji> قیمت ورود: <code>${price:.8f}</code>\n"
-        f"<tg-emoji emoji-id=\"5368324170671202286\">💰</tg-emoji> حجم معامله: <code>SOL {buy_amt}</code>\n"
-        f"<tg-emoji emoji-id=\"5368324170671202286\">🎯</tg-emoji> تارگت سود: <code>+%{tp}</code>\n"
-        f"<tg-emoji emoji-id=\"5368324170671202286\">🛑</tg-emoji> حد ضرر: <code>%{sl}</code>\n\n"
-        f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> <b>آمار زنده بازار:</b>\n"
-        f"▪️ روند ۵ دقیقه: <code>+%{p_change:.2f}</code>\n"
-        f"▪️ حجم معاملات: <code>${volume:,.0f}</code>\n"
-        f"▪️ نقدینگی کل: <code>${liquidity:,.0f}</code>\n\n"
-        f"<tg-emoji emoji-id=\"5368324170671202286\">⚡️</tg-emoji> <i>سیستم هوشمند کپی‌تریدینگ و تحلیل اتوماتیک سولانا</i>\n"
+        f"🪙 نام توکن: #{symbol}\n"
+        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+        f"💵 قیمت ورود: ${price:.8f}\n"
+        f"💰 حجم معامله: SOL {buy_amt}\n"
+        f"🎯 تارگت سود: +%{tp}\n"
+        f"🛑 حد ضرر: %{sl}\n\n"
+        f"📊 آمار زنده بازار:\n"
+        f"▪️ روند ۵ دقیقه: +%{p_change:.2f}\n"
+        f"▪️ حجم معاملات: ${volume:,.0f}\n"
+        f"▪️ نقدینگی کل: ${liquidity:,.0f}\n\n"
+        f"⚡️ *سیستم هوشمند کپی‌تریدینگ و تحلیل اتوماتیک سولانا*\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -215,7 +214,7 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         payload = {
             "chat_id": CHANNEL_ID,
             "text": graphic_text,
-            "parse_mode": "HTML",
+            "parse_mode": "Markdown",
             "disable_web_page_preview": True,
             "reply_markup": keyboard.to_dict()
         }
@@ -236,9 +235,9 @@ def register_subscription(telegram_id, wallet_addr, tx_sig):
         conn.close()
         
         success_msg = (
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🎉</tg-emoji> <b>اشتراک ۳۰ روزه VIP شما با موفقیت فعال شد!</b>\n\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">📢</tg-emoji> برای دریافت لحظه‌ای سیگنال‌ها و گزارش‌های گرافیکی، از طریق لینک زیر وارد کانال VIP شوید:\n\n"
+            f"🎉 اشتراک ۳۰ روزه VIP شما با موفقیت فعال شد!\n\n"
+            f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
+            f"📢 برای دریافت لحظه‌ای سیگنال‌ها و گزارش‌های گرافیکی، از طریق لینک زیر وارد کانال VIP شوید:\n\n"
             f"{CHANNEL_INVITE_LINK}"
         )
         send_telegram_msg(success_msg, target_chat=str(telegram_id))
@@ -260,9 +259,9 @@ def register_free_vip(telegram_id, wallet_addr):
         conn.close()
         
         free_msg = (
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🎉</tg-emoji> <b>اشتراک VIP رایگان شما توسط ادمین فعال شد!</b>\n\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">📢</tg-emoji> از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
+            f"🎉 اشتراک VIP رایگان شما توسط ادمین فعال شد!\n\n"
+            f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
+            f"📢 از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
             f"{CHANNEL_INVITE_LINK}"
         )
         send_telegram_msg(free_msg, target_chat=str(telegram_id))
@@ -404,7 +403,7 @@ def check_major_support_resistance_pa(pair):
         price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
         if price_change_5m <= -2.0:
             return False, ""
-        return True, "پرایس اکشن صعودی تایید شد <tg-emoji emoji-id=\"5368324170671202286\">📈</tg-emoji>"
+        return True, "پرایس اکشن صعودی تایید شد 📈"
     except Exception:
         pass
     return False, ""
@@ -434,10 +433,10 @@ def trigger_copy_trading_for_subscribers(token_mint, amount_sol):
     for sub in active_subs:
         t_id = sub["telegram_id"]
         copy_msg = (
-            f"<tg-emoji emoji-id=\"5368324170671202286\">⚡</tg-emoji> <b>[کپی‌تریدینگ هوشمند VIP]</b>\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🤖</tg-emoji> معامله جدید روی ولت شما کپی شد!\n\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">🪙</tg-emoji> توکن:\n<code>{token_mint}</code>\n"
-            f"<tg-emoji emoji-id=\"5368324170671202286\">💰</tg-emoji> حجم معامله: {amount_sol} SOL"
+            f"⚡ [کپی‌تریدینگ هوشمند VIP]\n"
+            f"🤖 معامله جدید روی ولت شما کپی شد!\n\n"
+            f"🪙 توکن:\n{token_mint}\n"
+            f"💰 حجم معامله: {amount_sol} SOL"
         )
         send_telegram_msg(copy_msg, target_chat=t_id)
 
@@ -448,7 +447,7 @@ def execute_real_buy(token_mint, amount_sol):
     dynamic_amount = get_dynamic_buy_amount(amount_sol)
     current_sol = get_sol_balance()
     if current_sol < (dynamic_amount + 0.002):
-        return False, "سولانای ناکافی <tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji>"
+        return False, "سولانای ناکافی ❌"
 
     lamports = int(dynamic_amount * 1_000_000_000)
     headers = {
@@ -473,7 +472,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.2)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای کوت ژوپیتر <tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji>"
+        return False, "خطای کوت ژوپیتر ❌"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -496,7 +495,7 @@ def execute_real_buy(token_mint, amount_sol):
         time.sleep(0.2)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "خطای سوآپ ژوپیتر <tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji>"
+        return False, "خطای سوآپ ژوپیتر ❌"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -525,7 +524,7 @@ def execute_real_buy(token_mint, amount_sol):
             trigger_copy_trading_for_subscribers(token_mint, dynamic_amount)
             return True, sig
         else:
-            return False, "خطای ارسال تراکنش <tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji>"
+            return False, "خطای ارسال تراکنش ❌"
     except Exception as e:
         return False, f"خطا: {e}"
 
@@ -572,7 +571,7 @@ def close_wsol_account():
 
 def execute_real_sell(token_mint, token_amount):
     if not WALLET_PUBKEY:
-        return False, "ولتی یافت نشد <tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji>"
+        return False, "ولتی یافت نشد ❌"
 
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -595,7 +594,7 @@ def execute_real_sell(token_mint, token_amount):
         time.sleep(0.2)
 
     if not quote_res or "error" in quote_res:
-        return False, "خطای کوت فروش <tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji>"
+        return False, "خطای کوت فروش ❌"
 
     swap_payload = {
         "quoteResponse": quote_res,
@@ -618,7 +617,7 @@ def execute_real_sell(token_mint, token_amount):
         time.sleep(0.2)
 
     if not swap_res or "swapTransaction" not in swap_res:
-        return False, "خطای ساخت تراکنش فروش <tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji>"
+        return False, "خطای ساخت تراکنش فروش ❌"
 
     try:
         swap_tx_b64 = swap_res["swapTransaction"]
@@ -642,12 +641,13 @@ def execute_real_sell(token_mint, token_amount):
             close_wsol_account()
             return True, sig
         else:
-            return False, "خطای شبکه فروش <tg-emoji emoji-id=\"5368324170671202286\">❌</tg-emoji>"
+            return False, "خطای شبکه فروش ❌"
     except Exception as e:
         return False, f"خطا: {e}"
 
 def check_positions_loop():
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
+
     while True:
         try:
             tokens_to_close = []
@@ -687,10 +687,10 @@ def check_positions_loop():
 
                         if pnl_percent <= current_locked_floor and highest_pnl >= initial_tp:
                             should_exit = True
-                            exit_reason_text = f"سیو سود پله‌ای هوشمند روی سقف {current_locked_floor:.0f}% <tg-emoji emoji-id=\"5368324170671202286\">🎯</tg-emoji> <tg-emoji emoji-id=\"5368324170671202286\">🤑</tg-emoji>"
+                            exit_reason_text = f"سیو سود پله‌ای هوشمند روی سقف {current_locked_floor:.0f}% 🎯 🤑"
                         elif pnl_percent <= sl:
                             should_exit = True
-                            exit_reason_text = f"فروش خودکار حد ضرر (SL) فعال شد <tg-emoji emoji-id=\"5368324170671202286\">🛑</tg-emoji> <tg-emoji emoji-id=\"5368324170671202286\">🧐</tg-emoji>"
+                            exit_reason_text = f"فروش خودکار حد ضرر (SL) فعال شد 🛑 🧐"
 
                         if should_exit:
                             success = False
@@ -705,8 +705,8 @@ def check_positions_loop():
                                 time.sleep(0.5)
 
                             is_profit = pnl_percent >= 0
-                            sticker = "<tg-emoji emoji-id=\"5368324170671202286\">🤑</tg-emoji>" if is_profit else "<tg-emoji emoji-id=\"5368324170671202286\">🧐</tg-emoji>"
-                            reason = exit_reason_text if exit_reason_text else (f"حد سود (TP) فعال شد <tg-emoji emoji-id=\"5368324170671202286\">🎯</tg-emoji> {sticker}" if is_profit else f"حد ضرر (SL) فعال شد <tg-emoji emoji-id=\"5368324170671202286\">🛑</tg-emoji> {sticker}")
+                            sticker = "🤑" if is_profit else "🧐"
+                            reason = exit_reason_text if exit_reason_text else (f"حد سود (TP) فعال شد 🎯 {sticker}" if is_profit else f"حد ضرر (SL) فعال شد 🛑 {sticker}")
 
                             pnl_usd_val = 0.75 * (pnl_percent / 100)
                             closed_trades_history.append({
@@ -720,15 +720,15 @@ def check_positions_loop():
                             log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
 
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
-                            
+
                             exit_msg = (
-                                f"<tg-emoji emoji-id=\"5368324170671202286\">🔴</tg-emoji> {reason}\n\n"
-                                f"<tg-emoji emoji-id=\"5368324170671202286\">🪙</tg-emoji> توکن: {symbol}\n"
-                                f"<tg-emoji emoji-id=\"5368324170671202286\">📌</tg-emoji> وضعیت خروج: {sell_res_info}\n"
-                                f"<tg-emoji emoji-id=\"5368324170671202286\">📍</tg-emoji> آدرس:\n<code>{token_addr}</code>\n\n"
-                                f"<tg-emoji emoji-id=\"5368324170671202286\">📉</tg-emoji> قیمت خروج: ${current_price:.8f}\n"
-                                f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
-                                f"<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> تراکنش Solscan:\n{solscan_link}"
+                                f"🔴 {reason}\n\n"
+                                f"🪙 توکن: {symbol}\n"
+                                f"📌 وضعیت خروج: {sell_res_info}\n"
+                                f"📍 آدرس:\n{token_addr}\n\n"
+                                f"📉 قیمت خروج: ${current_price:.8f}\n"
+                                f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
+                                f"🔗 تراکنش Solscan:\n{solscan_link}"
                             )
                             send_telegram_msg(exit_msg)
                             send_telegram_msg(exit_msg, target_chat=CHANNEL_ID)
@@ -744,7 +744,7 @@ def check_positions_loop():
 
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
-    send_telegram_msg("<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> موتور پرایس اکشن حرفه‌ای فعال شد.")
+    send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای فعال شد.")
 
     while True:
         if not TECHNICAL_RUNNING:
@@ -780,29 +780,29 @@ def technical_analysis_scanner_loop(app):
 
                 current_buy_amt = get_dynamic_buy_amount(TECH_BUY_AMOUNT_SOL)
                 success, result_info = execute_real_buy(token_addr, TECH_BUY_AMOUNT_SOL)
-                buy_status_str = "انجام شد (موفق روی بلاکچین <tg-emoji emoji-id=\"5368324170671202286\">✅</tg-emoji>)" if success else f"{result_info}"
+                buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                 solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                 target_tp_val = price * (1 + (TECH_TAKE_PROFIT / 100))
                 target_sl_val = price * (1 + (TECH_STOP_LOSS / 100))
 
                 tech_msg = (
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji><tg-emoji emoji-id=\"5368324170671202286\">📈</tg-emoji> <b>سیگنال پرایس اکشن VIP</b>\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">✨</tg-emoji> وضعیت: {pa_reason}\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">📌</tg-emoji> وضعیت خرید: {buy_status_str}\n\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">🪙</tg-emoji> توکن: <b>{symbol}</b>\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">📍</tg-emoji> آدرس قرارداد:\n<code>{token_addr}</code>\n\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">💵</tg-emoji> نقطه ورود دقیق: <code>${price:.8f}</code>\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">💰</tg-emoji> مقدار خرید: <code>SOL {current_buy_amt}</code> (داینامیک)\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">🎯</tg-emoji> تارگت سود: <code>${target_tp_val:.8f}</code> (+<code>%{TECH_TAKE_PROFIT}</code>)\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">🛑</tg-emoji> حد ضرر: <code>${target_sl_val:.8f}</code> (<code>%{TECH_STOP_LOSS}</code>)\n\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> آمار لحظه‌ای بازار:\n"
-                    f"🔹 روند ۵ دقیقه: +<code>%{price_change_5m:.2f}</code>\n"
-                    f"🔹 حجم معاملاتی: <code>${volume_5m:,.0f}</code>\n"
-                    f"🔹 نقدینگی کل: <code>${liquidity:,.0f}</code>\n\n"
-                    f"<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> <b>لینک‌های بررسی:</b>\n"
-                    f"🔍 <a href=\"{solscan_link}\">Solscan</a>\n"
-                    f"📈 <a href=\"https://dexscreener.com/solana/{token_addr}\">DexScreener</a>"
+                    f"📊📈 سیگنال پرایس اکشن VIP\n"
+                    f"✨ وضعیت: {pa_reason}\n"
+                    f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                    f"🪙 توکن: {symbol}\n"
+                    f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                    f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                    f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
+                    f"🎯 تارگت سود: ${target_tp_val:.8f} (+%{TECH_TAKE_PROFIT})\n"
+                    f"🛑 حد ضرر: ${target_sl_val:.8f} (%{TECH_STOP_LOSS})\n\n"
+                    f"📊 آمار لحظه‌ای بازار:\n"
+                    f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
+                    f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                    f"🔹 نقدینگی کل: ${liquidity:,.0f}\n\n"
+                    f"🔗 لینک‌های بررسی:\n"
+                    f"🔍 [Solscan]({solscan_link})\n"
+                    f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                 )
 
                 active_positions[token_addr] = {
@@ -825,7 +825,7 @@ def technical_analysis_scanner_loop(app):
                     liquidity=liquidity,
                     p_change=price_change_5m,
                     solscan_link=solscan_link,
-                    signal_title="<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> <b>سیگنال پرایس اکشن + AI</b>"
+                    signal_title="📊 سیگنال پرایس اکشن + AI"
                 )
 
         except Exception as e:
@@ -839,7 +839,7 @@ def unified_market_scanner_loop(app):
     global COMBO_BUY_AMOUNT_SOL, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS
     global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS
 
-    send_telegram_msg("<tg-emoji emoji-id=\"5368324170671202286\">⚡</tg-emoji> موتور پردازش بازار و فیلتر سیگنال‌های VIP فعال شد.")
+    send_telegram_msg("⚡ موتور پردازش بازار و فیلتر سیگنال‌های VIP فعال شد.")
 
     while True:
         if not (GOLDEN_OPTION or COMBO_RUNNING or IS_RUNNING or TREND_ALERT_RUNNING or SYNCHRONIZED_MODE):
@@ -873,29 +873,29 @@ def unified_market_scanner_loop(app):
                         current_buy_amt = get_dynamic_buy_amount(0.01)
                         success, result_info = execute_real_buy(token_addr, 0.01)
                         
-                        buy_status_str = "انجام شد (موفق روی بلاکچین <tg-emoji emoji-id=\"5368324170671202286\">✅</tg-emoji>)" if success else f"{result_info}"
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = entry_p * (1 + (calc_tp / 100))
                         target_sl_val = entry_p * (1 + (calc_sl / 100))
 
                         super_msg = (
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">⚡</tg-emoji><tg-emoji emoji-id=\"5368324170671202286\">🧠</tg-emoji> <b>[ابرسیگنال هوشمند VIP]</b>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🎯</tg-emoji> دلیل شکار: {eval_reason}\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📌</tg-emoji> وضعیت خرید: {buy_status_str}\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🪙</tg-emoji> توکن: <b>{symbol}</b>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📍</tg-emoji> آدرس قرارداد:\n<code>{token_addr}</code>\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">💵</tg-emoji> نقطه ورود دقیق: <code>${entry_p:.8f}</code>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">💰</tg-emoji> مقدار خرید: <code>SOL {current_buy_amt}</code> (داینامیک)\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🎯</tg-emoji> تارگت هوشمند: <code>${target_tp_val:.8f}</code> (+<code>%{calc_tp}</code>)\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🛑</tg-emoji> حد ضرر محافظتی: <code>${target_sl_val:.8f}</code> (<code>%{calc_sl}</code>)\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> آنالیز پارامترها:\n"
-                            f"🔹 روند ۵ دقیقه: +<code>%{price_change_5m:.2f}</code>\n"
-                            f"🔹 حجم معاملات: <code>${volume_5m:,.0f}</code>\n"
-                            f"🔹 نقدینگی کل: <code>${liquidity:,.0f}</code>\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> <b>لینک‌های بررسی:</b>\n"
-                            f"🔍 <a href=\"{solscan_link}\">Solscan</a>\n"
-                            f"📈 <a href=\"https://dexscreener.com/solana/{token_addr}\">DexScreener</a>"
+                            f"⚡🧠 [ابرسیگنال هوشمند VIP]\n"
+                            f"🎯 دلیل شکار: {eval_reason}\n"
+                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                            f"💵 نقطه ورود دقیق: ${entry_p:.8f}\n"
+                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
+                            f"🎯 تارگت هوشمند: ${target_tp_val:.8f} (+%{calc_tp})\n"
+                            f"🛑 حد ضرر محافظتی: ${target_sl_val:.8f} (%{calc_sl})\n\n"
+                            f"📊 آنالیز پارامترها:\n"
+                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
+                            f"🔹 حجم معاملات: ${volume_5m:,.0f}\n"
+                            f"🔹 نقدینگی کل: ${liquidity:,.0f}\n\n"
+                            f"🔗 لینک‌های بررسی:\n"
+                            f"🔍 [Solscan]({solscan_link})\n"
+                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                         )
                         
                         active_positions[token_addr] = {
@@ -918,7 +918,7 @@ def unified_market_scanner_loop(app):
                             liquidity=liquidity,
                             p_change=price_change_5m,
                             solscan_link=solscan_link,
-                            signal_title="<tg-emoji emoji-id=\"5368324170671202286\">⚡</tg-emoji><tg-emoji emoji-id=\"5368324170671202286\">🧠</tg-emoji> <b>ابرسیگنال هوشمند VIP</b>"
+                            signal_title="⚡🧠 ابرسیگنال هوشمند VIP"
                         )
                         continue
 
@@ -932,28 +932,28 @@ def unified_market_scanner_loop(app):
 
                         current_buy_amt = get_dynamic_buy_amount(GOLDEN_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, GOLDEN_BUY_AMOUNT_SOL)
-                        buy_status_str = "انجام شد (موفق روی بلاکچین <tg-emoji emoji-id=\"5368324170671202286\">✅</tg-emoji>)" if success else f"{result_info}"
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = price * (1 + (GOLDEN_TAKE_PROFIT / 100))
                         target_sl_val = price * (1 + (GOLDEN_STOP_LOSS / 100))
 
                         golden_msg = (
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🚀</tg-emoji><tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> <b>سیگنال گزینه طلایی VIP</b>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📌</tg-emoji> وضعیت خرید: {buy_status_str}\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🪙</tg-emoji> توکن: <b>{symbol}</b>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📍</tg-emoji> آدرس قرارداد:\n<code>{token_addr}</code>\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">💵</tg-emoji> نقطه ورود دقیق: <code>${price:.8f}</code>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">💰</tg-emoji> مقدار خرید: <code>SOL {current_buy_amt}</code> (داینامیک)\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🎯</tg-emoji> تارگت سود: <code>${target_tp_val:.8f}</code> (+<code>%{GOLDEN_TAKE_PROFIT}</code>)\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🛑</tg-emoji> حد ضرر: <code>${target_sl_val:.8f}</code> (<code>%{GOLDEN_STOP_LOSS}</code>)\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +<code>%{price_change_5m:.2f}</code>\n"
-                            f"🔹 حجم معاملاتی: <code>${volume_5m:,.0f}</code>\n"
-                            f"🔹 نقدینگی: <code>${liquidity:,.0f}</code>\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> <b>لینک‌های توکن:</b>\n"
-                            f"🔍 <a href=\"{solscan_link}\">Solscan</a>\n"
-                            f"📈 <a href=\"https://dexscreener.com/solana/{token_addr}\">DexScreener</a>"
+                            f"🚀🔥 سیگنال گزینه طلایی VIP\n"
+                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
+                            f"🎯 تارگت سود: ${target_tp_val:.8f} (+%{GOLDEN_TAKE_PROFIT})\n"
+                            f"🛑 حد ضرر: ${target_sl_val:.8f} (%{GOLDEN_STOP_LOSS})\n\n"
+                            f"📊 آمار لحظه‌ای بازار:\n"
+                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
+                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                            f"🔗 لینک‌های توکن:\n"
+                            f"🔍 [Solscan]({solscan_link})\n"
+                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                         )
                         active_positions[token_addr] = {
                             "entry_price": price,
@@ -974,7 +974,7 @@ def unified_market_scanner_loop(app):
                             liquidity=liquidity,
                             p_change=price_change_5m,
                             solscan_link=solscan_link,
-                            signal_title="<tg-emoji emoji-id=\"5368324170671202286\">🚀</tg-emoji><tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> <b>سیگنال گزینه طلایی VIP</b>"
+                            signal_title="🚀🔥 سیگنال گزینه طلایی VIP"
                         )
                         continue
 
@@ -988,28 +988,28 @@ def unified_market_scanner_loop(app):
 
                         current_buy_amt = get_dynamic_buy_amount(COMBO_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, COMBO_BUY_AMOUNT_SOL)
-                        buy_status_str = "انجام شد (موفق روی بلاکچین <tg-emoji emoji-id=\"5368324170671202286\">✅</tg-emoji>)" if success else f"{result_info}"
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = price * (1 + (COMBO_TAKE_PROFIT / 100))
                         target_sl_val = price * (1 + (COMBO_STOP_LOSS / 100))
 
                         combo_msg = (
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🚨</tg-emoji> <b>سیگنال خرید ترکیبی ترند VIP</b>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📌</tg-emoji> وضعیت خرید: {buy_status_str}\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🪙</tg-emoji> توکن: <b>{symbol}</b>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📍</tg-emoji> آدرس قرارداد:\n<code>{token_addr}</code>\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">💵</tg-emoji> نقطه ورود دقیق: <code>${price:.8f}</code>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">💰</tg-emoji> مقدار خرید: <code>SOL {current_buy_amt}</code> (داینامیک)\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🎯</tg-emoji> تارگت سود: <code>${target_tp_val:.8f}</code> (+<code>%{COMBO_TAKE_PROFIT}</code>)\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🛑</tg-emoji> حد ضرر: <code>${target_sl_val:.8f}</code> (<code>%{COMBO_STOP_LOSS}</code>)\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +<code>%{price_change_5m:.2f}</code>\n"
-                            f"🔹 حجم معاملاتی: <code>${volume_5m:,.0f}</code>\n"
-                            f"🔹 نقدینگی: <code>${liquidity:,.0f}</code>\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> <b>لینک‌های توکن:</b>\n"
-                            f"🔍 <a href=\"{solscan_link}\">Solscan</a>\n"
-                            f"📈 <a href=\"https://dexscreener.com/solana/{token_addr}\">DexScreener</a>"
+                            f"🚨 سیگنال خرید ترکیبی ترند VIP\n"
+                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
+                            f"🎯 تارگت سود: ${target_tp_val:.8f} (+%{COMBO_TAKE_PROFIT})\n"
+                            f"🛑 حد ضرر: ${target_sl_val:.8f} (%{COMBO_STOP_LOSS})\n\n"
+                            f"📊 آمار لحظه‌ای بازار:\n"
+                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
+                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                            f"🔗 لینک‌های توکن:\n"
+                            f"🔍 [Solscan]({solscan_link})\n"
+                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                         )
                         active_positions[token_addr] = {
                             "entry_price": price,
@@ -1030,7 +1030,7 @@ def unified_market_scanner_loop(app):
                             liquidity=liquidity,
                             p_change=price_change_5m,
                             solscan_link=solscan_link,
-                            signal_title="<tg-emoji emoji-id=\"5368324170671202286\">🚨</tg-emoji> <b>سیگنال خرید ترکیبی ترند VIP</b>"
+                            signal_title="🚨 سیگنال خرید ترکیبی ترند VIP"
                         )
                         continue
 
@@ -1043,28 +1043,28 @@ def unified_market_scanner_loop(app):
                         current_buy_amt = get_dynamic_buy_amount(FIRE_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
                         
-                        buy_status_str = "انجام شد (موفق روی بلاکچین <tg-emoji emoji-id=\"5368324170671202286\">✅</tg-emoji>)" if success else f"{result_info}"
+                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
                         target_tp_val = price * (1 + (FIRE_TAKE_PROFIT / 100))
                         target_sl_val = price * (1 + (FIRE_STOP_LOSS / 100))
 
                         msg = (
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> <b>سیگنال خرید خودکار VIP</b>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📌</tg-emoji> وضعیت خرید: {buy_status_str}\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🪙</tg-emoji> توکن: <b>{symbol}</b>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📍</tg-emoji> آدرس قرارداد:\n<code>{token_addr}</code>\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">💵</tg-emoji> نقطه ورود دقیق: <code>${price:.8f}</code>\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">💰</tg-emoji> مقدار خرید: <code>SOL {current_buy_amt}</code> (داینامیک)\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🎯</tg-emoji> تارگت سود: <code>${target_tp_val:.8f}</code> (+<code>%{FIRE_TAKE_PROFIT}</code>)\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🛑</tg-emoji> حد ضرر: <code>${target_sl_val:.8f}</code> (<code>%{FIRE_STOP_LOSS}</code>)\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">📊</tg-emoji> آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +<code>%{price_change_5m:.2f}</code>\n"
-                            f"🔹 حجم معاملاتی: <code>${volume_5m:,.0f}</code>\n"
-                            f"🔹 نقدینگی: <code>${liquidity:,.0f}</code>\n\n"
-                            f"<tg-emoji emoji-id=\"5368324170671202286\">🔗</tg-emoji> <b>لینک‌های توکن:</b>\n"
-                            f"🔍 <a href=\"{solscan_link}\">Solscan</a>\n"
-                            f"📈 <a href=\"https://dexscreener.com/solana/{token_addr}\">DexScreener</a>"
+                            f"🔥 سیگنال خرید خودکار VIP\n"
+                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
+                            f"🪙 توکن: {symbol}\n"
+                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
+                            f"🎯 تارگت سود: ${target_tp_val:.8f} (+%{FIRE_TAKE_PROFIT})\n"
+                            f"🛑 حد ضرر: ${target_sl_val:.8f} (%{FIRE_STOP_LOSS})\n\n"
+                            f"📊 آمار لحظه‌ای بازار:\n"
+                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
+                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
+                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
+                            f"🔗 لینک‌های توکن:\n"
+                            f"🔍 [Solscan]({solscan_link})\n"
+                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                         )
                         
                         active_positions[token_addr] = {
@@ -1086,7 +1086,7 @@ def unified_market_scanner_loop(app):
                             liquidity=liquidity,
                             p_change=price_change_5m,
                             solscan_link=solscan_link,
-                            signal_title="<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> <b>سیگنال خرید خودکار VIP</b>"
+                            signal_title="🔥 سیگنال خرید خودکار VIP"
                         )
 
         except Exception as e:
@@ -1372,17 +1372,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         stats_text = (
-            f"📊 <b>آمار تحلیلی و گزارش پورتفو:</b>\n\n"
+            f"📊 آمار تحلیلی و گزارش پورتفو:\n\n"
             f"🔹 کل معاملات انجام شده: {total_trades}\n"
             f"📈 مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
             f"💵 درآمد/ضرر دلاری کل: ${total_u:+.2f}\n\n"
-            f"📉 <b>نمودار روند عملکرد:</b>\n<code>[{chart_bars}]</code>\n\n"
-            f"🏆 <b>برترین معاملات ثبت‌شده:</b>\n"
+            f"📉 نمودار روند عملکرد:\n[{chart_bars}]\n\n"
+            f"🏆 برترین معاملات ثبت‌شده:\n"
         )
         for t in best_trades:
             stats_text += f"🪙 {t[0]} : {t[1]:+.2f}% (در {t[2]})\n"
 
-        await update.message.reply_text(stats_text, parse_mode="HTML")
+        await update.message.reply_text(stats_text, parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ خطا در دریافت آمار: {e}")
 
@@ -1391,19 +1391,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AWAITING_STATE = None
     user_id = str(update.effective_user.id)
     
-    welcome_text = '<tg-emoji emoji-id="5368324170671202286">🤖</tg-emoji> <b>اتاق کنترل ربات ترید و کپی‌تریدینگ:</b>'
-    
     if user_id == str(TELEGRAM_CHAT_ID):
-        await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+        await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ:", reply_markup=get_main_keyboard())
     else:
         user_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 ورود به مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))]
         ])
         await update.message.reply_text(
             "👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.\n\n"
-            "🔗 برای اتصال ولت خود و دریافت سرویس کپی‌تریدینگ VIP، روی دکمه زیر کلیک کنید:",
-            reply_markup=user_keyboard,
-            parse_mode="HTML"
+            "برای اتصال ولت خود و دریافت سرویس کپی‌تریدینگ VIP، روی دکمه زیر کلیک کنید:",
+            reply_markup=user_keyboard
         )
 
 async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1413,8 +1410,8 @@ async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
-            "❌ فرمت اشتباه! استفاده صحیح:\n\n<code>/free آیدی_تلگرام آدرس_ولت</code>", 
-            parse_mode="HTML"
+            "❌ فرمت اشتباه! استفاده صحیح:\n\n/free آیدی_تلگرام آدرس_ولت", 
+            parse_mode="Markdown"
         )
         return
     
@@ -1423,9 +1420,9 @@ async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     success = register_free_vip(t_id, wallet)
     if success:
-        await update.message.reply_text(f"✅ کاربر با آیدی <code>{t_id}</code> به صورت رایگان و ویژه (VIP) ثبت شد!", parse_mode="HTML")
+        await update.message.reply_text(f"✅ کاربر با آیدی {t_id} به صورت رایگان و ویژه (VIP) ثبت شد!", parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ خطا در ثبت کاربر رایگان در دیتابیس.", parse_mode="HTML")
+        await update.message.reply_text("❌ خطا در ثبت کاربر رایگان در دیتابیس.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE, COPY_TRADING_ENABLED, AWAITING_STATE
@@ -1446,72 +1443,72 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "toggle_smart_filter":
         SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
         try:
-            await query.edit_message_text("🛡️ فیلتر هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🛡️ فیلتر هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except Exception:
             pass
     elif query.data == "toggle_risk":
         DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
         try:
-            await query.edit_message_text("⚖️ مدیریت ریسک داینامیک تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("⚖️ مدیریت ریسک داینامیک تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_sync":
         SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
         try:
-            await query.edit_message_text("⚡ ابرسیگنال هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("⚡ ابرسیگنال هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_copy":
         COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
         try:
-            await query.edit_message_text("🔗 کپی‌تریدینگ VIP تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🔗 کپی‌تریدینگ VIP تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_manual":
         MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
         try:
-            await query.edit_message_text("⚙️ تنظیمات دستی تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("⚙️ تنظیمات دستی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_technical":
         TECHNICAL_RUNNING = not TECHNICAL_RUNNING
         try:
-            await query.edit_message_text("📊 موتور پرایس اکشن تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("📊 موتور پرایس اکشن تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
         try:
-            await query.edit_message_text("🚀 گزینه طلایی تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🚀 گزینه طلایی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_combo":
         COMBO_RUNNING = not COMBO_RUNNING
         try:
-            await query.edit_message_text("🚨 حالت ترکیبی تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🚨 حالت ترکیبی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_trader":
         IS_RUNNING = not IS_RUNNING
         try:
-            await query.edit_message_text("🔥 خرید و فروش خودکار تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🔥 خرید و فروش خودکار تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "toggle_trend":
         TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
         try:
-            await query.edit_message_text("🚨 اعلان ترند تغییر وضعیت داد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🚨 اعلان ترند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "refresh_pnl":
         try:
-            await query.edit_message_text("🤖 بروزرسانی آمار سود/زیان:", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🤖 بروزرسانی آمار سود/زیان:", reply_markup=get_main_keyboard())
         except:
             pass
     elif query.data == "status":
         status_text = (
-            f"📊 <b>وضعیت کامل سیستم:</b>\n\n"
-            f"🔑 <b>آدرس ولت متصل:</b>\n<code>{WALLET_PUBKEY}</code>\n\n"
+            f"📊 وضعیت کامل سیستم:\n\n"
+            f"🔑 آدرس ولت متصل:\n{WALLET_PUBKEY}\n\n"
             f"🛡️ فیلتر هوشمند: {'🟢 روشن' if SMART_FILTER_ENABLED else '🔴 خاموش'}\n"
             f"⚡ ابرسیگنال: {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
             f"🔗 کپی‌تریدینگ VIP: {'🟢 روشن' if COPY_TRADING_ENABLED else '🔴 خاموش'}\n"
@@ -1519,13 +1516,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 موجودی ولت ادمین: {get_sol_balance():.4f} SOL"
         )
         try:
-            await query.edit_message_text(status_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text(status_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
         except:
             send_telegram_msg(status_text)
     elif query.data == "wallet_balance":
         balance_text = f"💰 موجودی لحظه‌ای ولت ادمین: {get_sol_balance():.4f} SOL"
         try:
-            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
         except:
             pass
 
@@ -1568,14 +1565,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "cancel_input":
         AWAITING_STATE = None
         try:
-            await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
         except:
             pass
 
 async def prompt_input(query, prefix, cur_val):
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
     try:
-        await query.edit_message_text(f"{prefix} فعلی: {cur_val}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb, parse_mode="HTML")
+        await query.edit_message_text(f"{prefix} فعلی: {cur_val}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
     except:
         pass
 
@@ -1609,11 +1606,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             msg = f"✅ تنظیمات با موفقیت به {val} بروزرسانی شد."
             AWAITING_STATE = None
-            await update.message.reply_text(msg, reply_markup=get_main_keyboard(), parse_mode="HTML")
+            await update.message.reply_text(msg, reply_markup=get_main_keyboard())
         except ValueError:
-            await update.message.reply_text("❌ عدد نامعتبر است. مجدد وارد کنید:", parse_mode="HTML")
+            await update.message.reply_text("❌ عدد نامعتبر است. مجدد وارد کنید:")
     else:
-        await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard(), parse_mode="HTML")
+        await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
 
 if __name__ == "__main__":
     web_thread = Thread(target=run_web)
