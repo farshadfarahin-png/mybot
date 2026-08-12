@@ -28,6 +28,7 @@ WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://your-render-or-hosting-url.co
 
 RPC_URL = os.environ.get("RPC_URL", "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80")
 SOL_MINT = "So11111111111111111111111111111111111111112"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" 
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
 # سوئیچ‌های کنترلی ربات
@@ -42,22 +43,18 @@ MANUAL_SETTINGS_ENABLED = False
 SYNCHRONIZED_MODE = False   
 COPY_TRADING_ENABLED = True   
 
-# موتور جدید: کف معتبر و نهنگ (پیش‌فرض روشن)
 BOTTOM_WHALE_RUNNING = True
 
-# سوئیچ‌های ساختاری سیستم هالکی
 ULTIMATE_21_ENGINE_ENABLED = True
 SELF_LEARNING_AI_ENABLED = True
 MEMPOOL_SMART_MONEY_ENABLED = True
 MOONBAG_HULK_ENABLED = True
 ANTI_WASH_TRADING_ENABLED = True
 
-# 🌟 ۳ لایه جدید برای دقت ۹۹ درصدی و سود تضمینی
 SMART_MONEY_COPY_ENABLED = True      
 SOCIAL_SENTIMENT_ENABLED = True      
 DYNAMIC_TRAILING_TP_ENABLED = True   
 
-# وضعیت باز/بسته بودن دسته‌بندی‌های منوی شیشه‌ای (تاشو)
 SECTION_ULTRA_OPEN = True
 SECTION_VIP_OPEN = True
 SECTION_PROTECTION_OPEN = True
@@ -156,6 +153,42 @@ def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason)
     except Exception as e:
         print(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}")
 
+def get_advanced_trade_analytics():
+    try:
+        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*), SUM(pnl_percent), SUM(pnl_usd), AVG(pnl_percent) FROM trades")
+        res = cursor.fetchone()
+        total_trades = res[0] or 0
+        total_pct = res[1] or 0.0
+        total_usd = res[2] or 0.0
+        avg_pct = res[3] or 0.0
+
+        cursor.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent > 0")
+        win_count = cursor.fetchone()[0] or 0
+        win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
+
+        cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 1")
+        best_trade = cursor.fetchone()
+
+        cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent ASC LIMIT 1")
+        worst_trade = cursor.fetchone()
+        conn.close()
+
+        return {
+            "total_trades": total_trades,
+            "total_pct": round(total_pct, 2),
+            "total_usd": round(total_usd, 2),
+            "avg_pct": round(avg_pct, 2),
+            "win_rate": round(win_rate, 2),
+            "win_count": win_count,
+            "best_trade": best_trade,
+            "worst_trade": worst_trade
+        }
+    except Exception as e:
+        print(f"⚠️ خطا در گزارش‌گیری پیشرفته: {e}")
+        return {"total_trades": 0, "total_pct": 0.0, "total_usd": 0.0, "avg_pct": 0.0, "win_rate": 0.0, "win_count": 0, "best_trade": None, "worst_trade": None}
+
 def self_learning_ai_optimizer_loop():
     global FIRE_MIN_LIQUIDITY, COMBO_MIN_LIQUIDITY, GOLDEN_MIN_LIQUIDITY
     print("🧠 موتور هوش مصنوعی یادگیرنده (Self-Learning AI) فعال شد.")
@@ -196,6 +229,32 @@ def check_social_sentiment_and_hype(pair):
         return False, "رد شده در لایه سنتیمنت"
     except:
         return True, "گذر از فیلتر سنتیمنت"
+
+def get_real_market_trending_tokens():
+    tokens = []
+    try:
+        url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
+        res = requests.get(url_boost, timeout=4).json()
+        if isinstance(res, list):
+            for t in res:
+                if t.get('chainId') == 'solana':
+                    addr = t.get('tokenAddress')
+                    if addr and addr not in tokens:
+                        tokens.append(addr)
+    except Exception:
+        pass
+
+    try:
+        latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
+        res_latest = requests.get(latest_url, timeout=4).json()
+        for p in res_latest.get("pairs", []):
+            if p.get("chainId") == "solana":
+                addr = p.get("baseToken", {}).get("address")
+                if addr and addr not in tokens:
+                    tokens.append(addr)
+    except Exception:
+        pass
+    return tokens
 
 def ultra_accuracy_scanner_loop(app):
     global SMART_MONEY_COPY_ENABLED, SOCIAL_SENTIMENT_ENABLED, DYNAMIC_TRAILING_TP_ENABLED
@@ -337,6 +396,46 @@ def mempool_smart_money_scanner_loop(app):
             print(f"⚠️ خطای اسکن ممپول: {e}")
         time.sleep(5)
 
+# سیستم جدید و واقعی بررسی تراکنش روی بلاکچین (On-Chain Verification)
+def verify_blockchain_transaction(tx_signature, expected_currency="SOL"):
+    if not tx_signature or len(tx_signature) < 30:
+        return False, "هش تراکنش نامعتبر است."
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                tx_signature,
+                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
+            ]
+        }
+        res = requests.post(RPC_URL, json=payload, timeout=5).json()
+        result = res.get("result")
+        if not result:
+            return False, "تراکنش روی بلاکچین یافت نشد یا هنوز تایید نشده است."
+        
+        meta = result.get("meta", {})
+        if meta.get("err") is not None:
+            return False, "تراکنش روی بلاکچین با خطا مواجه شده است (Failed Tx)."
+            
+        # بررسی اینکه آیا به ولت ادمین واریز انجام شده یا خیر
+        account_keys = result.get("transaction", {}).get("message", {}).get("accountKeys", [])
+        admin_wallet_found = False
+        for acc in account_keys:
+            pubkey_str = acc.get("pubkey") if isinstance(acc, dict) else str(acc)
+            if pubkey_str == WALLET_PUBKEY:
+                admin_wallet_found = True
+                break
+                
+        if not admin_wallet_found:
+            return False, "این تراکنش به ولت صرافی/پلتفرم شما واریز نشده است."
+
+        return True, "تراکنش با موفقیت روی بلاکچین تأیید شد ✅"
+    except Exception as e:
+        print(f"⚠️ خطا در استعلام بلاکچین: {e}")
+        return False, f"خطا در ارتباط با شبکه سولانا: {e}"
+
 def check_user_subscription(telegram_id):
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
@@ -425,7 +524,7 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
     except Exception as e:
         print(f"❌ خطا در ارسال سیگنال گرافیکی به کانال: {e}")
 
-def register_subscription(telegram_id, wallet_addr, tx_sig):
+def register_subscription(telegram_id, wallet_addr, tx_sig, currency="SOL"):
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
         cursor = conn.cursor()
@@ -433,12 +532,12 @@ def register_subscription(telegram_id, wallet_addr, tx_sig):
         cursor.execute("""
             INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
             VALUES (?, ?, ?, ?, 'ACTIVE')
-        """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), tx_sig))
+        """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), f"{currency}:{tx_sig}"))
         conn.commit()
         conn.close()
         
         success_msg = (
-            f"🎉 اشتراک ۳۰ روزه VIP شما با موفقیت فعال شد!\n\n"
+            f"🎉 اشتراک ۳۰ روزه VIP شما با موفقیت پس از تایید تراکنش بلاکچین ({currency}) فعال شد!\n\n"
             f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
             f"📢 برای دریافت لحظه‌ای سیگنال‌ها و گزارش‌های گرافیکی، از طریق لینک زیر وارد کانال VIP شوید:\n\n"
             f"{CHANNEL_INVITE_LINK}"
@@ -584,32 +683,6 @@ def is_token_worthy(pair):
         return True
     except:
         return False
-
-def get_real_market_trending_tokens():
-    tokens = []
-    try:
-        url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
-        res = requests.get(url_boost, timeout=4).json()
-        if isinstance(res, list):
-            for t in res:
-                if t.get('chainId') == 'solana':
-                    addr = t.get('tokenAddress')
-                    if addr and addr not in tokens:
-                        tokens.append(addr)
-    except Exception:
-        pass
-
-    try:
-        latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-        res_latest = requests.get(latest_url, timeout=4).json()
-        for p in res_latest.get("pairs", []):
-            if p.get("chainId") == "solana":
-                addr = p.get("baseToken", {}).get("address")
-                if addr and addr not in tokens:
-                    tokens.append(addr)
-    except Exception:
-        pass
-    return tokens
 
 def check_major_support_resistance_pa(pair):
     try:
@@ -1320,7 +1393,8 @@ def home():
             .badge { background: #22c55e; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }
             .btn { background: #0284c7; color: white; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 10px; text-align: center; display: block; text-decoration: none; box-sizing: border-box; }
             .btn-pay { background: #10b981; }
-            input { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }
+            input, select { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }
+            .wallet-box { background: #0f172a; padding: 10px; border-radius: 8px; border: 1px dashed #38bdf8; text-align: center; margin-bottom: 10px; }
         </style>
     </head>
     <body>
@@ -1354,27 +1428,44 @@ def home():
                     `;
                 } else {
                     area.innerHTML = `
-                        <p>وضعیت سیستم: <span class="badge">آنلاین (Hulk Mode Active)</span></p>
-                        <p style="word-break: break-all; font-size:11px;">🔑 ولت: <code>{{ wallet }}</code></p>
+                        <p>وضعیت سیستم: <span class="badge">آنلاین (پرداخت امن بلاکچین)</span></p>
+                        <div class="wallet-box">
+                            <p style="font-size:11px; margin:0 0 5px 0; color:#38bdf8;">لطفاً مبلغ اشتراک را به ولت زیر واریز کنید:</p>
+                            <code style="word-break: break-all; font-size:11px; color:#facc15;">{{ wallet }}</code>
+                        </div>
                         <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه VIP ($100)</h3>
-                        <input type="text" id="userTelegramId" value="${telegramId}" placeholder="آیدی تلگرام">
-                        <input type="text" id="userWallet" placeholder="آدرس ولت سولانا">
-                        <button class="btn btn-pay" onclick="paySubscription()">پرداخت و فعال‌سازی اشتراک</button>
+                        <label style="font-size:11px; color:#94a3b8;">انتخاب ارز پرداخت:</label>
+                        <select id="paymentCurrency">
+                            <option value="SOL">پرداخت با ارز SOL (سولانا)</option>
+                            <option value="USDC">پرداخت با ارز USDC (تتر)</option>
+                        </select>
+                        <input type="text" id="userTelegramId" value="${telegramId}" placeholder="آیدی تلگرام شما">
+                        <input type="text" id="userWallet" placeholder="آدرس ولت فرستنده شما">
+                        <input type="text" id="txSignature" placeholder="هش تراکنش (TxID) واریز شده را اینجا وارد کنید">
+                        <button class="btn btn-pay" onclick="verifyAndPay()">تایید و فعال‌سازی خودکار اشتراک</button>
                     `;
                 }
             });
 
-            function paySubscription() {
+            function verifyAndPay() {
                 const tId = document.getElementById('userTelegramId').value;
                 const wallet = document.getElementById('userWallet').value;
-                if(!tId || !wallet) { alert('فیلدها را پر کنید!'); return; }
+                const txSig = document.getElementById('txSignature').value;
+                const currency = document.getElementById('paymentCurrency').value;
+                if(!tId || !wallet || !txSig) { alert('لطفاً تمام فیلدها از جمله هش تراکنش (TxID) را وارد کنید!'); return; }
+                
+                alert('در حال استعلام و تایید تراکنش روی بلاکچین سولانا...');
                 fetch('/api/subscribe', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({telegram_id: tId, wallet_address: wallet})
+                    body: JSON.stringify({telegram_id: tId, wallet_address: wallet, tx_signature: txSig, currency: currency})
                 }).then(res => res.json()).then(data => {
                     alert(data.message);
-                    location.reload();
+                    if(data.status === 'success') {
+                        location.reload();
+                    }
+                }).catch(err => {
+                    alert('خطا در ارتباط با سرور تایید تراکنش.');
                 });
             }
         </script>
@@ -1388,18 +1479,35 @@ def admin_panel():
     t_id = request.args.get("telegram_id", "")
     if not t_id or str(t_id) != str(TELEGRAM_CHAT_ID):
         return "<h3 style='color:red; text-align:center;'>⛔ دسترسی غیرمجاز!</h3>"
+    
     subs = get_active_subscribers()
+    analytics = get_advanced_trade_analytics()
+
+    best_str = f"🪙 {analytics['best_trade'][0]} ({analytics['best_trade'][1]:+.2f}%)" if analytics['best_trade'] else "ثبت نشده"
+    worst_str = f"🪙 {analytics['worst_trade'][0]} ({analytics['worst_trade'][1]:+.2f}%)" if analytics['worst_trade'] else "ثبت نشده"
+
     admin_html = f"""
     <!DOCTYPE html>
     <html lang="fa" dir="rtl">
-    <head><meta charset="UTF-8"><title>پنل ادمین هالکی</title></head>
-    <body style="background:#0f172a;color:#fff;text-align:center;font-family:Tahoma;padding:20px;">
-        <div style="background:#1e293b;padding:20px;border-radius:12px;max-width:480px;margin:auto;text-align:right;">
-            <h1 style="color:#a855f7;text-align:center;">👑 پنل مدیریت ادمین هالکی</h1>
-            <p>👥 کاربران فعال VIP: <b>{len(subs)}</b></p>
+    <head><meta charset="UTF-8"><title>پنل ادمین و گزارش پیشرفته هالکی</title></head>
+    <body style="background:#0f172a;color:#fff;text-align:center;font-family:Tahoma;padding:15px;">
+        <div style="background:#1e293b;padding:20px;border-radius:12px;max-width:500px;margin:auto;text-align:right;">
+            <h1 style="color:#a855f7;text-align:center;">👑 پنل مدیریت و گزارش پیشرفته</h1>
+            
+            <div style="background:#0f172a;padding:12px;border-radius:8px;margin-bottom:15px;border:1px solid #334155;">
+                <h3 style="color:#38bdf8;margin-top:0;font-size:14px;text-align:center;">📊 آمار جامع عملکرد ربات</h3>
+                <p>🔹 کل معاملات ثبت‌شده: <b>{analytics['total_trades']}</b></p>
+                <p>📈 مجموع سود/زیان درصدی: <b style="color:#22c55e;">{analytics['total_pct']:+.2f}%</b></p>
+                <p>💵 مجموع سود/زیان دلاری: <b style="color:#22c55e;">${analytics['total_usd']:+.2f}</b></p>
+                <p>🎯 نرخ موفقیت (Win Rate): <b style="color:#38bdf8;">{analytics['win_rate']}%</b></p>
+                <p>🏆 بهترین معامله: <b style="color:#22c55e;">{best_str}</b></p>
+                <p>📉 بدترین معامله: <b style="color:#ef4444;">{worst_str}</b></p>
+            </div>
+
+            <p>👥 کاربران فعال VIP (تایید شده از بلاکچین): <b>{len(subs)}</b></p>
     """
     for sub in subs:
-        admin_html += f"<div style='background:#0f172a;padding:8px;margin:5px 0;border-radius:6px;font-size:12px;'>🆔 {sub['telegram_id']} | 🔑 {sub['wallet']}</div>"
+        admin_html += f"<div style='background:#0f172a;padding:8px;margin:5px 0;border-radius:6px;font-size:11px;'>🆔 {sub['telegram_id']} | 🔑 {sub['wallet']}</div>"
     admin_html += "</div></body></html>"
     return admin_html
 
@@ -1417,11 +1525,29 @@ def api_check_status():
 @web_app.route('/api/subscribe', methods=['POST'])
 def api_subscribe():
     data = request.json
-    t_id, wallet = data.get("telegram_id"), data.get("wallet_address")
-    if t_id and wallet:
-        register_subscription(t_id, wallet, "AUTO_VERIFIED_TX")
-        return jsonify({"status": "success", "message": "اشتراک فعال شد!"})
-    return jsonify({"status": "error", "message": "اطلاعات ناقص است"})
+    t_id = data.get("telegram_id")
+    wallet = data.get("wallet_address")
+    tx_signature = data.get("tx_signature")
+    currency = data.get("currency", "SOL")
+    
+    if not t_id or not wallet or not tx_signature:
+        return jsonify({"status": "error", "message": "اطلاعات ناقص است یا هش تراکنش وارد نشده است."})
+        
+    # استعلام واقعی تراکنش از شبکه بلاکچین
+    is_valid, verify_msg = verify_blockchain_transaction(tx_signature, currency)
+    if not is_valid:
+        return jsonify({"status": "error", "message": f"تایید تراکنش ناموفق بود: {verify_msg}"})
+        
+    # ثبت نام کاربر پس از تایید قطعی بلاکچین
+    success = register_subscription(t_id, wallet, tx_signature, currency)
+    if success:
+        return jsonify({"status": "success", "message": "تراکنش با موفقیت روی بلاکچین تایید و اشتراک VIP فعال شد!"})
+    else:
+        return jsonify({"status": "error", "message": "خطا در ثبت نهایی اشتراک در دیتابیس."})
+
+@web_app.route('/api/advanced-reports')
+def api_advanced_reports():
+    return jsonify(get_advanced_trade_analytics())
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -1448,7 +1574,6 @@ def get_main_keyboard():
     hulk_moon_status = f"💪🟢 موم‌بگ هالکی (۸۰/۲۰): {s(MOONBAG_HULK_ENABLED)}"
     wash_status = f"🛡️🟢 ضد حجم فیک (Wash Shield): {s(ANTI_WASH_TRADING_ENABLED)}"
 
-    # وضعیت ۳ لایه جدید
     smart_money_copy_status = f"🎯 اسمارت‌مانی کپی‌اسنایپر: {s(SMART_MONEY_COPY_ENABLED)}"
     social_sentiment_status = f"📈 سنتیمنت و هجوم هایپ: {s(SOCIAL_SENTIMENT_ENABLED)}"
     dynamic_trailing_status = f"📊 تریلینگ استاپ پویا (۹۹٪): {s(DYNAMIC_TRAILING_TP_ENABLED)}"
@@ -1478,7 +1603,6 @@ def get_main_keyboard():
 
     keyboard = []
 
-    # 1. بخش جدید (💎): استراتژی‌های تضمینی (دقت ۹۹٪) - تاشو
     ultra_arrow = "🔽" if SECTION_ULTRA_OPEN else "◀️"
     keyboard.append([InlineKeyboardButton(f"💎 استراتژی‌های تضمینی (دقت ۹۹٪) {ultra_arrow}", callback_data="toggle_sec_ultra")])
     if SECTION_ULTRA_OPEN:
@@ -1486,15 +1610,13 @@ def get_main_keyboard():
         keyboard.append([InlineKeyboardButton(social_sentiment_status, callback_data="toggle_social_sentiment")])
         keyboard.append([InlineKeyboardButton(dynamic_trailing_status, callback_data="toggle_dynamic_trailing")])
 
-    # 2. بخش دوم (بنفش): مدیریت و دسترسی VIP (تاشو)
     vip_arrow = "🔽" if SECTION_VIP_OPEN else "◀️"
     keyboard.append([InlineKeyboardButton(f"👑 مدیریت و دسترسی VIP {vip_arrow}", callback_data="toggle_sec_vip")])
     if SECTION_VIP_OPEN:
-        keyboard.append([InlineKeyboardButton("👑 پنل مدیریت و لیست کاربران VIP", web_app=WebAppInfo(url=admin_webapp_url))])
-        keyboard.append([InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
+        keyboard.append([InlineKeyboardButton("👑 پنل گزارش پیشرفته و مدیریت", web_app=WebAppInfo(url=admin_webapp_url))])
+        keyboard.append([InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و درگاه ارزی", web_app=WebAppInfo(url=WEBAPP_URL))])
         keyboard.append([InlineKeyboardButton(copy_status, callback_data="toggle_copy")])
 
-    # 3. بخش سوم (آبی): لایه‌های حفاظتی و امنیتی (تاشو)
     prot_arrow = "🔽" if SECTION_PROTECTION_OPEN else "◀️"
     keyboard.append([InlineKeyboardButton(f"🛡️ لایه‌های حفاظتی و امنیتی {prot_arrow}", callback_data="toggle_sec_prot")])
     if SECTION_PROTECTION_OPEN:
@@ -1513,14 +1635,12 @@ def get_main_keyboard():
             InlineKeyboardButton(risk_status, callback_data="toggle_risk")
         ])
 
-    # 4. بخش چهارم (زرد): سیگنال‌های هوش مصنوعی و Vision (تاشو)
     ai_arrow = "🔽" if SECTION_AI_OPEN else "◀️"
     keyboard.append([InlineKeyboardButton(f"⚡ سیگنال‌های هوش مصنوعی و Vision {ai_arrow}", callback_data="toggle_sec_ai")])
     if SECTION_AI_OPEN:
         keyboard.append([InlineKeyboardButton(sync_status, callback_data="toggle_sync")])
         keyboard.append([InlineKeyboardButton(tech_status, callback_data="toggle_technical")])
 
-    # 5. بخش پنجم (قرمز): موتورها و استراتژی‌های معاملاتی (تاشو)
     trade_arrow = "🔽" if SECTION_TRADING_OPEN else "◀️"
     keyboard.append([InlineKeyboardButton(f"🚀 موتورها و استراتژی‌های معاملاتی {trade_arrow}", callback_data="toggle_sec_trade")])
     if SECTION_TRADING_OPEN:
@@ -1532,7 +1652,6 @@ def get_main_keyboard():
             InlineKeyboardButton(trend_status, callback_data="toggle_trend")
         ])
 
-    # بخش ثابت در پایین (بدون تغییر و همیشه نمایان)
     keyboard.append([
         InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
         InlineKeyboardButton("💰 موجودی ولت ادمین", callback_data="wallet_balance")
@@ -1574,25 +1693,26 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
     try:
+        analytics = get_advanced_trade_analytics()
+        total_trades = analytics['total_trades']
+        total_pct = analytics['total_pct']
+        total_u = analytics['total_usd']
+        win_rate = analytics['win_rate']
+
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*), SUM(pnl_percent), SUM(pnl_usd) FROM trades")
-        res = cursor.fetchone()
-        total_trades = res[0] or 0
-        total_pct = res[1] or 0.0
-        total_u = res[2] or 0.0
-
         cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 3")
         best_trades = cursor.fetchall()
-
-        chart_bars = "🟩" * min(int(max(total_pct, 0) // 5), 10) if total_pct >= 0 else "🟥" * min(int(abs(total_pct) // 5), 10)
         conn.close()
 
+        chart_bars = "🟩" * min(int(max(total_pct, 0) // 5), 10) if total_pct >= 0 else "🟥" * min(int(abs(total_pct) // 5), 10)
+
         stats_text = (
-            f"📊 آمار تحلیلی و گزارش پورتفو:\n\n"
+            f"📊 گزارش پیشرفته و عملکرد پورتفو:\n\n"
             f"🔹 کل معاملات انجام شده: {total_trades}\n"
             f"📈 مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
-            f"💵 درآمد/ضرر دلاری کل: ${total_u:+.2f}\n\n"
+            f"💵 درآمد/ضرر دلاری کل: ${total_u:+.2f}\n"
+            f"🎯 نرخ موفقیت (Win Rate): {win_rate}%\n\n"
             f"📉 نمودار روند عملکرد:\n[{chart_bars}]\n\n"
             f"🏆 برترین معاملات ثبت‌شده:\n"
         )
@@ -1611,7 +1731,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == str(TELEGRAM_CHAT_ID):
         await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ (نسخه هالکی شکست‌ناپذیر):", reply_markup=get_main_keyboard())
     else:
-        user_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))]])
+        user_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و درگاه ارزی VIP", web_app=WebAppInfo(url=WEBAPP_URL))]])
         await update.message.reply_text("👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.", reply_markup=user_keyboard)
 
 async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1647,7 +1767,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    # کنترل باز و بسته کردن دسته‌بندی‌ها (تاشو)
     if query.data == "toggle_sec_ultra":
         SECTION_ULTRA_OPEN = not SECTION_ULTRA_OPEN
     elif query.data == "toggle_sec_vip":
@@ -1846,5 +1965,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP (نسخه هالکی شکست‌ناپذیر با دقت ۹۹٪) با موفقیت اجرا شد.")
+    print("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP (نسخه هالکی شکست‌ناپذیر با دقت ۹۹٪ و درگاه ارزی متنوع) با موفقیت اجرا شد.")
     app.run_polling()
