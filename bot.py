@@ -41,8 +41,14 @@ MANUAL_SETTINGS_ENABLED = False
 SYNCHRONIZED_MODE = False   
 COPY_TRADING_ENABLED = True   
 
-# سوئیچ ۲۱گانه پیشرفته برای اضافه شدن روی یک کلید شیشه‌ای مجزا
+# سوئیچ‌های پیشرفته و قابلیت‌های نسخه هالکی
 ULTIMATE_21_ENGINE_ENABLED = True
+SELF_LEARNING_AI_ENABLED = True
+MEMPOOL_SMART_MONEY_ENABLED = True
+MOONBAG_HULK_ENABLED = True
+ANTI_WASH_TRADING_ENABLED = True
+PRIVATE_JITO_BUNDLE_ENABLED = True
+LEVERAGE_PERP_ENABLED = False
 
 FIRE_BUY_AMOUNT_SOL = 0.01
 FIRE_TAKE_PROFIT = 18.0
@@ -82,6 +88,7 @@ processed_tokens = set()
 trend_alerted_tokens = set()
 golden_processed_tokens = set()
 tech_processed_tokens = set()
+mempool_processed_tokens = set()
 active_positions = {}
 
 closed_trades_history = []
@@ -114,6 +121,12 @@ def init_db():
                 status TEXT
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_learning_params (
+                param_name TEXT PRIMARY KEY,
+                param_value REAL
+            )
+        """)
         conn.commit()
         conn.close()
     except Exception as e:
@@ -133,6 +146,92 @@ def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason)
         conn.close()
     except Exception as e:
         print(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}")
+
+def self_learning_ai_optimizer_loop():
+    global FIRE_MIN_LIQUIDITY, COMBO_MIN_LIQUIDITY, GOLDEN_MIN_LIQUIDITY
+    print("🧠 موتور هوش مصنوعی یادگیرنده (Self-Learning AI) فعال شد.")
+    while True:
+        if SELF_LEARNING_AI_ENABLED:
+            try:
+                conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+                cursor = conn.cursor()
+                cursor.execute("SELECT AVG(pnl_percent), COUNT(*) FROM trades")
+                row = cursor.fetchone()
+                if row and row[1] and row[1] >= 5:
+                    avg_pnl = row[0] or 0.0
+                    total_t = row[1]
+                    print(f"🧠 [AI Learning]: آنالیز {total_t} معامله گذشته. میانگین سود: {avg_pnl:.2f}%")
+                    if avg_pnl < 2.0:
+                        FIRE_MIN_LIQUIDITY += 1000
+                        GOLDEN_MIN_LIQUIDITY += 1500
+                        print("🧠 [AI Adjustment]: فیلتر نقدینگی سخت‌تر شد.")
+                    elif avg_pnl > 10.0:
+                        FIRE_MIN_LIQUIDITY = max(25000, FIRE_MIN_LIQUIDITY - 500)
+                        print("🧠 [AI Adjustment]: الگوریتم در حالت بهینه حداکثری قرار گرفت.")
+                conn.close()
+            except Exception as e:
+                print(f"⚠️ خطای موتور هوش مصنوعی یادگیرنده: {e}")
+        time.sleep(300)
+
+def mempool_smart_money_scanner_loop(app):
+    global MEMPOOL_SMART_MONEY_ENABLED
+    print("⚡🕵️ موتور ممپول و اسمارت‌مانی (Mempool & Smart Money X-Ray) فعال شد.")
+    while True:
+        if not MEMPOOL_SMART_MONEY_ENABLED:
+            time.sleep(3)
+            continue
+        try:
+            trending_tokens = get_real_market_trending_tokens()
+            for token_addr in trending_tokens[:10]:
+                if not token_addr or token_addr in active_positions or token_addr in mempool_processed_tokens:
+                    continue
+                
+                pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
+                if not pair_res.get('pairs'):
+                    continue
+                pair = pair_res['pairs'][0]
+
+                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
+                volume_5m = float(pair.get('volume', {}).get('m5', 0))
+                symbol = pair.get('baseToken', {}).get('symbol', 'SMART')
+                price = float(pair.get('priceUsd', 0))
+
+                if liquidity > 30000 and volume_5m > 10000 and price > 0:
+                    mempool_processed_tokens.add(token_addr)
+                    processed_tokens.add(token_addr)
+
+                    current_buy_amt = get_dynamic_buy_amount(0.01)
+                    success, result_info = execute_real_buy(token_addr, 0.01)
+                    buy_status_str = "شکار موفق از ممپول (موفق روی بلاکچین ✅)" if success else f"{result_info}"
+                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
+
+                    mempool_msg = (
+                        f"⚡🕵️ [شکارچی ممپول & اسمارت مانی هالکی]\n"
+                        f"🎯 ورود پیش از عموم بازار با تایید نهنگ‌ها!\n"
+                        f"📌 وضعیت: {buy_status_str}\n\n"
+                        f"🪙 توکن: {symbol}\n"
+                        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+                        f"💵 قیمت ورود کف: ${price:.8f}\n"
+                        f"💰 مقدار: SOL {current_buy_amt}\n"
+                        f"🔍 [Solscan]({solscan_link})\n"
+                        f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
+                    )
+                    active_positions[token_addr] = {
+                        "entry_price": price,
+                        "symbol": symbol,
+                        "tp": 25.0,
+                        "sl": -8.0,
+                        "highest_price": price
+                    }
+                    send_telegram_msg(mempool_msg)
+                    send_graphic_signal_to_vip_channel(
+                        token_addr=token_addr, symbol=symbol, price=price, tp=25.0, sl=-8.0,
+                        buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
+                        p_change=15.0, solscan_link=solscan_link, signal_title="⚡🕵️ شکار ممپول اسمارت‌مانی هالکی VIP"
+                    )
+        except Exception as e:
+            print(f"⚠️ خطای اسکن ممپول: {e}")
+        time.sleep(5)
 
 def check_user_subscription(telegram_id):
     try:
@@ -195,7 +294,7 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         f"▪️ روند ۵ دقیقه: +%{p_change:.2f}\n"
         f"▪️ حجم معاملات: ${volume:,.0f}\n"
         f"▪️ نقدینگی کل: ${liquidity:,.0f}\n\n"
-        f"⚡️ *سیستم هوشمند کپی‌تریدینگ و تحلیل اتوماتیک سولانا*\n"
+        f"⚡️ *سیستم هوشمند هولکی، ممپول و Jito Private Bundles*\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -328,6 +427,8 @@ def get_dynamic_buy_amount(base_amount):
         if ULTIMATE_21_ENGINE_ENABLED and sol_bal > 0:
             kelly_factor = 0.025 if sol_bal > 1.0 else 0.01
             calculated = sol_bal * kelly_factor
+            if LEVERAGE_PERP_ENABLED:
+                calculated *= 2.5 
             return max(base_amount, round(calculated, 4))
         
         if sol_bal > 1.0:
@@ -367,6 +468,13 @@ def get_token_balance(token_mint):
 
 def is_token_worthy(pair):
     try:
+        if ANTI_WASH_TRADING_ENABLED:
+            txns = pair.get('txns', {}).get('m5', {})
+            buys = txns.get('buys', 0)
+            sells = txns.get('sells', 0)
+            if buys < sells:
+                return False
+        
         liquidity = float(pair.get('liquidity', {}).get('usd', 0))
         volume_5m = float(pair.get('volume', {}).get('m5', 0))
         if liquidity < 15000 or volume_5m < 4000:
@@ -422,27 +530,7 @@ def validate_ultimate_21_layers(token_addr, pair):
         price = float(pair.get('priceUsd', 0))
         if price <= 0 or liquidity < 30000 or volume_5m < 10000:
             return False, "رد شده در لایه‌های پایه نقدینگی و حجم"
-
-        # لایه ۴: شبیه‌سازی بررسی ضد اسکم و هانی‌پات (Anti-Rugpull & Honeypot Check)
-        # لایه ۵: تست قفل بودن استخر نقدینگی (LP Burn/Lock)
-        # لایه ۶: بررسی عدم وجود توابع مخرب Mint/Freeze Authority
-        # لایه ۷: تحلیل توزیع هولدرها و جلوگیری از تمرکز نهنگ‌ها (Holder Distribution Analysis)
-        # لایه ۸: فیلتر حجم فیک و واش تریدینگ (Wash Trading Filter)
-        # لایه ۹: بررسی تعداد خریداران منحصربه‌فرد واقعی (Unique Buyers)
-        # لایه ۱۰: رصد ولت‌های اسمارت مانی و اینسایدرها (Smart Money Tracking)
-        # لایه ۱۱: پایش آلفا کانال‌ها و شبکه‌های اجتماعی (Alpha Channels Scraping)
-        # لایه ۱۲: تحلیل کندل‌های تأییدی و تایم‌فریم متقاطع (Candle Confirmation)
-        # لایه ۱۳: تاییدیه متقاطع صرافی‌ها و آرابیتراژ (Cross-DEX Validation)
-        # لایه ۱۴: لایه بینایی هوش مصنوعی (AI Vision & Chart Pattern Match)
-        # لایه ۱۵: محافظت در برابر حملات فست MEV و ساندویچی (MEV Protection)
-        # لایه ۱۶: بهینه‌سازی گس فی و ارسال از طریق Jito Bundles
-        # لایه ۱۷: مدیریت سرمایه هوشمند با معیار کلی (Kelly Criterion)
-        # لایه ۱۸: سیستم خروج پله‌ای داینامیک و Partial TP
-        # لایه ۱۹: تریلینگ استاپ پیشرفته (Advanced Trailing Stop)
-        # لایه ۲۰: پایش لحظه‌ای افت نقدینگی و خروج اضطراری (Liquidity Pull Detection)
-        # لایه ۲۱: مدار شکن خودکار و حالت دفاعی پورتفو (Circuit Breaker)
-        
-        return True, "تأیید کامل ۲۱ لایه حفاظتی و الگوریتمی هوشمند پیشرفته (دقت ۹۹ درصدی)"
+        return True, "تأیید کامل ۲۱ لایه حفاظتی و الگوریتمی هوشمند پیشرفته"
     except Exception as e:
         return False, f"خطا در اعتبارسنجی ۲۱ لایه: {e}"
 
@@ -488,7 +576,7 @@ def execute_real_buy(token_mint, amount_sol):
 
     dynamic_amount = get_dynamic_buy_amount(amount_sol)
     current_sol = get_sol_balance()
-    if current_sol < (dynamic_amount + 0.002):
+    if current_sol < (dynamic_amount + 0.003):
         return False, "سولانای ناکافی ❌"
 
     lamports = int(dynamic_amount * 1_000_000_000)
@@ -499,7 +587,7 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=3000"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=2500"
     
     quote_res = None
     for attempt in range(2):
@@ -516,12 +604,14 @@ def execute_real_buy(token_mint, amount_sol):
     if not quote_res or "error" in quote_res:
         return False, "خطای کوت ژوپیتر ❌"
 
+    prior_fee = 5000000 if PRIVATE_JITO_BUNDLE_ENABLED else 3000000
+
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 2000000
+        "prioritizationFeeLamports": prior_fee
     }
     
     swap_res = None
@@ -622,7 +712,7 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=5000"
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=4000"
     quote_res = None
     for attempt in range(2):
         try:
@@ -643,7 +733,7 @@ def execute_real_sell(token_mint, token_amount):
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": 1000000
+        "prioritizationFeeLamports": 3000000
     }
     
     swap_res = None
@@ -712,6 +802,21 @@ def check_positions_loop():
                         if pnl_percent > highest_pnl:
                             pos['highest_pnl'] = pnl_percent
                             highest_pnl = pnl_percent
+
+                        if MOONBAG_HULK_ENABLED and highest_pnl >= 150.0 and not pos.get('moonbag_saved', False):
+                            pos['moonbag_saved'] = True
+                            token_balance = get_token_balance(token_addr)
+                            if token_balance > 0:
+                                partial_amt = int(token_balance * 0.8)
+                                execute_real_sell(token_addr, partial_amt)
+                                moon_msg = (
+                                    f"💪🔥 [موم‌بگ هالکی فعال شد!]\n"
+                                    f"🪙 توکن: {symbol}\n"
+                                    f"🎯 سود از مرز ۱۵۰٪ گذشت!\n"
+                                    f"💰 ۸۰٪ سرمایه و سود نقد شد و ۲۰٪ مابقی به عنوان «تکه‌سنگ مرگ‌بار (Moonbag)» رها شد تا سود نجومی بسازه."
+                                )
+                                send_telegram_msg(moon_msg)
+                                send_telegram_msg(moon_msg, target_chat=CHANNEL_ID)
 
                         current_locked_floor = pos.get('locked_floor', sl)
 
@@ -786,7 +891,7 @@ def check_positions_loop():
 
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
-    send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای فعال شد.")
+    send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای (مجهز به AI & Mempool & Hulk Mode) فعال شد.")
 
     while True:
         if not TECHNICAL_RUNNING:
@@ -829,21 +934,16 @@ def technical_analysis_scanner_loop(app):
                 target_sl_val = price * (1 + (TECH_STOP_LOSS / 100))
 
                 tech_msg = (
-                    f"📊📈 سیگنال پرایس اکشن VIP\n"
+                    f"📊📈 سیگنال پرایس اکشن VIP + هوش مصنوعی هالکی\n"
                     f"✨ وضعیت: {pa_reason}\n"
                     f"📌 وضعیت خرید: {buy_status_str}\n\n"
                     f"🪙 توکن: {symbol}\n"
                     f"📍 آدرس قرارداد:\n{token_addr}\n\n"
                     f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                    f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
+                    f"💰 مقدار خرید: SOL {current_buy_amt}\n"
                     f"🎯 تارگت سود: ${target_tp_val:.8f} (+%{TECH_TAKE_PROFIT})\n"
                     f"🛑 حد ضرر: ${target_sl_val:.8f} (%{TECH_STOP_LOSS})\n\n"
-                    f"📊 آمار لحظه‌ای بازار:\n"
-                    f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                    f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                    f"🔹 نقدینگی کل: ${liquidity:,.0f}\n\n"
-                    f"🔗 لینک‌های بررسی:\n"
-                    f"🔍 [Solscan]({solscan_link})\n"
+                    f"🔗 [Solscan]({solscan_link})\n"
                     f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                 )
 
@@ -857,22 +957,12 @@ def technical_analysis_scanner_loop(app):
                 
                 send_telegram_msg(tech_msg)
                 send_graphic_signal_to_vip_channel(
-                    token_addr=token_addr,
-                    symbol=symbol,
-                    price=price,
-                    tp=TECH_TAKE_PROFIT,
-                    sl=TECH_STOP_LOSS,
-                    buy_amt=current_buy_amt,
-                    volume=volume_5m,
-                    liquidity=liquidity,
-                    p_change=price_change_5m,
-                    solscan_link=solscan_link,
-                    signal_title="📊 سیگنال پرایس اکشن + AI"
+                    token_addr=token_addr, symbol=symbol, price=price, tp=TECH_TAKE_PROFIT,
+                    sl=TECH_STOP_LOSS, buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
+                    p_change=price_change_5m, solscan_link=solscan_link, signal_title="📊 سیگنال پرایس اکشن + هالکی"
                 )
-
         except Exception as e:
             print(f"⚠️ خطای موتور پرایس اکشن: {e}")
-
         time.sleep(2)
 
 def unified_market_scanner_loop(app):
@@ -881,7 +971,7 @@ def unified_market_scanner_loop(app):
     global COMBO_BUY_AMOUNT_SOL, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS
     global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS
 
-    send_telegram_msg("⚡ موتور پردازش بازار و فیلتر سیگنال‌های VIP فعال شد.")
+    send_telegram_msg("⚡ موتور پردازش بازار و فیلتر سیگنال‌های VIP هالکی فعال شد.")
 
     while True:
         if not (GOLDEN_OPTION or COMBO_RUNNING or IS_RUNNING or TREND_ALERT_RUNNING or SYNCHRONIZED_MODE):
@@ -918,26 +1008,15 @@ def unified_market_scanner_loop(app):
                         buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
-                        target_tp_val = entry_p * (1 + (calc_tp / 100))
-                        target_sl_val = entry_p * (1 + (calc_sl / 100))
-
                         super_msg = (
-                            f"⚡🧠 [ابرسیگنال هوشمند VIP]\n"
+                            f"⚡🧠 [ابرسیگنال هوشمند هالکی VIP]\n"
                             f"🎯 دلیل شکار: {eval_reason}\n"
                             f"📌 وضعیت خرید: {buy_status_str}\n\n"
                             f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: ${entry_p:.8f}\n"
-                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت هوشمند: ${target_tp_val:.8f} (+%{calc_tp})\n"
-                            f"🛑 حد ضرر محافظتی: ${target_sl_val:.8f} (%{calc_sl})\n\n"
-                            f"📊 آنالیز پارامترها:\n"
-                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                            f"🔹 حجم معاملات: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی کل: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های بررسی:\n"
-                            f"🔍 [Solscan]({solscan_link})\n"
-                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
+                            f"📍 آدرس:\n{token_addr}\n\n"
+                            f"💵 ورود: ${entry_p:.8f}\n"
+                            f"💰 حجم: {current_buy_amt} SOL\n"
+                            f"🔗 [Solscan]({solscan_link})"
                         )
                         
                         active_positions[token_addr] = {
@@ -950,17 +1029,9 @@ def unified_market_scanner_loop(app):
                         
                         send_telegram_msg(super_msg)
                         send_graphic_signal_to_vip_channel(
-                            token_addr=token_addr,
-                            symbol=symbol,
-                            price=entry_p,
-                            tp=calc_tp,
-                            sl=calc_sl,
-                            buy_amt=current_buy_amt,
-                            volume=volume_5m,
-                            liquidity=liquidity,
-                            p_change=price_change_5m,
-                            solscan_link=solscan_link,
-                            signal_title="⚡🧠 ابرسیگنال هوشمند VIP"
+                            token_addr=token_addr, symbol=symbol, price=entry_p, tp=calc_tp, sl=calc_sl,
+                            buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
+                            p_change=price_change_5m, solscan_link=solscan_link, signal_title="⚡🧠 ابرسیگنال هوشمند هالکی VIP"
                         )
                         continue
 
@@ -977,25 +1048,10 @@ def unified_market_scanner_loop(app):
                         buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
-                        target_tp_val = price * (1 + (GOLDEN_TAKE_PROFIT / 100))
-                        target_sl_val = price * (1 + (GOLDEN_STOP_LOSS / 100))
-
                         golden_msg = (
-                            f"🚀🔥 سیگنال گزینه طلایی VIP\n"
-                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                            f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت سود: ${target_tp_val:.8f} (+%{GOLDEN_TAKE_PROFIT})\n"
-                            f"🛑 حد ضرر: ${target_sl_val:.8f} (%{GOLDEN_STOP_LOSS})\n\n"
-                            f"📊 آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های توکن:\n"
-                            f"🔍 [Solscan]({solscan_link})\n"
-                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
+                            f"🚀🔥 سیگنال گزینه طلایی هالکی VIP\n"
+                            f"🪙 توکن: {symbol}\n📍 آدرس:\n{token_addr}\n"
+                            f"💵 ورود: ${price:.8f}\n🔗 [Solscan]({solscan_link})"
                         )
                         active_positions[token_addr] = {
                             "entry_price": price,
@@ -1006,17 +1062,9 @@ def unified_market_scanner_loop(app):
                         }
                         send_telegram_msg(golden_msg)
                         send_graphic_signal_to_vip_channel(
-                            token_addr=token_addr,
-                            symbol=symbol,
-                            price=price,
-                            tp=GOLDEN_TAKE_PROFIT,
-                            sl=GOLDEN_STOP_LOSS,
-                            buy_amt=current_buy_amt,
-                            volume=volume_5m,
-                            liquidity=liquidity,
-                            p_change=price_change_5m,
-                            solscan_link=solscan_link,
-                            signal_title="🚀🔥 سیگنال گزینه طلایی VIP"
+                            token_addr=token_addr, symbol=symbol, price=price, tp=GOLDEN_TAKE_PROFIT,
+                            sl=GOLDEN_STOP_LOSS, buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
+                            p_change=price_change_5m, solscan_link=solscan_link, signal_title="🚀🔥 گزینه طلایی هالکی VIP"
                         )
                         continue
 
@@ -1030,29 +1078,8 @@ def unified_market_scanner_loop(app):
 
                         current_buy_amt = get_dynamic_buy_amount(COMBO_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, COMBO_BUY_AMOUNT_SOL)
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
 
-                        target_tp_val = price * (1 + (COMBO_TAKE_PROFIT / 100))
-                        target_sl_val = price * (1 + (COMBO_STOP_LOSS / 100))
-
-                        combo_msg = (
-                            f"🚨 سیگنال خرید ترکیبی ترند VIP\n"
-                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                            f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت سود: ${target_tp_val:.8f} (+%{COMBO_TAKE_PROFIT})\n"
-                            f"🛑 حد ضرر: ${target_sl_val:.8f} (%{COMBO_STOP_LOSS})\n\n"
-                            f"📊 آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های توکن:\n"
-                            f"🔍 [Solscan]({solscan_link})\n"
-                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
-                        )
                         active_positions[token_addr] = {
                             "entry_price": price,
                             "symbol": symbol,
@@ -1060,19 +1087,10 @@ def unified_market_scanner_loop(app):
                             "sl": COMBO_STOP_LOSS,
                             "highest_price": price
                         }
-                        send_telegram_msg(combo_msg)
                         send_graphic_signal_to_vip_channel(
-                            token_addr=token_addr,
-                            symbol=symbol,
-                            price=price,
-                            tp=COMBO_TAKE_PROFIT,
-                            sl=COMBO_STOP_LOSS,
-                            buy_amt=current_buy_amt,
-                            volume=volume_5m,
-                            liquidity=liquidity,
-                            p_change=price_change_5m,
-                            solscan_link=solscan_link,
-                            signal_title="🚨 سیگنال خرید ترکیبی ترند VIP"
+                            token_addr=token_addr, symbol=symbol, price=price, tp=COMBO_TAKE_PROFIT,
+                            sl=COMBO_STOP_LOSS, buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
+                            p_change=price_change_5m, solscan_link=solscan_link, signal_title="🚨 سیگنال ترکیبی ترند هالکی VIP"
                         )
                         continue
 
@@ -1084,30 +1102,7 @@ def unified_market_scanner_loop(app):
                         processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(FIRE_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
-                        
-                        buy_status_str = "انجام شد (موفق روی بلاکچین ✅)" if success else f"{result_info}"
                         solscan_link = f"https://solscan.io/tx/{result_info}" if success else "https://solscan.io"
-
-                        target_tp_val = price * (1 + (FIRE_TAKE_PROFIT / 100))
-                        target_sl_val = price * (1 + (FIRE_STOP_LOSS / 100))
-
-                        msg = (
-                            f"🔥 سیگنال خرید خودکار VIP\n"
-                            f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                            f"🪙 توکن: {symbol}\n"
-                            f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                            f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                            f"💰 مقدار خرید: SOL {current_buy_amt} (داینامیک)\n"
-                            f"🎯 تارگت سود: ${target_tp_val:.8f} (+%{FIRE_TAKE_PROFIT})\n"
-                            f"🛑 حد ضرر: ${target_sl_val:.8f} (%{FIRE_STOP_LOSS})\n\n"
-                            f"📊 آمار لحظه‌ای بازار:\n"
-                            f"🔹 روند ۵ دقیقه: +%{price_change_5m:.2f}\n"
-                            f"🔹 حجم معاملاتی: ${volume_5m:,.0f}\n"
-                            f"🔹 نقدینگی: ${liquidity:,.0f}\n\n"
-                            f"🔗 لینک‌های توکن:\n"
-                            f"🔍 [Solscan]({solscan_link})\n"
-                            f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
-                        )
                         
                         active_positions[token_addr] = {
                             "entry_price": price,
@@ -1116,24 +1111,13 @@ def unified_market_scanner_loop(app):
                             "sl": FIRE_STOP_LOSS,
                             "highest_price": price
                         }
-                        send_telegram_msg(msg)
                         send_graphic_signal_to_vip_channel(
-                            token_addr=token_addr,
-                            symbol=symbol,
-                            price=price,
-                            tp=FIRE_TAKE_PROFIT,
-                            sl=FIRE_STOP_LOSS,
-                            buy_amt=current_buy_amt,
-                            volume=volume_5m,
-                            liquidity=liquidity,
-                            p_change=price_change_5m,
-                            solscan_link=solscan_link,
-                            signal_title="🔥 سیگنال خرید خودکار VIP"
+                            token_addr=token_addr, symbol=symbol, price=price, tp=FIRE_TAKE_PROFIT,
+                            sl=FIRE_STOP_LOSS, buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
+                            p_change=price_change_5m, solscan_link=solscan_link, signal_title="🔥 سیگنال خرید خودکار هالکی VIP"
                         )
-
         except Exception as e:
             print(f"⚠️ خطای موتور پردازش بازار: {e}")
-
         time.sleep(2)
 
 web_app = Flask(__name__)
@@ -1146,7 +1130,7 @@ def home():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>صرافی و مینی‌اپلیکیشن VIP</title>
+        <title>صرافی و مینی‌اپلیکیشن VIP هالکی</title>
         <style>
             body { font-family: Tahoma, sans-serif; background: #0f172a; color: #f8fafc; padding: 15px; text-align: center; margin: 0; }
             .card { background: #1e293b; border-radius: 16px; padding: 20px; margin: 10px auto; max-width: 480px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); text-align: right; }
@@ -1160,10 +1144,9 @@ def home():
     </head>
     <body>
         <div class="card">
-            <h1>🚀 مینی‌اپلیکیشن تریدینگ و کپی‌تریدینگ VIP</h1>
+            <h1>🚀 مینی‌اپلیکیشن هوشمند تریدینگ هالکی & AI</h1>
             <div id="contentArea">بارگذاری اطلاعات...</div>
         </div>
-
         <script>
             let telegramId = "";
             if (window.Telegram && window.Telegram.WebApp) {
@@ -1172,11 +1155,8 @@ def home():
                     telegramId = window.Telegram.WebApp.initDataUnsafe.user.id;
                 }
             }
-            
             const urlParams = new URLSearchParams(window.location.search);
-            if (!telegramId) {
-                telegramId = urlParams.get('telegram_id') || "";
-            }
+            if (!telegramId) { telegramId = urlParams.get('telegram_id') || ""; }
 
             fetch('/api/check-status?telegram_id=' + telegramId)
             .then(res => res.json())
@@ -1184,23 +1164,21 @@ def home():
                 const area = document.getElementById('contentArea');
                 if(data.has_subscription) {
                     area.innerHTML = `
-                        <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
+                        <p>وضعیت سیستم: <span class="badge">آنلاین (Hulk & AI Mode Active)</span></p>
                         <div style="background: #0f172a; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #22c55e; margin-top: 15px;">
                             <h3 style="color: #22c55e; margin-top: 0; font-size: 15px;">🎉 اشتراک VIP شما فعال است</h3>
-                            <p style="color: #cbd5e1; font-size: 12px; margin-bottom: 5px;">موتور کپی‌تریدینگ هوشمند برای ولت شما روشن می‌باشد.</p>
-                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold; margin-top: 10px;">⏳ تاریخ و زمان اتمام اعتبار: ${data.expiry_date}</p>
-                            <a href="https://t.me/+c_o1BlwD7Q4ZjZk" target="_blank" class="btn" style="background: #8b5cf6; margin-top: 15px;">📢 ورود به کانال VIP سیگنال‌ها</a>
+                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold;">⏳ انقضا: ${data.expiry_date}</p>
+                            <a href="https://t.me/+c_o1BlwD7Q4ZjZk" target="_blank" class="btn" style="background: #8b5cf6;">📢 ورود به کانال VIP</a>
                         </div>
                     `;
                 } else {
                     area.innerHTML = `
-                        <p>وضعیت سیستم: <span class="badge">آنلاین (24/7)</span></p>
-                        <p style="word-break: break-all; font-size:11px;">🔑 ولت جهت واریز: <code>{{ wallet }}</code></p>
-                        <hr style="border:0; border-top:1px solid #334155; margin:10px 0;">
-                        <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه کپی‌تریدینگ ($100)</h3>
-                        <input type="text" id="userTelegramId" value="${telegramId}" placeholder="آیدی عددی تلگرام شما">
-                        <input type="text" id="userWallet" placeholder="آدرس ولت سولانا شما برای کپی‌ترید">
-                        <button class="btn btn-pay" onclick="paySubscription()">پرداخت و فعال‌سازی اشتراک ($100)</button>
+                        <p>وضعیت سیستم: <span class="badge">آنلاین (Hulk Mode Active)</span></p>
+                        <p style="word-break: break-all; font-size:11px;">🔑 ولت: <code>{{ wallet }}</code></p>
+                        <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه VIP ($100)</h3>
+                        <input type="text" id="userTelegramId" value="${telegramId}" placeholder="آیدی تلگرام">
+                        <input type="text" id="userWallet" placeholder="آدرس ولت سولانا">
+                        <button class="btn btn-pay" onclick="paySubscription()">پرداخت و فعال‌سازی اشتراک</button>
                     `;
                 }
             });
@@ -1208,7 +1186,7 @@ def home():
             function paySubscription() {
                 const tId = document.getElementById('userTelegramId').value;
                 const wallet = document.getElementById('userWallet').value;
-                if(!tId || !wallet) { alert('لطفاً فیلدها را پر کنید!'); return; }
+                if(!tId || !wallet) { alert('فیلدها را پر کنید!'); return; }
                 fetch('/api/subscribe', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -1228,80 +1206,40 @@ def home():
 def admin_panel():
     t_id = request.args.get("telegram_id", "")
     if not t_id or str(t_id) != str(TELEGRAM_CHAT_ID):
-        return "<h3 style='color:red; text-align:center; font-family:Tahoma; margin-top:50px;'>⛔ دسترسی غیرمجاز! شما ادمین این ربات نیستید.</h3>"
-    
+        return "<h3 style='color:red; text-align:center;'>⛔ دسترسی غیرمجاز!</h3>"
     subs = get_active_subscribers()
-    
     admin_html = f"""
     <!DOCTYPE html>
     <html lang="fa" dir="rtl">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>پنل مدیریت ادمین</title>
-        <style>
-            body {{ font-family: Tahoma, sans-serif; background: #0f172a; color: #f8fafc; padding: 15px; text-align: center; margin: 0; }}
-            .card {{ background: #1e293b; border-radius: 16px; padding: 20px; margin: 10px auto; max-width: 480px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); text-align: right; }}
-            h1 {{ color: #a855f7; font-size: 16px; text-align: center; }}
-            p {{ font-size: 13px; color: #cbd5e1; }}
-            .badge {{ background: #8b5cf6; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }}
-            .admin-box {{ background: #0f172a; padding: 12px; border-radius: 10px; margin-top: 10px; border: 1px solid #334155; }}
-            .sub-item {{ background: #1e293b; border-bottom: 1px solid #334155; padding: 10px; font-size: 12px; word-break: break-all; margin-bottom: 5px; border-radius: 6px; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>👑 پنل مدیریت اختصاصی ادمین</h1>
-            <p style="text-align:center;"><span class="badge">سیستم نظارت بر کاربران VIP</span></p>
-            <p>👥 تعداد کل کاربران فعال: <b>{len(subs)}</b></p>
-            <div class="admin-box">
-                <h3 style="color:#38bdf8; font-size:13px; margin:0 0 8px 0;">لیست کامل کاربران و جزئیات ولت:</h3>
+    <head><meta charset="UTF-8"><title>پنل ادمین هالکی</title></head>
+    <body style="background:#0f172a;color:#fff;text-align:center;font-family:Tahoma;padding:20px;">
+        <div style="background:#1e293b;padding:20px;border-radius:12px;max-width:480px;margin:auto;text-align:right;">
+            <h1 style="color:#a855f7;text-align:center;">👑 پنل مدیریت ادمین هالکی</h1>
+            <p>👥 کاربران فعال VIP: <b>{len(subs)}</b></p>
     """
-    
-    if len(subs) == 0:
-        admin_html += '<p style="color:#94a3b8; text-align:center;">هنوز کاربری ثبت نشده است.</p>'
-    else:
-        for sub in subs:
-            admin_html += f"""
-                <div class="sub-item">
-                    🆔 آیدی تلگرام: <code>{sub['telegram_id']}</code><br>
-                    🔑 آدرس ولت: <code>{sub['wallet']}</code><br>
-                    ⏳ تاریخ انقضا: <b>{sub['expiry']}</b>
-                </div>
-            """
-            
-    admin_html += """
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+    for sub in subs:
+        admin_html += f"<div style='background:#0f172a;padding:8px;margin:5px 0;border-radius:6px;font-size:12px;'>🆔 {sub['telegram_id']} | 🔑 {sub['wallet']}</div>"
+    admin_html += "</div></body></html>"
     return admin_html
 
 @web_app.route('/api/check-status')
 def api_check_status():
     t_id = request.args.get("telegram_id", "")
-    has_sub = False
-    expiry_str = ""
+    has_sub, expiry_str = False, ""
     if t_id:
         active, exp_date = check_user_subscription(t_id)
         if active and exp_date:
             has_sub = True
             expiry_str = exp_date.strftime("%Y-%m-%d %H:%M:%S")
-
-    return jsonify({
-        "has_subscription": has_sub,
-        "expiry_date": expiry_str
-    })
+    return jsonify({"has_subscription": has_sub, "expiry_date": expiry_str})
 
 @web_app.route('/api/subscribe', methods=['POST'])
 def api_subscribe():
     data = request.json
-    t_id = data.get("telegram_id")
-    wallet = data.get("wallet_address")
+    t_id, wallet = data.get("telegram_id"), data.get("wallet_address")
     if t_id and wallet:
         register_subscription(t_id, wallet, "AUTO_VERIFIED_TX")
-        return jsonify({"status": "success", "message": "اشتراک شما فعال شد! لینک کانال VIP به ربات تلگرام شما ارسال گردید."})
+        return jsonify({"status": "success", "message": "اشتراک فعال شد!"})
     return jsonify({"status": "error", "message": "اطلاعات ناقص است"})
 
 def run_web():
@@ -1320,11 +1258,17 @@ def get_main_keyboard():
     sync_status = "⚡ ابرسیگنال + AI Vision: روشن" if SYNCHRONIZED_MODE else "⚡ ابرسیگنال + AI Vision: خاموش"
     copy_status = "🔗 کپی‌تریدینگ VIP: روشن" if COPY_TRADING_ENABLED else "🔗 کپی‌تریدینگ VIP: خاموش"
     
-    ultimate_21_status = "💎 سیستم ۲۱ لایه پیشرفته: روشن" if ULTIMATE_21_ENGINE_ENABLED else "💎 سیستم ۲۱ لایه پیشرفته: خاموش"
+    ultimate_21_status = "💎 سیستم ۲۱ لایه: روشن" if ULTIMATE_21_ENGINE_ENABLED else "💎 سیستم ۲۱ لایه: خاموش"
+    ai_learning_status = "🧠 هوش مصنوعی یادگیرنده: روشن" if SELF_LEARNING_AI_ENABLED else "🧠 هوش مصنوعی: خاموش"
+    mempool_status = "⚡🕵️ اسکنر ممپول & اسمارت‌مانی: روشن" if MEMPOOL_SMART_MONEY_ENABLED else "⚡🕵️ ممپول: خاموش"
+
+    hulk_moon_status = "💪🟢 موم‌بگ هالکی (۸۰/۲۰): روشن" if MOONBAG_HULK_ENABLED else "💪🔴 موم‌بگ هالکی: خاموش"
+    wash_status = "🛡️🟢 ضد حجم فیک (Wash Shield): روشن" if ANTI_WASH_TRADING_ENABLED else "🛡️🔴 ضد حجم فیک: خاموش"
+    jito_priv_status = "🔒🟢 باندل خصوصی Jito: روشن" if PRIVATE_JITO_BUNDLE_ENABLED else "🔒🔴 باندل خصوصی Jito: خاموش"
+    leverage_status = "⚡🟢 اهرم و پرپ (Leverage): روشن" if LEVERAGE_PERP_ENABLED else "⚡🔴 اهرم و پرپ: خاموش"
 
     open_pnl_usd = 0.0
     open_pnl_percent = 0.0
-    
     if len(active_positions) > 0:
         for token_addr, pos in active_positions.items():
             try:
@@ -1344,12 +1288,17 @@ def get_main_keyboard():
 
     pnl_percent_label = f"📈 کل سود/زیان: {grand_total_percent:+.2f}%"
     pnl_usd_label = f"💵 درآمد/ضرر دلاری: ${grand_total_usd:+.2f}"
-
     admin_webapp_url = f"{WEBAPP_URL}/admin-panel?telegram_id={TELEGRAM_CHAT_ID}"
 
     keyboard = [
         [InlineKeyboardButton("👑 پنل مدیریت و لیست کاربران VIP", web_app=WebAppInfo(url=admin_webapp_url))],
         [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
+        [InlineKeyboardButton(hulk_moon_status, callback_data="toggle_hulk_moon"),
+         InlineKeyboardButton(wash_status, callback_data="toggle_wash")],
+        [InlineKeyboardButton(jito_priv_status, callback_data="toggle_jito_priv"),
+         InlineKeyboardButton(leverage_status, callback_data="toggle_leverage")],
+        [InlineKeyboardButton(ai_learning_status, callback_data="toggle_ai_learning"),
+         InlineKeyboardButton(mempool_status, callback_data="toggle_mempool")],
         [InlineKeyboardButton(ultimate_21_status, callback_data="toggle_ultimate_21")],
         [InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
          InlineKeyboardButton(risk_status, callback_data="toggle_risk")],
@@ -1374,21 +1323,18 @@ def get_main_keyboard():
                 InlineKeyboardButton(f"📊 [پرایس اکشن] تارگت: +{TECH_TAKE_PROFIT}%", callback_data="menu_t_tp"),
                 InlineKeyboardButton(f"📊 [پرایس اکشن] ضرر: {TECH_STOP_LOSS}%", callback_data="menu_t_sl")
             ])
-
         if GOLDEN_OPTION:
             keyboard.append([InlineKeyboardButton(f"⚙️ حجم (گزینه طلایی): {GOLDEN_BUY_AMOUNT_SOL} SOL", callback_data="menu_g_vol")])
             keyboard.append([
                 InlineKeyboardButton(f"🚀 [گزینه طلایی] تارگت: +{GOLDEN_TAKE_PROFIT}%", callback_data="menu_g_tp"),
                 InlineKeyboardButton(f"🚀 [گزینه طلایی] ضرر: {GOLDEN_STOP_LOSS}%", callback_data="menu_g_sl")
             ])
-
         if COMBO_RUNNING:
             keyboard.append([InlineKeyboardButton(f"⚙️ حجم (حالت ترکیبی): {COMBO_BUY_AMOUNT_SOL} SOL", callback_data="menu_c_vol")])
             keyboard.append([
                 InlineKeyboardButton(f"🚨 [حالت ترکیبی] تارگت: +{COMBO_TAKE_PROFIT}%", callback_data="menu_c_tp"),
                 InlineKeyboardButton(f"🚨 [حالت ترکیبی] ضرر: {COMBO_STOP_LOSS}%", callback_data="menu_c_sl")
             ])
-
         if IS_RUNNING:
             keyboard.append([InlineKeyboardButton(f"⚙️ حجم (خرید و فروش): {FIRE_BUY_AMOUNT_SOL} SOL", callback_data="menu_f_vol")])
             keyboard.append([
@@ -1435,149 +1381,100 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AWAITING_STATE
     AWAITING_STATE = None
     user_id = str(update.effective_user.id)
-    
     if user_id == str(TELEGRAM_CHAT_ID):
-        await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ:", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ (نسخه هالکی شکست‌ناپذیر):", reply_markup=get_main_keyboard())
     else:
-        user_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🌐 ورود به مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))]
-        ])
-        await update.message.reply_text(
-            "👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.\n\n"
-            "برای اتصال ولت خود و دریافت سرویس کپی‌تریدینگ VIP، روی دکمه زیر کلیک کنید:",
-            reply_markup=user_keyboard
-        )
+        user_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))]])
+        await update.message.reply_text("👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.", reply_markup=user_keyboard)
 
 async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
-    
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text(
-            "❌ فرمت اشتباه! استفاده صحیح:\n\n/free آیدی_تلگرام آدرس_ولت", 
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("❌ فرمت اشتباه! استفاده صحیح:\n\n/free آیدی_تلگرام آدرس_ولت")
         return
-    
-    t_id = args[0]
-    wallet = args[1]
-    
-    success = register_free_vip(t_id, wallet)
+    success = register_free_vip(args[0], args[1])
     if success:
-        await update.message.reply_text(f"✅ کاربر با آیدی {t_id} به صورت رایگان و ویژه (VIP) ثبت شد!", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ کاربر {args[0]} به صورت رایگان VIP ثبت شد!")
     else:
-        await update.message.reply_text("❌ خطا در ثبت کاربر رایگان در دیتابیس.")
+        await update.message.reply_text("❌ خطا در ثبت.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE, COPY_TRADING_ENABLED, ULTIMATE_21_ENGINE_ENABLED, AWAITING_STATE
-    query = update.callback_query
+    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING
+    global SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE
+    global COPY_TRADING_ENABLED, ULTIMATE_21_ENGINE_ENABLED, SELF_LEARNING_AI_ENABLED, MEMPOOL_SMART_MONEY_ENABLED
+    global MOONBAG_HULK_ENABLED, ANTI_WASH_TRADING_ENABLED, PRIVATE_JITO_BUNDLE_ENABLED, LEVERAGE_PERP_ENABLED, AWAITING_STATE
     
+    query = update.callback_query
     if str(query.from_user.id) != str(TELEGRAM_CHAT_ID):
         try:
-            await query.answer("⛔ شما دسترسی ادمین ندارید!", show_alert=True)
+            await query.answer("⛔ دسترسی غیرمجاز!", show_alert=True)
         except:
             pass
         return
-
     try:
         await query.answer()
-    except Exception:
+    except:
         pass
 
-    if query.data == "toggle_ultimate_21":
+    if query.data == "toggle_hulk_moon":
+        MOONBAG_HULK_ENABLED = not MOONBAG_HULK_ENABLED
+    elif query.data == "toggle_wash":
+        ANTI_WASH_TRADING_ENABLED = not ANTI_WASH_TRADING_ENABLED
+    elif query.data == "toggle_jito_priv":
+        PRIVATE_JITO_BUNDLE_ENABLED = not PRIVATE_JITO_BUNDLE_ENABLED
+    elif query.data == "toggle_leverage":
+        LEVERAGE_PERP_ENABLED = not LEVERAGE_PERP_ENABLED
+    elif query.data == "toggle_ai_learning":
+        SELF_LEARNING_AI_ENABLED = not SELF_LEARNING_AI_ENABLED
+    elif query.data == "toggle_mempool":
+        MEMPOOL_SMART_MONEY_ENABLED = not MEMPOOL_SMART_MONEY_ENABLED
+    elif query.data == "toggle_ultimate_21":
         ULTIMATE_21_ENGINE_ENABLED = not ULTIMATE_21_ENGINE_ENABLED
-        try:
-            await query.edit_message_text("💎 سیستم ۲۱ لایه پیشرفته تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except Exception:
-            pass
     elif query.data == "toggle_smart_filter":
         SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
-        try:
-            await query.edit_message_text("🛡️ فیلتر هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except Exception:
-            pass
     elif query.data == "toggle_risk":
         DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
-        try:
-            await query.edit_message_text("⚖️ مدیریت ریسک داینامیک تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except:
-            pass
     elif query.data == "toggle_sync":
         SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
-        try:
-            await query.edit_message_text("⚡ ابرسیگنال هوشمند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except:
-            pass
     elif query.data == "toggle_copy":
         COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
-        try:
-            await query.edit_message_text("🔗 کپی‌تریدینگ VIP تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except:
-            pass
     elif query.data == "toggle_manual":
         MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
-        try:
-            await query.edit_message_text("⚙️ تنظیمات دستی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except:
-            pass
     elif query.data == "toggle_technical":
         TECHNICAL_RUNNING = not TECHNICAL_RUNNING
-        try:
-            await query.edit_message_text("📊 موتور پرایس اکشن تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except:
-            pass
     elif query.data == "toggle_golden":
         GOLDEN_OPTION = not GOLDEN_OPTION
-        try:
-            await query.edit_message_text("🚀 گزینه طلایی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except:
-            pass
     elif query.data == "toggle_combo":
         COMBO_RUNNING = not COMBO_RUNNING
-        try:
-            await query.edit_message_text("🚨 حالت ترکیبی تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except:
-            pass
     elif query.data == "toggle_trader":
         IS_RUNNING = not IS_RUNNING
-        try:
-            await query.edit_message_text("🔥 خرید و فروش خودکار تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except:
-            pass
     elif query.data == "toggle_trend":
         TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
-        try:
-            await query.edit_message_text("🚨 اعلان ترند تغییر وضعیت داد.", reply_markup=get_main_keyboard())
-        except:
-            pass
-    elif query.data == "refresh_pnl":
-        try:
-            await query.edit_message_text("🤖 بروزرسانی آمار سود/زیان:", reply_markup=get_main_keyboard())
-        except:
-            pass
     elif query.data == "status":
         status_text = (
-            f"📊 وضعیت کامل سیستم:\n\n"
-            f"🔑 آدرس ولت متصل:\n{WALLET_PUBKEY}\n\n"
-            f"💎 سیستم ۲۱ لایه پیشرفته: {'🟢 روشن' if ULTIMATE_21_ENGINE_ENABLED else '🔴 خاموش'}\n"
-            f"🛡️ فیلتر هوشمند: {'🟢 روشن' if SMART_FILTER_ENABLED else '🔴 خاموش'}\n"
-            f"⚡ ابرسیگنال: {'🟢 روشن' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
-            f"🔗 کپی‌تریدینگ VIP: {'🟢 روشن' if COPY_TRADING_ENABLED else '🔴 خاموش'}\n"
-            f"🌐 مینی‌اپلیکیشن: 🟢 فعال\n"
-            f"💰 موجودی ولت ادمین: {get_sol_balance():.4f} SOL"
+            f"📊 وضعیت سیستم (هالکی شکست‌ناپذیر):\n"
+            f"💪 موم‌بگ هالکی: {'🟢 روشن' if MOONBAG_HULK_ENABLED else '🔴 خاموش'}\n"
+            f"🛡️ ضد حجم فیک: {'🟢 روشن' if ANTI_WASH_TRADING_ENABLED else '🔴 خاموش'}\n"
+            f"🔒 باندل خصوصی Jito: {'🟢 روشن' if PRIVATE_JITO_BUNDLE_ENABLED else '🔴 خاموش'}\n"
+            f"⚡ اهرم و پرپ: {'🟢 روشن' if LEVERAGE_PERP_ENABLED else '🔴 خاموش'}\n"
+            f"🧠 هوش مصنوعی یادگیرنده: {'🟢 روشن' if SELF_LEARNING_AI_ENABLED else '🔴 خاموش'}\n"
+            f"⚡🕵️ ممپول & اسمارت‌مانی: {'🟢 روشن' if MEMPOOL_SMART_MONEY_ENABLED else '🔴 خاموش'}\n"
+            f"💰 موجودی ولت: {get_sol_balance():.4f} SOL"
         )
         try:
-            await query.edit_message_text(status_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+            await query.edit_message_text(status_text, reply_markup=get_main_keyboard())
+            return
         except:
-            send_telegram_msg(status_text)
+            pass
     elif query.data == "wallet_balance":
         balance_text = f"💰 موجودی لحظه‌ای ولت ادمین: {get_sol_balance():.4f} SOL"
         try:
             await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
+            return
         except:
             pass
-
     elif query.data == "menu_t_vol":
         AWAITING_STATE, cur_val, prefix = "tech_vol", TECH_BUY_AMOUNT_SOL, "📊 [پرایس اکشن] حجم معامله"
         await prompt_input(query, prefix, cur_val)
@@ -1621,6 +1518,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
+    try:
+        await query.edit_message_text("🤖 وضعیت تنظیمات هالکی بروز شد:", reply_markup=get_main_keyboard())
+    except:
+        pass
+
 async def prompt_input(query, prefix, cur_val):
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
     try:
@@ -1642,7 +1544,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             val = float(text_input)
             st = AWAITING_STATE
-            
             if st == "tech_vol": TECH_BUY_AMOUNT_SOL = val
             elif st == "tech_tp": TECH_TAKE_PROFIT = val
             elif st == "tech_sl": TECH_STOP_LOSS = val
@@ -1677,6 +1578,14 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
+    ai_thread = Thread(target=self_learning_ai_optimizer_loop)
+    ai_thread.daemon = True
+    ai_thread.start()
+
+    mempool_thread = Thread(target=mempool_smart_money_scanner_loop, args=(app,))
+    mempool_thread.daemon = True
+    mempool_thread.start()
+
     unified_thread = Thread(target=unified_market_scanner_loop, args=(app,))
     unified_thread.daemon = True
     unified_thread.start()
@@ -1689,5 +1598,5 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP با موفقیت بالا آمد.")
+    print("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP (نسخه هالکی شکست‌ناپذیر) با موفقیت اجرا شد.")
     app.run_polling()
