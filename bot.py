@@ -325,7 +325,6 @@ def get_dynamic_buy_amount(base_amount):
         return base_amount
     try:
         sol_bal = get_sol_balance()
-        # اعمال فرمول ریاضی مدیریت سرمایه معیار کلی (Kelly Criterion) در صورت فعال بودن لایه ۲۱گانه
         if ULTIMATE_21_ENGINE_ENABLED and sol_bal > 0:
             kelly_factor = 0.025 if sol_bal > 1.0 else 0.01
             calculated = sol_bal * kelly_factor
@@ -414,12 +413,10 @@ def check_major_support_resistance_pa(pair):
         pass
     return False, ""
 
-# تابع یکپارچه‌ساز ۲۱ لایه فیلترینگ و مانیتورینگ پیشرفته جهت صحت‌سنجی کامل سیگنال‌ها
 def validate_ultimate_21_layers(token_addr, pair):
     if not ULTIMATE_21_ENGINE_ENABLED:
         return True, "سیستم ۲۱گانه غیرفعال است"
     try:
-        # لایه ۱، ۲، ۳: فیلترهای بنیادین و نقدینگی
         liquidity = float(pair.get('liquidity', {}).get('usd', 0))
         volume_5m = float(pair.get('volume', {}).get('m5', 0))
         price = float(pair.get('priceUsd', 0))
@@ -463,7 +460,6 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         if price_change_5m < 8.0:
             return False, 0.0, 0.0, 0.0, "مومنتوم کافی نیست"
 
-        # عبور از صافی ۲۱ لایه پیشرفته
         is_21_valid, msg_21 = validate_ultimate_21_layers(token_addr, pair)
         if not is_21_valid:
             return False, 0.0, 0.0, 0.0, msg_21
@@ -1324,7 +1320,6 @@ def get_main_keyboard():
     sync_status = "⚡ ابرسیگنال + AI Vision: روشن" if SYNCHRONIZED_MODE else "⚡ ابرسیگنال + AI Vision: خاموش"
     copy_status = "🔗 کپی‌تریدینگ VIP: روشن" if COPY_TRADING_ENABLED else "🔗 کپی‌تریدینگ VIP: خاموش"
     
-    # کلید شیشه‌ای واحد برای ۲۱ لایه پیشرفته امنیتی و سودآوری
     ultimate_21_status = "💎 سیستم ۲۱ لایه پیشرفته: روشن" if ULTIMATE_21_ENGINE_ENABLED else "💎 سیستم ۲۱ لایه پیشرفته: خاموش"
 
     open_pnl_usd = 0.0
@@ -1355,7 +1350,6 @@ def get_main_keyboard():
     keyboard = [
         [InlineKeyboardButton("👑 پنل مدیریت و لیست کاربران VIP", web_app=WebAppInfo(url=admin_webapp_url))],
         [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
-        # دکمه شیشه‌ای مجزا برای کنترل ۲۱ لایه پیشرفته
         [InlineKeyboardButton(ultimate_21_status, callback_data="toggle_ultimate_21")],
         [InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
          InlineKeyboardButton(risk_status, callback_data="toggle_risk")],
