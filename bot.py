@@ -52,6 +52,12 @@ MEMPOOL_SMART_MONEY_ENABLED = True
 MOONBAG_HULK_ENABLED = True
 ANTI_WASH_TRADING_ENABLED = True
 
+# وضعیت باز/بسته بودن دسته‌بندی‌های منوی شیشه‌ای (تاشو)
+SECTION_VIP_OPEN = True
+SECTION_PROTECTION_OPEN = True
+SECTION_AI_OPEN = True
+SECTION_TRADING_OPEN = True
+
 FIRE_BUY_AMOUNT_SOL = 0.01
 FIRE_TAKE_PROFIT = 18.0
 FIRE_STOP_LOSS = -10.0
@@ -519,7 +525,6 @@ def check_major_support_resistance_pa(pair):
     return False, ""
 
 def validate_ultimate_21_layers(token_addr, pair):
-    """موتور واقعی بررسی لایه‌های ۲۱گانه (بررسی نقدینگی، حجم، نسبت خرید به فروش و پایداری قیمت)"""
     if not ULTIMATE_21_ENGINE_ENABLED:
         return True, "سیستم ۲۱گانه غیرفعال است"
     try:
@@ -812,7 +817,6 @@ def check_positions_loop():
                             pos['highest_pnl'] = pnl_percent
                             highest_pnl = pnl_percent
 
-                        # مکانیزم موم‌بگ هالکی (۸۰/۲۰) در سود ۱۵۰٪+
                         if MOONBAG_HULK_ENABLED and highest_pnl >= 150.0 and not pos.get('moonbag_saved', False):
                             pos['moonbag_saved'] = True
                             token_balance = get_token_balance(token_addr)
@@ -828,7 +832,6 @@ def check_positions_loop():
                                 send_telegram_msg(moon_msg)
                                 send_telegram_msg(moon_msg, target_chat=CHANNEL_ID)
 
-                        # کف‌های حفاظتی پویا (Trailing Lock-in)
                         current_locked_floor = pos.get('locked_floor', sl)
 
                         if highest_pnl >= 100.0:
@@ -1012,7 +1015,6 @@ def unified_market_scanner_loop(app):
                 if price <= 0:
                     continue
 
-                # 🐳 موتور ترکیبی جدید: شکار کف معتبر (نهنگ‌ها) + شروع پامپ‌های پرقدرت
                 if BOTTOM_WHALE_RUNNING and token_addr not in processed_tokens:
                     txns = pair.get('txns', {}).get('m5', {})
                     buys = txns.get('buys', 0)
@@ -1356,39 +1358,63 @@ def get_main_keyboard():
     pnl_usd_label = f"💵 درآمد/ضرر دلاری: ${grand_total_usd:+.2f}"
     admin_webapp_url = f"{WEBAPP_URL}/admin-panel?telegram_id={TELEGRAM_CHAT_ID}"
 
-    keyboard = [
-        # دسته سوم: مدیریت و دسترسی VIP (بنفش)
-        [InlineKeyboardButton("👑 پنل مدیریت و لیست کاربران VIP", web_app=WebAppInfo(url=admin_webapp_url))],
-        [InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))],
-        [InlineKeyboardButton(copy_status, callback_data="toggle_copy")],
+    keyboard = []
 
-        # دسته چهارم: لایه‌های حفاظتی، امنیتی و مدیریت ریسک (آبی)
-        [InlineKeyboardButton(bottom_whale_status, callback_data="toggle_bottom_whale")],
-        [InlineKeyboardButton(hulk_moon_status, callback_data="toggle_hulk_moon"),
-         InlineKeyboardButton(wash_status, callback_data="toggle_wash")],
-        [InlineKeyboardButton(ai_learning_status, callback_data="toggle_ai_learning"),
-         InlineKeyboardButton(mempool_status, callback_data="toggle_mempool")],
-        [InlineKeyboardButton(ultimate_21_status, callback_data="toggle_ultimate_21")],
-        [InlineKeyboardButton(risk_status, callback_data="toggle_risk"),
-         InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter")],
+    # 1. بخش اول (بنفش): مدیریت و دسترسی VIP (تاشو)
+    vip_arrow = "🔽" if SECTION_VIP_OPEN else "◀️"
+    keyboard.append([InlineKeyboardButton(f"👑 مدیریت و دسترسی VIP {vip_arrow}", callback_data="toggle_sec_vip")])
+    if SECTION_VIP_OPEN:
+        keyboard.append([InlineKeyboardButton("👑 پنل مدیریت و لیست کاربران VIP", web_app=WebAppInfo(url=admin_webapp_url))])
+        keyboard.append([InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و اشتراک VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
+        keyboard.append([InlineKeyboardButton(copy_status, callback_data="toggle_copy")])
 
-        # دسته دوم: سیگنال‌های پیشرفته و هوش مصنوعی (قرمز)
-        [InlineKeyboardButton(sync_status, callback_data="toggle_sync")],
-        [InlineKeyboardButton(tech_status, callback_data="toggle_technical")],
+    # 2. بخش دوم (آبی): لایه‌های حفاظتی و امنیتی (تاشو)
+    prot_arrow = "🔽" if SECTION_PROTECTION_OPEN else "◀️"
+    keyboard.append([InlineKeyboardButton(f"🛡️ لایه‌های حفاظتی و امنیتی {prot_arrow}", callback_data="toggle_sec_prot")])
+    if SECTION_PROTECTION_OPEN:
+        keyboard.append([InlineKeyboardButton(bottom_whale_status, callback_data="toggle_bottom_whale")])
+        keyboard.append([
+            InlineKeyboardButton(hulk_moon_status, callback_data="toggle_hulk_moon"),
+            InlineKeyboardButton(wash_status, callback_data="toggle_wash")
+        ])
+        keyboard.append([
+            InlineKeyboardButton(ai_learning_status, callback_data="toggle_ai_learning"),
+            InlineKeyboardButton(mempool_status, callback_data="toggle_mempool")
+        ])
+        keyboard.append([InlineKeyboardButton(ultimate_21_status, callback_data="toggle_ultimate_21")])
+        keyboard.append([
+            InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
+            InlineKeyboardButton(risk_status, callback_data="toggle_risk")
+        ])
 
-        # دسته اول: موتورها و استراتژی‌های معاملاتی (زرد)
-        [InlineKeyboardButton(manual_status, callback_data="toggle_manual")],
-        [InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
-        [InlineKeyboardButton(combo_status, callback_data="toggle_combo")],
-        [InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
-         InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
+    # 3. بخش سوم (زرد): سیگنال‌های هوش مصنوعی و Vision (تاشو)
+    ai_arrow = "🔽" if SECTION_AI_OPEN else "◀️"
+    keyboard.append([InlineKeyboardButton(f"⚡ سیگنال‌های هوش مصنوعی و Vision {ai_arrow}", callback_data="toggle_sec_ai")])
+    if SECTION_AI_OPEN:
+        keyboard.append([InlineKeyboardButton(sync_status, callback_data="toggle_sync")])
+        keyboard.append([InlineKeyboardButton(tech_status, callback_data="toggle_technical")])
 
-        # بخش ثابت (که خط کشیده نشده‌اند): وضعیت سیستم، موجودی ولت، کل سود/زیان
-        [InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-         InlineKeyboardButton("💰 موجودی ولت ادمین", callback_data="wallet_balance")],
-        [InlineKeyboardButton(pnl_percent_label, callback_data="refresh_pnl"),
-         InlineKeyboardButton(pnl_usd_label, callback_data="refresh_pnl")]
-    ]
+    # 4. بخش چهارم (قرمز): موتورها و استراتژی‌های معاملاتی (تاشو)
+    trade_arrow = "🔽" if SECTION_TRADING_OPEN else "◀️"
+    keyboard.append([InlineKeyboardButton(f"🚀 موتورها و استراتژی‌های معاملاتی {trade_arrow}", callback_data="toggle_sec_trade")])
+    if SECTION_TRADING_OPEN:
+        keyboard.append([InlineKeyboardButton(manual_status, callback_data="toggle_manual")])
+        keyboard.append([InlineKeyboardButton(golden_status, callback_data="toggle_golden")])
+        keyboard.append([InlineKeyboardButton(combo_status, callback_data="toggle_combo")])
+        keyboard.append([
+            InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
+            InlineKeyboardButton(trend_status, callback_data="toggle_trend")
+        ])
+
+    # بخش ثابت در پایین (بدون تغییر و همیشه نمایان)
+    keyboard.append([
+        InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
+        InlineKeyboardButton("💰 موجودی ولت ادمین", callback_data="wallet_balance")
+    ])
+    keyboard.append([
+        InlineKeyboardButton(pnl_percent_label, callback_data="refresh_pnl"),
+        InlineKeyboardButton(pnl_usd_label, callback_data="refresh_pnl")
+    ])
 
     if MANUAL_SETTINGS_ENABLED:
         if TECHNICAL_RUNNING:
@@ -1478,7 +1504,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING
     global SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE
     global COPY_TRADING_ENABLED, ULTIMATE_21_ENGINE_ENABLED, SELF_LEARNING_AI_ENABLED, MEMPOOL_SMART_MONEY_ENABLED
-    global MOONBAG_HULK_ENABLED, ANTI_WASH_TRADING_ENABLED, BOTTOM_WHALE_RUNNING, AWAITING_STATE
+    global MOONBAG_HULK_ENABLED, ANTI_WASH_TRADING_ENABLED, BOTTOM_WHALE_RUNNING
+    global SECTION_VIP_OPEN, SECTION_PROTECTION_OPEN, SECTION_AI_OPEN, SECTION_TRADING_OPEN, AWAITING_STATE
     
     query = update.callback_query
     if str(query.from_user.id) != str(TELEGRAM_CHAT_ID):
@@ -1492,7 +1519,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    if query.data == "toggle_bottom_whale":
+    # کنترل باز و بسته کردن دسته‌بندی‌ها (تاشو)
+    if query.data == "toggle_sec_vip":
+        SECTION_VIP_OPEN = not SECTION_VIP_OPEN
+    elif query.data == "toggle_sec_prot":
+        SECTION_PROTECTION_OPEN = not SECTION_PROTECTION_OPEN
+    elif query.data == "toggle_sec_ai":
+        SECTION_AI_OPEN = not SECTION_AI_OPEN
+    elif query.data == "toggle_sec_trade":
+        SECTION_TRADING_OPEN = not SECTION_TRADING_OPEN
+    elif query.data == "toggle_bottom_whale":
         BOTTOM_WHALE_RUNNING = not BOTTOM_WHALE_RUNNING
     elif query.data == "toggle_hulk_moon":
         MOONBAG_HULK_ENABLED = not MOONBAG_HULK_ENABLED
