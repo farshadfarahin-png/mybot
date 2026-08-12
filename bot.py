@@ -171,9 +171,51 @@ def send_telegram_msg(text, target_chat=None):
     except Exception as e:
         print(f"❌ خطای ارسال پیام به تلگرام: {e}")
 
-def send_signal_to_vip_channel(text):
-    if CHANNEL_ID:
-        send_telegram_msg(text, target_chat=CHANNEL_ID)
+# تابع جدید و فوق‌العاده شیک برای ارسال سیگنال‌های گرافیکی و کارتی به کانال VIP
+def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 **سیگنال ویژه VIP**"):
+    if not CHANNEL_ID:
+        return
+    
+    graphic_text = (
+        f"╔══════════════════════╗\n"
+        f"  {signal_title}\n"
+        f"╚══════════════════════╝\n\n"
+        f"🪙 نام توکن: `#{symbol}`\n"
+        f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+        f"💵 قیمت ورود: `${price:.8f}`\n"
+        f"💰 حجم معامله: `SOL {buy_amt}`\n"
+        f"🎯 تارگت سود: `+%{tp}`\n"
+        f"🛑 حد ضرر: `%{sl}`\n\n"
+        f"📊 **آمار زنده بازار:**\n"
+        f"▪️ روند ۵ دقیقه: `+%{p_change:.2f}`\n"
+        f"▪️ حجم معاملات: `${volume:,.0f}`\n"
+        f"▪️ نقدینگی کل: `${liquidity:,.0f}`\n\n"
+        f"⚡️ *سیستم هوشمند کپی‌تریدینگ و تحلیل اتوماتیک سولانا*\n"
+        f"━━━━━━━━━━━━━━━━━━━"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔍 بررسی در Solscan", url=solscan_link),
+            InlineKeyboardButton("📈 نمودار DexScreener", url=f"https://dexscreener.com/solana/{token_addr}")
+        ],
+        [
+            InlineKeyboardButton("🤖 ورود به مینی‌اپلیکیشن و کپی‌ترید", url=WEBAPP_URL)
+        ]
+    ])
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": CHANNEL_ID,
+            "text": graphic_text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+            "reply_markup": keyboard.to_dict()
+        }
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"❌ خطا در ارسال سیگنال گرافیکی به کانال: {e}")
 
 def register_subscription(telegram_id, wallet_addr, tx_sig):
     try:
@@ -683,7 +725,7 @@ def check_positions_loop():
                                 f"🔗 تراکنش Solscan:\n{solscan_link}"
                             )
                             send_telegram_msg(exit_msg)
-                            send_signal_to_vip_channel(exit_msg)
+                            send_telegram_msg(exit_msg, target_chat=CHANNEL_ID)
                             tokens_to_close.append(token_addr)
                 except Exception as inner_e:
                     print(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
@@ -766,7 +808,20 @@ def technical_analysis_scanner_loop(app):
                 }
                 
                 send_telegram_msg(tech_msg)
-                send_signal_to_vip_channel(tech_msg)
+                # ارسال سیگنال گرافیکی جدید به کانال VIP
+                send_graphic_signal_to_vip_channel(
+                    token_addr=token_addr,
+                    symbol=symbol,
+                    price=price,
+                    tp=TECH_TAKE_PROFIT,
+                    sl=TECH_STOP_LOSS,
+                    buy_amt=current_buy_amt,
+                    volume=volume_5m,
+                    liquidity=liquidity,
+                    p_change=price_change_5m,
+                    solscan_link=solscan_link,
+                    signal_title="📊 **سیگنال پرایس اکشن + AI**"
+                )
 
         except Exception as e:
             print(f"⚠️ خطای موتور پرایس اکشن: {e}")
@@ -847,7 +902,19 @@ def unified_market_scanner_loop(app):
                         }
                         
                         send_telegram_msg(super_msg)
-                        send_signal_to_vip_channel(super_msg)
+                        send_graphic_signal_to_vip_channel(
+                            token_addr=token_addr,
+                            symbol=symbol,
+                            price=entry_p,
+                            tp=calc_tp,
+                            sl=calc_sl,
+                            buy_amt=current_buy_amt,
+                            volume=volume_5m,
+                            liquidity=liquidity,
+                            p_change=price_change_5m,
+                            solscan_link=solscan_link,
+                            signal_title="⚡🧠 **ابرسیگنال هوشمند VIP**"
+                        )
                         continue
 
                 if GOLDEN_OPTION and token_addr not in golden_processed_tokens:
@@ -891,7 +958,19 @@ def unified_market_scanner_loop(app):
                             "highest_price": price
                         }
                         send_telegram_msg(golden_msg)
-                        send_signal_to_vip_channel(golden_msg)
+                        send_graphic_signal_to_vip_channel(
+                            token_addr=token_addr,
+                            symbol=symbol,
+                            price=price,
+                            tp=GOLDEN_TAKE_PROFIT,
+                            sl=GOLDEN_STOP_LOSS,
+                            buy_amt=current_buy_amt,
+                            volume=volume_5m,
+                            liquidity=liquidity,
+                            p_change=price_change_5m,
+                            solscan_link=solscan_link,
+                            signal_title="🚀🔥 **سیگنال گزینه طلایی VIP**"
+                        )
                         continue
 
                 if COMBO_RUNNING and token_addr not in trend_alerted_tokens:
@@ -935,7 +1014,19 @@ def unified_market_scanner_loop(app):
                             "highest_price": price
                         }
                         send_telegram_msg(combo_msg)
-                        send_signal_to_vip_channel(combo_msg)
+                        send_graphic_signal_to_vip_channel(
+                            token_addr=token_addr,
+                            symbol=symbol,
+                            price=price,
+                            tp=COMBO_TAKE_PROFIT,
+                            sl=COMBO_STOP_LOSS,
+                            buy_amt=current_buy_amt,
+                            volume=volume_5m,
+                            liquidity=liquidity,
+                            p_change=price_change_5m,
+                            solscan_link=solscan_link,
+                            signal_title="🚨 **سیگنال خرید ترکیبی ترند VIP**"
+                        )
                         continue
 
                 if IS_RUNNING and token_addr not in processed_tokens:
@@ -979,7 +1070,19 @@ def unified_market_scanner_loop(app):
                             "highest_price": price
                         }
                         send_telegram_msg(msg)
-                        send_signal_to_vip_channel(msg)
+                        send_graphic_signal_to_vip_channel(
+                            token_addr=token_addr,
+                            symbol=symbol,
+                            price=price,
+                            tp=FIRE_TAKE_PROFIT,
+                            sl=FIRE_STOP_LOSS,
+                            buy_amt=current_buy_amt,
+                            volume=volume_5m,
+                            liquidity=liquidity,
+                            p_change=price_change_5m,
+                            solscan_link=solscan_link,
+                            signal_title="🔥 **سیگنال خرید خودکار VIP**"
+                        )
 
         except Exception as e:
             print(f"⚠️ خطای موتور پردازش بازار: {e}")
@@ -988,7 +1091,6 @@ def unified_market_scanner_loop(app):
 
 web_app = Flask(__name__)
 
-# مسیر مینی‌اپلیکیشن عمومی (مخصوص کاربران عادی و خرید اشتراک)
 @web_app.route('/')
 def home():
     html_template = """
@@ -1075,7 +1177,6 @@ def home():
     """
     return render_template_string(html_template, wallet=WALLET_PUBKEY)
 
-# مسیر کاملاً جداگانه و اختصاصی پنل مدیریت ادمین (دارای لیست کامل کاربران و جزئیات)
 @web_app.route('/admin-panel')
 def admin_panel():
     t_id = request.args.get("telegram_id", "")
