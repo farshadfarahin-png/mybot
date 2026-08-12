@@ -41,9 +41,9 @@ COPY_TRADING_ENABLED = True
 FIRE_BUY_AMOUNT_SOL = 0.01
 FIRE_TAKE_PROFIT = 18.0
 FIRE_STOP_LOSS = -10.0
-FIRE_MIN_LIQUIDITY = 35000       # سخت‌گیری ۹۵ درصد
-FIRE_MIN_VOLUME_5M = 8000       # سخت‌گیری ۹۵ درصد
-FIRE_MIN_PRICE_CHANGE_5M = 8.0  # سخت‌گیری ۹۵ درصد
+FIRE_MIN_LIQUIDITY = 35000       
+FIRE_MIN_VOLUME_5M = 8000       
+FIRE_MIN_PRICE_CHANGE_5M = 8.0  
 
 COMBO_BUY_AMOUNT_SOL = 0.01
 COMBO_TAKE_PROFIT = 18.0
@@ -1102,9 +1102,7 @@ def home():
 def api_check_status():
     t_id = request.args.get("telegram_id", "")
     
-    # تفکیک دقیق امنیتی ادمین و کاربر
     is_admin_user = bool(t_id and str(t_id) == str(TELEGRAM_CHAT_ID))
-    
     subs = get_active_subscribers() if is_admin_user else []
     
     has_sub = False
