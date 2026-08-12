@@ -868,7 +868,7 @@ def check_positions_loop():
 
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
 
-                            exit_msg = (
+                            exit_msg_admin = (
                                 f"🔴 {reason}\n\n"
                                 f"🪙 توکن: {symbol}\n"
                                 f"📌 وضعیت خروج: {sell_res_info}\n"
@@ -877,8 +877,18 @@ def check_positions_loop():
                                 f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
                                 f"🔗 تراکنش Solscan:\n{solscan_link}"
                             )
-                            send_telegram_msg(exit_msg)
-                            send_telegram_msg(exit_msg, target_chat=CHANNEL_ID)
+
+                            exit_msg_channel = (
+                                f"🔴 {reason}\n\n"
+                                f"🪙 توکن: {symbol}\n"
+                                f"📍 آدرس:\n{token_addr}\n\n"
+                                f"📉 قیمت خروج: ${current_price:.8f}\n"
+                                f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
+                                f"🔗 تراکنش Solscan:\n{solscan_link}"
+                            )
+
+                            send_telegram_msg(exit_msg_admin)
+                            send_telegram_msg(exit_msg_channel, target_chat=CHANNEL_ID)
                             tokens_to_close.append(token_addr)
                 except Exception as inner_e:
                     print(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
