@@ -5,3 +5,6 @@ solders
 flask
 curl_cffi
 tweepy
+ccxt
+pandas
+numpy
