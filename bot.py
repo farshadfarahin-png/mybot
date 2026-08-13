@@ -419,7 +419,6 @@ def verify_blockchain_transaction(tx_signature, expected_currency="SOL"):
         if meta.get("err") is not None:
             return False, "تراکنش روی بلاکچین با خطا مواجه شده است (Failed Tx)."
             
-        # بررسی اینکه آیا به ولت ادمین واریز انجام شده یا خیر
         account_keys = result.get("transaction", {}).get("message", {}).get("accountKeys", [])
         admin_wallet_found = False
         for acc in account_keys:
@@ -451,6 +450,8 @@ def check_user_subscription(telegram_id):
                     return True, exp_date
                 else:
                     update_sub_status(telegram_id, "EXPIRED")
+                    # حذف خودکار از کانال به محض منقضی شدن در بررسی مستقیم
+                    kick_user_from_channel(telegram_id)
         return False, None
     except Exception:
         return False, None
@@ -464,6 +465,44 @@ def update_sub_status(telegram_id, status):
         conn.close()
     except:
         pass
+
+def kick_user_from_channel(telegram_id):
+    if not CHANNEL_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/banChatMember"
+        payload = {
+            "chat_id": CHANNEL_ID,
+            "user_id": int(telegram_id),
+            "until_date": int(time.time() + 35) # بن موقت برای بیرون انداختن از کانال و امکان بازگشت بعدی با لینک جدید
+        }
+        res = requests.post(url, json=payload, timeout=5).json()
+        if res.get("ok"):
+            print(f"🚫 کاربر {telegram_id} به دلیل اتمام اشتراک از کانال حذف شد.")
+            send_telegram_msg("⚠️ اشتراک ۳۰ روزه شما به اتمام رسید و دسترسی شما از کانال VIP قطع گردید.", target_chat=telegram_id)
+    except Exception as e:
+        print(f"❌ خطا در حذف کاربر از کانال: {e}")
+
+def subscription_monitor_loop():
+    print("🔄 مانیتورینگ خودکار انقضای اشتراک‌ها و اخراج از کانال فعال شد.")
+    while True:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("SELECT telegram_id, expiry_date, status FROM subscribers WHERE status = 'ACTIVE'")
+            rows = cursor.fetchall()
+            conn.close()
+
+            now = datetime.now()
+            for row in rows:
+                t_id, exp_str, status = row
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
+                if now >= exp_date:
+                    update_sub_status(t_id, "EXPIRED")
+                    kick_user_from_channel(t_id)
+        except Exception as e:
+            print(f"⚠️ خطا در مانیتورینگ اشتراک‌ها: {e}")
+        time.sleep(60)
 
 def send_telegram_msg(text, target_chat=None):
     chat_target = target_chat if target_chat else TELEGRAM_CHAT_ID
@@ -538,8 +577,9 @@ def register_subscription(telegram_id, wallet_addr, tx_sig, currency="SOL"):
         
         success_msg = (
             f"🎉 اشتراک ۳۰ روزه VIP شما با موفقیت پس از تایید تراکنش بلاکچین ({currency}) فعال شد!\n\n"
+            f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
-            f"📢 برای دریافت لحظه‌ای سیگنال‌ها و گزارش‌های گرافیکی، از طریق لینک زیر وارد کانال VIP شوید:\n\n"
+            f"📢 برای ورود مستقیم به کانال VIP از طریق لینک زیر اقدام کنید:\n\n"
             f"{CHANNEL_INVITE_LINK}"
         )
         send_telegram_msg(success_msg, target_chat=str(telegram_id))
@@ -562,6 +602,7 @@ def register_free_vip(telegram_id, wallet_addr):
         
         free_msg = (
             f"🎉 اشتراک VIP رایگان شما توسط ادمین فعال شد!\n\n"
+            f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
             f"📢 از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
             f"{CHANNEL_INVITE_LINK}"
@@ -588,7 +629,7 @@ def get_active_subscribers():
                 active_subs.append({"telegram_id": t_id, "wallet": w_addr, "expiry": exp_str})
             elif status == 'ACTIVE' and now >= exp_date:
                 update_sub_status(t_id, "EXPIRED")
-                send_telegram_msg("⚠️ اشتراک ۳۰ روزه شما به اتمام رسید.", target_chat=t_id)
+                kick_user_from_channel(t_id)
     except Exception:
         pass
     return active_subs
@@ -1391,6 +1432,7 @@ def home():
             h1 { color: #38bdf8; font-size: 16px; text-align: center; }
             p { font-size: 13px; color: #cbd5e1; }
             .badge { background: #22c55e; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }
+            .badge-expired { background: #ef4444; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }
             .btn { background: #0284c7; color: white; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 10px; text-align: center; display: block; text-decoration: none; box-sizing: border-box; }
             .btn-pay { background: #10b981; }
             input, select { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }
@@ -1419,21 +1461,24 @@ def home():
                 const area = document.getElementById('contentArea');
                 if(data.has_subscription) {
                     area.innerHTML = `
-                        <p>وضعیت سیستم: <span class="badge">آنلاین (Hulk & AI Mode Active)</span></p>
+                        <p>وضعیت سیستم: <span class="badge">آنلاین (اشتراک فعال VIP)</span></p>
                         <div style="background: #0f172a; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #22c55e; margin-top: 15px;">
                             <h3 style="color: #22c55e; margin-top: 0; font-size: 15px;">🎉 اشتراک VIP شما فعال است</h3>
-                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold;">⏳ انقضا: ${data.expiry_date}</p>
+                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold;">⏳ تاریخ انقضا و قطع ارتباط: ${data.expiry_date}</p>
+                            <p style="color: #94a3b8; font-size: 11px;">پس از اتمام این تاریخ، دسترسی شما به صورت خودکار از ربات و کانال قطع خواهد شد.</p>
                             <a href="https://t.me/+c_o1BlwD7Q4ZjZk" target="_blank" class="btn" style="background: #8b5cf6;">📢 ورود به کانال VIP</a>
                         </div>
                     `;
                 } else {
+                    let expiryNotice = data.last_expiry ? `<p style="color:#ef4444; font-size:11px;">⚠️ اشتراک قبلی شما منقضی شده است: ${data.last_expiry}</p>` : '';
                     area.innerHTML = `
-                        <p>وضعیت سیستم: <span class="badge">آنلاین (پرداخت امن بلاکچین)</span></p>
+                        <p>وضعیت سیستم: <span class="badge-expired">نیازمند اشتراک VIP</span></p>
+                        ${expiryNotice}
                         <div class="wallet-box">
-                            <p style="font-size:11px; margin:0 0 5px 0; color:#38bdf8;">لطفاً مبلغ اشتراک را به ولت زیر واریز کنید:</p>
+                            <p style="font-size:11px; margin:0 0 5px 0; color:#38bdf8;">لطفاً مبلغ اشتراک ۳۰ روزه را به ولت زیر واریز کنید:</p>
                             <code style="word-break: break-all; font-size:11px; color:#facc15;">{{ wallet }}</code>
                         </div>
-                        <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه VIP ($100)</h3>
+                        <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه VIP</h3>
                         <label style="font-size:11px; color:#94a3b8;">انتخاب ارز پرداخت:</label>
                         <select id="paymentCurrency">
                             <option value="SOL">پرداخت با ارز SOL (سولانا)</option>
@@ -1442,7 +1487,7 @@ def home():
                         <input type="text" id="userTelegramId" value="${telegramId}" placeholder="آیدی تلگرام شما">
                         <input type="text" id="userWallet" placeholder="آدرس ولت فرستنده شما">
                         <input type="text" id="txSignature" placeholder="هش تراکنش (TxID) واریز شده را اینجا وارد کنید">
-                        <button class="btn btn-pay" onclick="verifyAndPay()">تایید و فعال‌سازی خودکار اشتراک</button>
+                        <button class="btn btn-pay" onclick="verifyAndPay()">تایید تراکنش و عضویت خودکار در کانال</button>
                     `;
                 }
             });
@@ -1504,23 +1549,34 @@ def admin_panel():
                 <p>📉 بدترین معامله: <b style="color:#ef4444;">{worst_str}</b></p>
             </div>
 
-            <p>👥 کاربران فعال VIP (تایید شده از بلاکچین): <b>{len(subs)}</b></p>
+            <p>👥 کاربران فعال VIP (با تاریخ انقضا و اخراج خودکار): <b>{len(subs)}</b></p>
     """
     for sub in subs:
-        admin_html += f"<div style='background:#0f172a;padding:8px;margin:5px 0;border-radius:6px;font-size:11px;'>🆔 {sub['telegram_id']} | 🔑 {sub['wallet']}</div>"
+        admin_html += f"<div style='background:#0f172a;padding:8px;margin:5px 0;border-radius:6px;font-size:11px;'>🆔 {sub['telegram_id']} | ⏳ انقضا: {sub['expiry']}</div>"
     admin_html += "</div></body></html>"
     return admin_html
 
 @web_app.route('/api/check-status')
 def api_check_status():
     t_id = request.args.get("telegram_id", "")
-    has_sub, expiry_str = False, ""
+    has_sub, expiry_str, last_exp = False, "", ""
     if t_id:
         active, exp_date = check_user_subscription(t_id)
         if active and exp_date:
             has_sub = True
             expiry_str = exp_date.strftime("%Y-%m-%d %H:%M:%S")
-    return jsonify({"has_subscription": has_sub, "expiry_date": expiry_str})
+        else:
+            try:
+                conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
+                cursor = conn.cursor()
+                cursor.execute("SELECT expiry_date FROM subscribers WHERE telegram_id = ?", (str(t_id),))
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    last_exp = row[0]
+            except:
+                pass
+    return jsonify({"has_subscription": has_sub, "expiry_date": expiry_str, "last_expiry": last_exp})
 
 @web_app.route('/api/subscribe', methods=['POST'])
 def api_subscribe():
@@ -1533,15 +1589,13 @@ def api_subscribe():
     if not t_id or not wallet or not tx_signature:
         return jsonify({"status": "error", "message": "اطلاعات ناقص است یا هش تراکنش وارد نشده است."})
         
-    # استعلام واقعی تراکنش از شبکه بلاکچین
     is_valid, verify_msg = verify_blockchain_transaction(tx_signature, currency)
     if not is_valid:
         return jsonify({"status": "error", "message": f"تایید تراکنش ناموفق بود: {verify_msg}"})
         
-    # ثبت نام کاربر پس از تایید قطعی بلاکچین
     success = register_subscription(t_id, wallet, tx_signature, currency)
     if success:
-        return jsonify({"status": "success", "message": "تراکنش با موفقیت روی بلاکچین تایید و اشتراک VIP فعال شد!"})
+        return jsonify({"status": "success", "message": "تراکنش روی بلاکچین تایید، اشتراک ۳۰ روزه فعال و دسترسی کانال باز شد!"})
     else:
         return jsonify({"status": "error", "message": "خطا در ثبت نهایی اشتراک در دیتابیس."})
 
@@ -1732,7 +1786,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ (نسخه هالکی شکست‌ناپذیر):", reply_markup=get_main_keyboard())
     else:
         user_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و درگاه ارزی VIP", web_app=WebAppInfo(url=WEBAPP_URL))]])
-        await update.message.reply_text("👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید.", reply_markup=user_keyboard)
+        await update.message.reply_text("👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید. برای مشاهده تاریخ انقضای اشتراک و ورود به صرافی از دکمه زیر استفاده کنید:", reply_markup=user_keyboard)
 
 async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
@@ -1965,5 +2019,9 @@ if __name__ == "__main__":
     pos_thread.daemon = True
     pos_thread.start()
 
-    print("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP (نسخه هالکی شکست‌ناپذیر با دقت ۹۹٪ و درگاه ارزی متنوع) با موفقیت اجرا شد.")
+    sub_monitor_thread = Thread(target=subscription_monitor_loop)
+    sub_monitor_thread.daemon = True
+    sub_monitor_thread.start()
+
+    print("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP (نسخه هالکی شکست‌ناپذیر با مانیتورینگ دقیق و اخراج خودکار کانال) با موفقیت اجرا شد.")
     app.run_polling()
