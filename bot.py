@@ -590,7 +590,7 @@ def register_free_vip(telegram_id, wallet_addr="FREE_PASS_WALLET"):
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
         cursor = conn.cursor()
-        expiry = datetime.now() + timedelta(days=30) # اعطای ۳۰ روز اشتراک رایگان استاندارد
+        expiry = datetime.now() + timedelta(days=30)
         cursor.execute("""
             INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
             VALUES (?, ?, ?, ?, 'ACTIVE')
@@ -1423,15 +1423,15 @@ def home():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>صرافی و مینی‌اپلیکیشن VIP هالکی</title>
+        <title>پنل کاربری و صرافی VIP هالکی</title>
         <style>
             body { font-family: Tahoma, sans-serif; background: #0f172a; color: #f8fafc; padding: 15px; text-align: center; margin: 0; }
             .card { background: #1e293b; border-radius: 16px; padding: 20px; margin: 10px auto; max-width: 480px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); text-align: right; }
             h1 { color: #38bdf8; font-size: 16px; text-align: center; }
             p { font-size: 13px; color: #cbd5e1; }
-            .badge { background: #22c55e; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }
-            .badge-expired { background: #ef4444; color: white; padding: 3px 10px; border-radius: 20px; font-size: 11px; }
-            .btn { background: #0284c7; color: white; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 10px; text-align: center; display: block; text-decoration: none; box-sizing: border-box; }
+            .badge { background: #22c55e; color: white; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; }
+            .badge-expired { background: #ef4444; color: white; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; }
+            .btn { background: #0284c7; color: white; border: none; padding: 12px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 12px; text-align: center; display: block; text-decoration: none; box-sizing: border-box; }
             .btn-pay { background: #10b981; }
             input, select { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }
             .wallet-box { background: #0f172a; padding: 10px; border-radius: 8px; border: 1px dashed #38bdf8; text-align: center; margin-bottom: 10px; }
@@ -1440,7 +1440,7 @@ def home():
     <body>
         <div class="card">
             <h1>🚀 مینی‌اپلیکیشن هوشمند تریدینگ هالکی & AI</h1>
-            <div id="contentArea">بارگذاری اطلاعات...</div>
+            <div id="contentArea">در حال بررسی وضعیت اشتراک شما...</div>
         </div>
         <script>
             let telegramId = "";
@@ -1458,25 +1458,31 @@ def home():
             .then(data => {
                 const area = document.getElementById('contentArea');
                 if(data.has_subscription) {
+                    // کاربر اشتراک فعال دارد (چه پولی چه رایگان) -> فرم ثبت‌نام نشان داده نمی‌شود
                     area.innerHTML = `
-                        <p>وضعیت سیستم: <span class="badge">آنلاین (اشتراک فعال VIP)</span></p>
-                        <div style="background: #0f172a; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #22c55e; margin-top: 15px;">
-                            <h3 style="color: #22c55e; margin-top: 0; font-size: 15px;">🎉 اشتراک VIP شما فعال است</h3>
-                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold;">⏳ تاریخ انقضا و قطع ارتباط: ${data.expiry_date}</p>
-                            <p style="color: #94a3b8; font-size: 11px;">پس از اتمام این تاریخ، دسترسی شما به صورت خودکار از ربات و کانال قطع خواهد شد.</p>
-                            <a href="https://t.me/+c_o1BlwD7Q4ZjZk" target="_blank" class="btn" style="background: #8b5cf6;">📢 ورود به کانال VIP</a>
+                        <div style="text-align: center; padding: 10px 0;">
+                            <p style="margin-bottom: 8px;">وضعیت حساب: <span class="badge">اشتراک VIP فعال ✅</span></p>
+                        </div>
+                        <div style="background: #0f172a; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #22c55e; margin-top: 10px;">
+                            <h3 style="color: #22c55e; margin-top: 0; font-size: 15px;">🎉 دسترسی VIP شما کاملاً فعال است</h3>
+                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold; margin: 10px 0;">⏳ تاریخ انقضا و قطع ارتباط: ${data.expiry_date}</p>
+                            <p style="color: #94a3b8; font-size: 11px; line-height: 1.5;">سیستم کپی‌تریدینگ هوشمند برای ولت شما فعال بوده و سیگنال‌ها به صورت خودکار اعمال می‌شوند.</p>
+                            <a href="https://t.me/+c_o1BlwD7Q4ZjZk" target="_blank" class="btn" style="background: #8b5cf6; margin-top: 15px;">📢 ورود مستقیم به کانال VIP</a>
                         </div>
                     `;
                 } else {
-                    let expiryNotice = data.last_expiry ? `<p style="color:#ef4444; font-size:11px;">⚠️ اشتراک قبلی شما منقضی شده است: ${data.last_expiry}</p>` : '';
+                    // کاربر فاقد اشتراک فعال است -> فرم ثبت‌نام / خرید نمایش داده می‌شود
+                    let expiryNotice = data.last_expiry ? `<p style="color:#ef4444; font-size:11px; text-align:center;">⚠️ اشتراک قبلی شما منقضی شده است: ${data.last_expiry}</p>` : '';
                     area.innerHTML = `
-                        <p>وضعیت سیستم: <span class="badge-expired">نیازمند اشتراک VIP</span></p>
+                        <div style="text-align: center; padding: 5px 0 10px 0;">
+                            <p>وضعیت حساب: <span class="badge-expired">نیازمند اشتراک VIP ❌</span></p>
+                        </div>
                         ${expiryNotice}
                         <div class="wallet-box">
                             <p style="font-size:11px; margin:0 0 5px 0; color:#38bdf8;">لطفاً مبلغ اشتراک ۳۰ روزه را به ولت زیر واریز کنید:</p>
                             <code style="word-break: break-all; font-size:11px; color:#facc15;">{{ wallet }}</code>
                         </div>
-                        <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه VIP</h3>
+                        <h3 style="color: #c084fc; font-size: 14px; text-align: center;">اشتراک ۳۰ روزه VIP</h3>
                         <label style="font-size:11px; color:#94a3b8;">انتخاب ارز پرداخت:</label>
                         <select id="paymentCurrency">
                             <option value="SOL">پرداخت با ارز SOL (سولانا)</option>
@@ -1488,6 +1494,8 @@ def home():
                         <button class="btn btn-pay" onclick="verifyAndPay()">تایید تراکنش و عضویت خودکار در کانال</button>
                     `;
                 }
+            }).catch(err => {
+                document.getElementById('contentArea').innerHTML = '<p style="color:#ef4444; text-align:center;">خطا در دریافت وضعیت از سرور.</p>';
             });
 
             function verifyAndPay() {
