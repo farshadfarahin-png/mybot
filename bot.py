@@ -255,7 +255,7 @@ def check_social_sentiment_and_hype(pair):
         txns = pair.get('txns', {}).get('m5', {})
         buys = txns.get('buys', 0)
         sells = txns.get('sells', 0)
-        if (len(socials) > 0 or len(websites) > 0) and buys >= (sells * 1.1):
+        if (len(socials) > 0 or len(websites) > 0) and buys >= (sells * 1.25):
             return True, "تایید سنتیمنت و هجوم هایپ شبکه‌های اجتماعی 🚀"
         return True, "گذر از فیلتر سنتیمنت پایه"
     except Exception as e:
@@ -272,6 +272,7 @@ def get_real_market_trending_tokens():
         "https://api.dexscreener.com/latest/dex/search?q=raydium"
     ]
     
+    # مدیریت حافظه RAM: پاک‌سازی اتوماتیک مجموعه توکن‌ها هنگام بزرگ شدن بیش از حد
     with state_lock:
         if len(processed_tokens) > 3000:
             processed_tokens.clear()
@@ -341,14 +342,14 @@ def ultra_accuracy_scanner_loop(app):
                     continue
 
                 if SMART_MONEY_COPY_ENABLED:
-                    with state_lock:
-                        ultra_processed_tokens.add(token_addr)
-                        processed_tokens.add(token_addr)
-
                     current_buy_amt = get_dynamic_buy_amount(0.01)
                     success, result_info = execute_real_buy(token_addr, 0.01)
                     if not success:
                         continue
+
+                    with state_lock:
+                        ultra_processed_tokens.add(token_addr)
+                        processed_tokens.add(token_addr)
 
                     solscan_link = f"https://solscan.io/tx/{result_info}"
                     init_tp = 30.0
@@ -415,15 +416,15 @@ def mempool_smart_money_scanner_loop(app):
                 price = float(pair.get('priceUsd', 0))
 
                 if liquidity > 20000 and volume_5m > 6000 and price > 0:
-                    with state_lock:
-                        mempool_processed_tokens.add(token_addr)
-                        processed_tokens.add(token_addr)
-
                     current_buy_amt = get_dynamic_buy_amount(0.01)
                     success, result_info = execute_real_buy(token_addr, 0.01)
                     if not success:
                         continue 
                     
+                    with state_lock:
+                        mempool_processed_tokens.add(token_addr)
+                        processed_tokens.add(token_addr)
+
                     buy_status_str = "شکار موفق از ممپول (موفق روی بلاکچین ✅)"
                     solscan_link = f"https://solscan.io/tx/{result_info}"
 
@@ -781,12 +782,12 @@ def is_token_worthy(pair):
             txns = pair.get('txns', {}).get('m5', {})
             buys = txns.get('buys', 0)
             sells = txns.get('sells', 0)
-            if buys < sells:
+            if buys < (sells * 1.25):
                 return False
         
         liquidity = float(pair.get('liquidity', {}).get('usd', 0))
         volume_5m = float(pair.get('volume', {}).get('m5', 0))
-        if liquidity < 15000 or volume_5m < 4000:
+        if liquidity < 25000 or volume_5m < 8000:
             return False
         return True
     except Exception:
@@ -815,10 +816,10 @@ def validate_ultimate_21_layers(token_addr, pair):
         buys = txns.get('buys', 0)
         sells = txns.get('sells', 0)
 
-        if price <= 0 or liquidity < 20000 or volume_5m < 6000:
+        if price <= 0 or liquidity < 25000 or volume_5m < 8000:
             return False, "رد شده در لایه‌های نقدینگی یا حجم پایه"
         
-        if buys < (sells * 0.8):
+        if buys < (sells * 1.2):
             return False, "رد شده در لایه فشار خرید"
             
         return True, "تأیید کامل لایه‌های حفاظتی و الگوریتمی هوشمند پیشرفته"
@@ -879,19 +880,22 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
+    quote_urls = [
+        f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=300",
+        f"https://quote-api.jup.ag/v6/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
+    ]
     
     quote_res = None
-    for attempt in range(2):
+    for q_url in quote_urls:
         try:
-            res = http_session.get(quote_url, headers=headers, timeout=4)
+            res = http_session.get(q_url, headers=headers, timeout=4)
             if res.status_code == 200:
-                quote_res = res.json()
-                if "error" not in quote_res:
+                q_data = res.json()
+                if "error" not in q_data and ("outAmount" in q_data or "quoteResponse" in q_data):
+                    quote_res = q_data
                     break
         except Exception as e:
-            logger.debug(f"Jupiter quote attempt failed: {e}")
-        time.sleep(0.2)
+            logger.debug(f"Jupiter quote attempt failed for {q_url}: {e}")
 
     if not quote_res or "error" in quote_res:
         return False, "خطای کوت ژوپیتر ❌"
@@ -958,6 +962,7 @@ def close_wsol_account():
     try:
         wsol_mint_pubkey = Pubkey.from_string(SOL_MINT)
         wallet_pubkey_obj = Pubkey.from_string(WALLET_PUBKEY)
+
         token_program_pubkey = Pubkey.from_string(TOKEN_PROGRAM_ID)
         
         assoc_account = Pubkey.find_program_address(
@@ -1241,14 +1246,14 @@ def technical_analysis_scanner_loop(app):
                 if not is_valid_pa:
                     continue
 
-                with state_lock:
-                    tech_processed_tokens.add(token_addr)
-                    processed_tokens.add(token_addr)
-
                 current_buy_amt = get_dynamic_buy_amount(TECH_BUY_AMOUNT_SOL)
                 success, result_info = execute_real_buy(token_addr, TECH_BUY_AMOUNT_SOL)
                 if not success:
                     continue
+
+                with state_lock:
+                    tech_processed_tokens.add(token_addr)
+                    processed_tokens.add(token_addr)
 
                 buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
                 solscan_link = f"https://solscan.io/tx/{result_info}"
@@ -1334,22 +1339,23 @@ def unified_market_scanner_loop(app):
                     is_bottom_accumulation = (
                         -3.0 <= price_change_5m <= 8.0 and 
                         volume_5m >= (liquidity * 0.2) and 
-                        buys > (sells * 1.1)
+                        buys > (sells * 1.25)
                     )
                     
                     is_pump_breakout = (
                         price_change_5m >= 10.0 and 
                         volume_5m >= 12000 and 
-                        buys > sells
+                        buys > (sells * 1.2)
                     )
 
                     if is_bottom_accumulation or is_pump_breakout:
-                        with state_lock:
-                            processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(0.01)
                         success, result_info = execute_real_buy(token_addr, 0.01)
                         if not success:
                             continue
+
+                        with state_lock:
+                            processed_tokens.add(token_addr)
                         
                         solscan_link = f"https://solscan.io/tx/{result_info}"
                         signal_reason = "🐳 شکار کف معتبر و انباشت نهنگ" if is_bottom_accumulation else "🚀 شروع پامپ و شتاب‌دهنده صعودی"
@@ -1373,13 +1379,14 @@ def unified_market_scanner_loop(app):
                 if SYNCHRONIZED_MODE and token_addr not in processed_tokens:
                     is_approved, entry_p, calc_tp, calc_sl, eval_reason = evaluate_ultimate_super_signal(token_addr, pair)
                     if is_approved:
-                        with state_lock:
-                            processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(0.01)
                         success, result_info = execute_real_buy(token_addr, 0.01)
                         if not success:
                             continue
                         
+                        with state_lock:
+                            processed_tokens.add(token_addr)
+
                         buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
                         solscan_link = f"https://solscan.io/tx/{result_info}"
 
@@ -1415,16 +1422,16 @@ def unified_market_scanner_loop(app):
                     if (price_change_5m >= GOLDEN_MIN_CHANGE_5M and 
                         volume_5m >= GOLDEN_MIN_VOLUME_5M and 
                         liquidity >= GOLDEN_MIN_LIQUIDITY):
-                        
-                        with state_lock:
-                            golden_processed_tokens.add(token_addr)
-                            processed_tokens.add(token_addr)
 
                         current_buy_amt = get_dynamic_buy_amount(GOLDEN_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, GOLDEN_BUY_AMOUNT_SOL)
                         if not success:
                             continue
                         
+                        with state_lock:
+                            golden_processed_tokens.add(token_addr)
+                            processed_tokens.add(token_addr)
+
                         buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
                         solscan_link = f"https://solscan.io/tx/{result_info}"
 
@@ -1453,16 +1460,16 @@ def unified_market_scanner_loop(app):
                     if (price_change_5m >= COMBO_MIN_CHANGE_5M and 
                         volume_5m >= COMBO_MIN_VOLUME_5M and 
                         liquidity >= COMBO_MIN_LIQUIDITY):
-                        
-                        with state_lock:
-                            trend_alerted_tokens.add(token_addr)
-                            processed_tokens.add(token_addr)
 
                         current_buy_amt = get_dynamic_buy_amount(COMBO_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, COMBO_BUY_AMOUNT_SOL)
                         if not success:
                             continue
                         
+                        with state_lock:
+                            trend_alerted_tokens.add(token_addr)
+                            processed_tokens.add(token_addr)
+
                         solscan_link = f"https://solscan.io/tx/{result_info}"
 
                         with state_lock:
@@ -1485,12 +1492,13 @@ def unified_market_scanner_loop(app):
                         volume_5m >= FIRE_MIN_VOLUME_5M and 
                         price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M):
 
-                        with state_lock:
-                            processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(FIRE_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
                         if not success:
                             continue
+
+                        with state_lock:
+                            processed_tokens.add(token_addr)
                         
                         solscan_link = f"https://solscan.io/tx/{result_info}"
                         
