@@ -49,7 +49,7 @@ CHANNEL_INVITE_LINK = "https://t.me/+c_o1BlwD7Q4ZjZk"
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://your-render-or-hosting-url.com")
 
-RPC_URL = os.environ.get("RPC_URL", "https://mainnet.helius-rpc.com/?api-key=ef769dc4-03dc-4f1d-ba4a-a651d75f6b80")
+RPC_URL = os.environ.get
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" 
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
