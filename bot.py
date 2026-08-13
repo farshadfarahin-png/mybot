@@ -5,8 +5,9 @@ import base64
 import base58
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta
-from threading import Thread
+from threading import Thread, Lock
 from flask import Flask, render_template_string, request, jsonify
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -15,6 +16,10 @@ from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 from solders.instruction import Instruction
 from solders.message import MessageV0
+
+# قفل‌های همزمانی برای ایمنی کامل در ثردها (Thread Safety)
+db_lock = Lock()
+state_lock = Lock()
 
 # تنظیمات کلیدی محیطی و کانال انتشار سیگنال
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
@@ -102,117 +107,123 @@ total_realized_pnl_usd = 0.0
 total_realized_pnl_percent = 0.0
 
 def init_db():
-    try:
-        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                token_address TEXT,
-                symbol TEXT,
-                entry_price REAL,
-                exit_price REAL,
-                pnl_percent REAL,
-                pnl_usd REAL,
-                entry_reason TEXT,
-                timestamp TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS subscribers (
-                telegram_id TEXT PRIMARY KEY,
-                wallet_address TEXT,
-                expiry_date TEXT,
-                tx_signature TEXT,
-                status TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS ai_learning_params (
-                param_name TEXT PRIMARY KEY,
-                param_value REAL
-            )
-        """)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ خطای دیتابیس: {e}")
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA busy_timeout=5000;")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_address TEXT,
+                    symbol TEXT,
+                    entry_price REAL,
+                    exit_price REAL,
+                    pnl_percent REAL,
+                    pnl_usd REAL,
+                    entry_reason TEXT,
+                    timestamp TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS subscribers (
+                    telegram_id TEXT PRIMARY KEY,
+                    wallet_address TEXT,
+                    expiry_date TEXT,
+                    tx_signature TEXT,
+                    status TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_learning_params (
+                    param_name TEXT PRIMARY KEY,
+                    param_value REAL
+                )
+            """)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ خطای دیتابیس: {e}")
 
 init_db()
 
 def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason):
-    try:
-        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO trades (token_address, symbol, entry_price, exit_price, pnl_percent, pnl_usd, entry_reason, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}")
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO trades (token_address, symbol, entry_price, exit_price, pnl_percent, pnl_usd, entry_reason, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}")
 
 def get_advanced_trade_analytics():
-    try:
-        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*), SUM(pnl_percent), SUM(pnl_usd), AVG(pnl_percent) FROM trades")
-        res = cursor.fetchone()
-        total_trades = res[0] or 0
-        total_pct = res[1] or 0.0
-        total_usd = res[2] or 0.0
-        avg_pct = res[3] or 0.0
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*), SUM(pnl_percent), SUM(pnl_usd), AVG(pnl_percent) FROM trades")
+            res = cursor.fetchone()
+            total_trades = res[0] or 0
+            total_pct = res[1] or 0.0
+            total_usd = res[2] or 0.0
+            avg_pct = res[3] or 0.0
 
-        cursor.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent > 0")
-        win_count = cursor.fetchone()[0] or 0
-        win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent > 0")
+            win_count = cursor.fetchone()[0] or 0
+            win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
 
-        cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 1")
-        best_trade = cursor.fetchone()
+            cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 1")
+            best_trade = cursor.fetchone()
 
-        cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent ASC LIMIT 1")
-        worst_trade = cursor.fetchone()
-        conn.close()
+            cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent ASC LIMIT 1")
+            worst_trade = cursor.fetchone()
+            conn.close()
 
-        return {
-            "total_trades": total_trades,
-            "total_pct": round(total_pct, 2),
-            "total_usd": round(total_usd, 2),
-            "avg_pct": round(avg_pct, 2),
-            "win_rate": round(win_rate, 2),
-            "win_count": win_count,
-            "best_trade": best_trade,
-            "worst_trade": worst_trade
-        }
-    except Exception as e:
-        print(f"⚠️ خطا در گزارش‌گیری پیشرفته: {e}")
-        return {"total_trades": 0, "total_pct": 0.0, "total_usd": 0.0, "avg_pct": 0.0, "win_rate": 0.0, "win_count": 0, "best_trade": None, "worst_trade": None}
+            return {
+                "total_trades": total_trades,
+                "total_pct": round(total_pct, 2),
+                "total_usd": round(total_usd, 2),
+                "avg_pct": round(avg_pct, 2),
+                "win_rate": round(win_rate, 2),
+                "win_count": win_count,
+                "best_trade": best_trade,
+                "worst_trade": worst_trade
+            }
+        except Exception as e:
+            print(f"⚠️ خطا در گزارش‌گیری پیشرفته: {e}")
+            return {"total_trades": 0, "total_pct": 0.0, "total_usd": 0.0, "avg_pct": 0.0, "win_rate": 0.0, "win_count": 0, "best_trade": None, "worst_trade": None}
 
 def self_learning_ai_optimizer_loop():
     global FIRE_MIN_LIQUIDITY, COMBO_MIN_LIQUIDITY, GOLDEN_MIN_LIQUIDITY
     print("🧠 موتور هوش مصنوعی یادگیرنده (Self-Learning AI) فعال شد.")
     while True:
         if SELF_LEARNING_AI_ENABLED:
-            try:
-                conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-                cursor = conn.cursor()
-                cursor.execute("SELECT AVG(pnl_percent), COUNT(*) FROM trades")
-                row = cursor.fetchone()
-                if row and row[1] and row[1] >= 5:
-                    avg_pnl = row[0] or 0.0
-                    total_t = row[1]
-                    print(f"🧠 [AI Learning]: آنالیز {total_t} معامله گذشته. میانگین سود: {avg_pnl:.2f}%")
-                    if avg_pnl < 2.0:
-                        FIRE_MIN_LIQUIDITY += 1000
-                        GOLDEN_MIN_LIQUIDITY += 1500
-                        print("🧠 [AI Adjustment]: فیلتر نقدینگی سخت‌تر شد.")
-                    elif avg_pnl > 10.0:
-                        FIRE_MIN_LIQUIDITY = max(25000, FIRE_MIN_LIQUIDITY - 500)
-                        print("🧠 [AI Adjustment]: الگوریتم در حالت بهینه حداکثری قرار گرفت.")
-                conn.close()
-            except Exception as e:
-                print(f"⚠️ خطای موتور هوش مصنوعی یادگیرنده: {e}")
+            with db_lock:
+                try:
+                    conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT AVG(pnl_percent), COUNT(*) FROM trades")
+                    row = cursor.fetchone()
+                    if row and row[1] and row[1] >= 5:
+                        avg_pnl = row[0] or 0.0
+                        total_t = row[1]
+                        print(f"🧠 [AI Learning]: آنالیز {total_t} معامله گذشته. میانگین سود: {avg_pnl:.2f}%")
+                        if avg_pnl < 2.0:
+                            FIRE_MIN_LIQUIDITY += 1000
+                            GOLDEN_MIN_LIQUIDITY += 1500
+                            print("🧠 [AI Adjustment]: فیلتر نقدینگی سخت‌تر شد.")
+                        elif avg_pnl > 10.0:
+                            FIRE_MIN_LIQUIDITY = max(25000, FIRE_MIN_LIQUIDITY - 500)
+                            print("🧠 [AI Adjustment]: الگوریتم در حالت بهینه حداکثری قرار گرفت.")
+                    conn.close()
+                except Exception as e:
+                    print(f"⚠️ خطای موتور هوش مصنوعی یادگیرنده: {e}")
         time.sleep(300)
 
 def check_social_sentiment_and_hype(pair):
@@ -224,36 +235,39 @@ def check_social_sentiment_and_hype(pair):
         txns = pair.get('txns', {}).get('m5', {})
         buys = txns.get('buys', 0)
         sells = txns.get('sells', 0)
-        if (len(socials) > 0 or len(websites) > 0) and buys >= (sells * 1.2):
+        if (len(socials) > 0 or len(websites) > 0) and buys >= (sells * 1.1):
             return True, "تایید سنتیمنت و هجوم هایپ شبکه‌های اجتماعی 🚀"
-        return False, "رد شده در لایه سنتیمنت"
+        return True, "گذر از فیلتر سنتیمنت پایه"
     except:
         return True, "گذر از فیلتر سنتیمنت"
 
 def get_real_market_trending_tokens():
     tokens = []
-    try:
-        url_boost = "https://api.dexscreener.com/token-boosts/top/v1"
-        res = requests.get(url_boost, timeout=4).json()
-        if isinstance(res, list):
-            for t in res:
-                if t.get('chainId') == 'solana':
-                    addr = t.get('tokenAddress')
-                    if addr and addr not in tokens:
-                        tokens.append(addr)
-    except Exception:
-        pass
-
-    try:
-        latest_url = "https://api.dexscreener.com/latest/dex/search?q=solana"
-        res_latest = requests.get(latest_url, timeout=4).json()
-        for p in res_latest.get("pairs", []):
-            if p.get("chainId") == "solana":
-                addr = p.get("baseToken", {}).get("address")
-                if addr and addr not in tokens:
-                    tokens.append(addr)
-    except Exception:
-        pass
+    endpoints = [
+        "https://api.dexscreener.com/token-boosts/top/v1",
+        "https://api.dexscreener.com/token-boosts/latest/v1",
+        "https://api.dexscreener.com/token-profiles/latest/v1",
+        "https://api.dexscreener.com/latest/dex/search?q=solana",
+        "https://api.dexscreener.com/latest/dex/search?q=raydium"
+    ]
+    
+    for url in endpoints:
+        try:
+            res = requests.get(url, timeout=4).json()
+            if isinstance(res, list):
+                for t in res:
+                    if t.get('chainId') == 'solana':
+                        addr = t.get('tokenAddress')
+                        if addr and addr not in tokens:
+                            tokens.append(addr)
+            elif isinstance(res, dict):
+                for p in res.get("pairs", []):
+                    if p.get("chainId") == "solana":
+                        addr = p.get("baseToken", {}).get("address")
+                        if addr and addr not in tokens:
+                            tokens.append(addr)
+        except Exception:
+            continue
     return tokens
 
 def ultra_accuracy_scanner_loop(app):
@@ -266,9 +280,10 @@ def ultra_accuracy_scanner_loop(app):
             continue
         try:
             tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:15]:
-                if not token_addr or token_addr in active_positions or token_addr in ultra_processed_tokens:
-                    continue
+            for token_addr in tokens[:25]:
+                with state_lock:
+                    if not token_addr or token_addr in active_positions or token_addr in ultra_processed_tokens:
+                        continue
 
                 pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
                 if not pair_res.get('pairs'):
@@ -281,7 +296,7 @@ def ultra_accuracy_scanner_loop(app):
                 symbol = pair.get('baseToken', {}).get('symbol', 'ULTRA')
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
 
-                if liquidity < 40000 or volume_5m < 15000 or price <= 0:
+                if liquidity < 25000 or volume_5m < 8000 or price <= 0:
                     continue
 
                 is_social_ok, social_msg = check_social_sentiment_and_hype(pair)
@@ -289,8 +304,9 @@ def ultra_accuracy_scanner_loop(app):
                     continue
 
                 if SMART_MONEY_COPY_ENABLED:
-                    ultra_processed_tokens.add(token_addr)
-                    processed_tokens.add(token_addr)
+                    with state_lock:
+                        ultra_processed_tokens.add(token_addr)
+                        processed_tokens.add(token_addr)
 
                     current_buy_amt = get_dynamic_buy_amount(0.01)
                     success, result_info = execute_real_buy(token_addr, 0.01)
@@ -301,16 +317,17 @@ def ultra_accuracy_scanner_loop(app):
                     init_tp = 30.0
                     init_sl = -7.0
 
-                    active_positions[token_addr] = {
-                        "entry_price": price,
-                        "symbol": symbol,
-                        "tp": init_tp,
-                        "sl": init_sl,
-                        "highest_price": price,
-                        "highest_pnl": 0.0,
-                        "locked_floor": init_sl,
-                        "trailing_active": DYNAMIC_TRAILING_TP_ENABLED
-                    }
+                    with state_lock:
+                        active_positions[token_addr] = {
+                            "entry_price": price,
+                            "symbol": symbol,
+                            "tp": init_tp,
+                            "sl": init_sl,
+                            "highest_price": price,
+                            "highest_pnl": 0.0,
+                            "locked_floor": init_sl,
+                            "trailing_active": DYNAMIC_TRAILING_TP_ENABLED
+                        }
 
                     ultra_msg = (
                         f"💎✨ [سیگنال هوش مصنوعی پیش‌رو - دقت ۹۹٪]\n"
@@ -331,7 +348,7 @@ def ultra_accuracy_scanner_loop(app):
                     )
         except Exception as e:
             print(f"⚠️ خطای موتور فوق‌پیشرفته: {e}")
-        time.sleep(4)
+        time.sleep(3)
 
 def mempool_smart_money_scanner_loop(app):
     global MEMPOOL_SMART_MONEY_ENABLED
@@ -342,9 +359,10 @@ def mempool_smart_money_scanner_loop(app):
             continue
         try:
             trending_tokens = get_real_market_trending_tokens()
-            for token_addr in trending_tokens[:10]:
-                if not token_addr or token_addr in active_positions or token_addr in mempool_processed_tokens:
-                    continue
+            for token_addr in trending_tokens[:20]:
+                with state_lock:
+                    if not token_addr or token_addr in active_positions or token_addr in mempool_processed_tokens:
+                        continue
                 
                 pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
                 if not pair_res.get('pairs'):
@@ -356,9 +374,10 @@ def mempool_smart_money_scanner_loop(app):
                 symbol = pair.get('baseToken', {}).get('symbol', 'SMART')
                 price = float(pair.get('priceUsd', 0))
 
-                if liquidity > 30000 and volume_5m > 10000 and price > 0:
-                    mempool_processed_tokens.add(token_addr)
-                    processed_tokens.add(token_addr)
+                if liquidity > 20000 and volume_5m > 6000 and price > 0:
+                    with state_lock:
+                        mempool_processed_tokens.add(token_addr)
+                        processed_tokens.add(token_addr)
 
                     current_buy_amt = get_dynamic_buy_amount(0.01)
                     success, result_info = execute_real_buy(token_addr, 0.01)
@@ -379,13 +398,14 @@ def mempool_smart_money_scanner_loop(app):
                         f"🔍 [Solscan]({solscan_link})\n"
                         f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                     )
-                    active_positions[token_addr] = {
-                        "entry_price": price,
-                        "symbol": symbol,
-                        "tp": 25.0,
-                        "sl": -8.0,
-                        "highest_price": price
-                    }
+                    with state_lock:
+                        active_positions[token_addr] = {
+                            "entry_price": price,
+                            "symbol": symbol,
+                            "tp": 25.0,
+                            "sl": -8.0,
+                            "highest_price": price
+                        }
                     send_telegram_msg(mempool_msg)
                     send_graphic_signal_to_vip_channel(
                         token_addr=token_addr, symbol=symbol, price=price, tp=25.0, sl=-8.0,
@@ -394,7 +414,7 @@ def mempool_smart_money_scanner_loop(app):
                     )
         except Exception as e:
             print(f"⚠️ خطای اسکن ممپول: {e}")
-        time.sleep(5)
+        time.sleep(4)
 
 def verify_blockchain_transaction(tx_signature, expected_currency="SOL"):
     if not tx_signature or len(tx_signature) < 30:
@@ -435,34 +455,36 @@ def verify_blockchain_transaction(tx_signature, expected_currency="SOL"):
         return False, f"خطا در ارتباط با شبکه سولانا: {e}"
 
 def check_user_subscription(telegram_id):
-    try:
-        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("SELECT expiry_date, status FROM subscribers WHERE telegram_id = ?", (str(telegram_id),))
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            exp_date_str, status = row
-            if status == "ACTIVE":
-                exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d %H:%M:%S")
-                if datetime.now() < exp_date:
-                    return True, exp_date
-                else:
-                    update_sub_status(telegram_id, "EXPIRED")
-                    kick_user_from_channel(telegram_id)
-        return False, None
-    except Exception:
-        return False, None
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("SELECT expiry_date, status FROM subscribers WHERE telegram_id = ?", (str(telegram_id),))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                exp_date_str, status = row
+                if status == "ACTIVE":
+                    exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d %H:%M:%S")
+                    if datetime.now() < exp_date:
+                        return True, exp_date
+                    else:
+                        update_sub_status(telegram_id, "EXPIRED")
+                        kick_user_from_channel(telegram_id)
+            return False, None
+        except Exception:
+            return False, None
 
 def update_sub_status(telegram_id, status):
-    try:
-        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE subscribers SET status = ? WHERE telegram_id = ?", (status, str(telegram_id)))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE subscribers SET status = ? WHERE telegram_id = ?", (status, str(telegram_id)))
+            conn.commit()
+            conn.close()
+        except:
+            pass
 
 def kick_user_from_channel(telegram_id):
     if not CHANNEL_ID:
@@ -484,22 +506,23 @@ def kick_user_from_channel(telegram_id):
 def subscription_monitor_loop():
     print("🔄 مانیتورینگ خودکار انقضای اشتراک‌ها و اخراج از کانال فعال شد.")
     while True:
-        try:
-            conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute("SELECT telegram_id, expiry_date, status FROM subscribers WHERE status = 'ACTIVE'")
-            rows = cursor.fetchall()
-            conn.close()
+        with db_lock:
+            try:
+                conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                cursor = conn.cursor()
+                cursor.execute("SELECT telegram_id, expiry_date, status FROM subscribers WHERE status = 'ACTIVE'")
+                rows = cursor.fetchall()
+                conn.close()
 
-            now = datetime.now()
-            for row in rows:
-                t_id, exp_str, status = row
-                exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
-                if now >= exp_date:
-                    update_sub_status(t_id, "EXPIRED")
-                    kick_user_from_channel(t_id)
-        except Exception as e:
-            print(f"⚠️ خطا در مانیتورینگ اشتراک‌ها: {e}")
+                now = datetime.now()
+                for row in rows:
+                    t_id, exp_str, status = row
+                    exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
+                    if now >= exp_date:
+                        update_sub_status(t_id, "EXPIRED")
+                        kick_user_from_channel(t_id)
+            except Exception as e:
+                print(f"⚠️ خطا در مانیتورینگ اشتراک‌ها: {e}")
         time.sleep(60)
 
 def send_telegram_msg(text, target_chat=None):
@@ -562,74 +585,77 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         print(f"❌ خطا در ارسال سیگنال گرافیکی به کانال: {e}")
 
 def register_subscription(telegram_id, wallet_addr, tx_sig, currency="SOL"):
-    try:
-        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-        cursor = conn.cursor()
-        expiry = datetime.now() + timedelta(days=30)
-        cursor.execute("""
-            INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
-            VALUES (?, ?, ?, ?, 'ACTIVE')
-        """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), f"{currency}:{tx_sig}"))
-        conn.commit()
-        conn.close()
-        
-        success_msg = (
-            f"🎉 اشتراک ۳۰ روزه VIP شما با موفقیت پس از تایید تراکنش بلاکچین ({currency}) فعال شد!\n\n"
-            f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
-            f"📢 برای ورود مستقیم به کانال VIP از طریق لینک زیر اقدام کنید:\n\n"
-            f"{CHANNEL_INVITE_LINK}"
-        )
-        send_telegram_msg(success_msg, target_chat=str(telegram_id))
-        return True
-    except Exception as e:
-        print(f"Error registering sub: {e}")
-        return False
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            expiry = datetime.now() + timedelta(days=30)
+            cursor.execute("""
+                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
+                VALUES (?, ?, ?, ?, 'ACTIVE')
+            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), f"{currency}:{tx_sig}"))
+            conn.commit()
+            conn.close()
+            
+            success_msg = (
+                f"🎉 اشتراک ۳۰ روزه VIP شما با موفقیت پس از تایید تراکنش بلاکچین ({currency}) فعال شد!\n\n"
+                f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
+                f"📢 برای ورود مستقیم به کانال VIP از طریق لینک زیر اقدام کنید:\n\n"
+                f"{CHANNEL_INVITE_LINK}"
+            )
+            send_telegram_msg(success_msg, target_chat=str(telegram_id))
+            return True
+        except Exception as e:
+            print(f"Error registering sub: {e}")
+            return False
 
 def register_free_vip(telegram_id, wallet_addr="FREE_PASS_WALLET"):
-    try:
-        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-        cursor = conn.cursor()
-        expiry = datetime.now() + timedelta(days=30) # اعطای ۳۰ روز اشتراک رایگان استاندارد
-        cursor.execute("""
-            INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
-            VALUES (?, ?, ?, ?, 'ACTIVE')
-        """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), "ADMIN_FREE_PASS"))
-        conn.commit()
-        conn.close()
-        
-        free_msg = (
-            f"🎉 اشتراک VIP رایگان شما توسط ادمین فعال شد!\n\n"
-            f"⏳ تاریخ انقضا و قطع ارتباط: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
-            f"📢 از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
-            f"{CHANNEL_INVITE_LINK}"
-        )
-        send_telegram_msg(free_msg, target_chat=str(telegram_id))
-        return True
-    except Exception as e:
-        print(f"Error registering free sub: {e}")
-        return False
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            expiry = datetime.now() + timedelta(days=30) # اعطای ۳۰ روز اشتراک رایگان استاندارد
+            cursor.execute("""
+                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
+                VALUES (?, ?, ?, ?, 'ACTIVE')
+            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), "ADMIN_FREE_PASS"))
+            conn.commit()
+            conn.close()
+            
+            free_msg = (
+                f"🎉 اشتراک VIP رایگان شما توسط ادمین فعال شد!\n\n"
+                f"⏳ تاریخ انقضا و قطع ارتباط: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
+                f"📢 از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
+                f"{CHANNEL_INVITE_LINK}"
+            )
+            send_telegram_msg(free_msg, target_chat=str(telegram_id))
+            return True
+        except Exception as e:
+            print(f"Error registering free sub: {e}")
+            return False
 
 def get_active_subscribers():
     active_subs = []
-    try:
-        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("SELECT telegram_id, wallet_address, expiry_date, status FROM subscribers")
-        rows = cursor.fetchall()
-        conn.close()
-        now = datetime.now()
-        for row in rows:
-            t_id, w_addr, exp_str, status = row
-            exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
-            if status == 'ACTIVE' and now < exp_date:
-                active_subs.append({"telegram_id": t_id, "wallet": w_addr, "expiry": exp_str})
-            elif status == 'ACTIVE' and now >= exp_date:
-                update_sub_status(t_id, "EXPIRED")
-                kick_user_from_channel(t_id)
-    except Exception:
-        pass
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("SELECT telegram_id, wallet_address, expiry_date, status FROM subscribers")
+            rows = cursor.fetchall()
+            conn.close()
+            now = datetime.now()
+            for row in rows:
+                t_id, w_addr, exp_str, status = row
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
+                if status == 'ACTIVE' and now < exp_date:
+                    active_subs.append({"telegram_id": t_id, "wallet": w_addr, "expiry": exp_str})
+                elif status == 'ACTIVE' and now >= exp_date:
+                    update_sub_status(t_id, "EXPIRED")
+                    kick_user_from_channel(t_id)
+        except Exception:
+            pass
     return active_subs
 
 try:
@@ -746,11 +772,11 @@ def validate_ultimate_21_layers(token_addr, pair):
         buys = txns.get('buys', 0)
         sells = txns.get('sells', 0)
 
-        if price <= 0 or liquidity < 35000 or volume_5m < 12000:
+        if price <= 0 or liquidity < 20000 or volume_5m < 6000:
             return False, "رد شده در لایه‌های نقدینگی یا حجم پایه"
         
-        if buys < sells:
-            return False, "رد شده در لایه فشار خرید (تعداد فروش بیشتر از خرید است)"
+        if buys < (sells * 0.8):
+            return False, "رد شده در لایه فشار خرید"
             
         return True, "تأیید کامل لایه‌های حفاظتی و الگوریتمی هوشمند پیشرفته"
     except Exception as e:
@@ -765,9 +791,9 @@ def evaluate_ultimate_super_signal(token_addr, pair):
 
         if price <= 0:
             return False, 0.0, 0.0, 0.0, "قیمت نامعتبر"
-        if liquidity < 45000 or volume_5m < 20000:
+        if liquidity < 25000 or volume_5m < 8000:
             return False, 0.0, 0.0, 0.0, "نقدینگی یا حجم کافی نیست"
-        if price_change_5m < 8.0:
+        if price_change_5m < 5.0:
             return False, 0.0, 0.0, 0.0, "مومنتوم کافی نیست"
 
         is_21_valid, msg_21 = validate_ultimate_21_layers(token_addr, pair)
@@ -809,7 +835,8 @@ def execute_real_buy(token_mint, amount_sol):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=2500"
+    # اسلیپیج ایمن ۳٪ (300 BPS) برای جلوگیری از MEV Sandwich Attacks
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={SOL_MINT}&outputMint={token_mint}&amount={lamports}&slippageBps=300"
     
     quote_res = None
     for attempt in range(2):
@@ -901,7 +928,7 @@ def close_wsol_account():
             {"pubkey": wallet_pubkey_obj, "is_signer": False, "is_writable": True},
             {"pubkey": wallet_pubkey_obj, "is_signer": True, "is_writable": False}
         ]
-        
+
         instruction = Instruction(token_program_pubkey, data, keys)
         blockhash_res = requests.post(RPC_URL, json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"}, timeout=3).json()
         blockhash = blockhash_res["result"]["value"]["blockhash"]
@@ -936,7 +963,8 @@ def execute_real_sell(token_mint, token_amount):
         "Referer": "https://jup.ag/"
     }
 
-    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=4000"
+    # اسلیپیج ایمن ۵٪ (500 BPS) برای تضمین خروج بدون غارت توسط MEV
+    quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint={token_mint}&outputMint={SOL_MINT}&amount={token_amount}&slippageBps=500"
 
     quote_res = None
     for attempt in range(2):
@@ -1008,9 +1036,13 @@ def check_positions_loop():
     while True:
         try:
             tokens_to_close = []
-            for token_addr, pos in list(active_positions.items()):
+            with state_lock:
+                current_positions = list(active_positions.items())
+
+            for token_addr, pos in current_positions:
                 try:
                     pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
+
                     if not pair_res.get('pairs'):
                         continue
                     pair = pair_res['pairs'][0]
@@ -1079,7 +1111,7 @@ def check_positions_loop():
                         if should_exit:
                             success = False
                             sell_res_info = "خطای عدم موجودی"
-                            
+
                             for attempt_sell in range(2):
                                 token_balance = get_token_balance(token_addr)
                                 if token_balance > 0:
@@ -1120,8 +1152,9 @@ def check_positions_loop():
                 except Exception as inner_e:
                     print(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
 
-            for t_addr in tokens_to_close:
-                active_positions.pop(t_addr, None)
+            with state_lock:
+                for t_addr in tokens_to_close:
+                    active_positions.pop(t_addr, None)
         except Exception as e:
             print(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(2)
@@ -1138,8 +1171,9 @@ def technical_analysis_scanner_loop(app):
         try:
             tokens = get_real_market_trending_tokens()
             for token_addr in tokens[:30]:
-                if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
-                    continue
+                with state_lock:
+                    if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
+                        continue
 
                 pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
                 if not pair_res.get('pairs'):
@@ -1159,8 +1193,9 @@ def technical_analysis_scanner_loop(app):
                 if not is_valid_pa:
                     continue
 
-                tech_processed_tokens.add(token_addr)
-                processed_tokens.add(token_addr)
+                with state_lock:
+                    tech_processed_tokens.add(token_addr)
+                    processed_tokens.add(token_addr)
 
                 current_buy_amt = get_dynamic_buy_amount(TECH_BUY_AMOUNT_SOL)
                 success, result_info = execute_real_buy(token_addr, TECH_BUY_AMOUNT_SOL)
@@ -1187,13 +1222,14 @@ def technical_analysis_scanner_loop(app):
                     f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                 )
 
-                active_positions[token_addr] = {
-                    "entry_price": price,
-                    "symbol": symbol,
-                    "tp": TECH_TAKE_PROFIT,
-                    "sl": TECH_STOP_LOSS,
-                    "highest_price": price
-                }
+                with state_lock:
+                    active_positions[token_addr] = {
+                        "entry_price": price,
+                        "symbol": symbol,
+                        "tp": TECH_TAKE_PROFIT,
+                        "sl": TECH_STOP_LOSS,
+                        "highest_price": price
+                    }
                 
                 send_telegram_msg(tech_msg)
                 send_graphic_signal_to_vip_channel(
@@ -1221,8 +1257,9 @@ def unified_market_scanner_loop(app):
         try:
             tokens = get_real_market_trending_tokens()
             for token_addr in tokens[:30]:
-                if not token_addr or token_addr in active_positions:
-                    continue
+                with state_lock:
+                    if not token_addr or token_addr in active_positions:
+                        continue
 
                 pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3).json()
                 if not pair_res.get('pairs'):
@@ -1242,21 +1279,22 @@ def unified_market_scanner_loop(app):
                     txns = pair.get('txns', {}).get('m5', {})
                     buys = txns.get('buys', 0)
                     sells = txns.get('sells', 0)
-                    
+
                     is_bottom_accumulation = (
-                        -3.0 <= price_change_5m <= 6.0 and 
-                        volume_5m >= (liquidity * 0.3) and 
-                        buys > (sells * 1.3)
+                        -3.0 <= price_change_5m <= 8.0 and 
+                        volume_5m >= (liquidity * 0.2) and 
+                        buys > (sells * 1.1)
                     )
                     
                     is_pump_breakout = (
-                        price_change_5m >= 15.0 and 
-                        volume_5m >= 20000 and 
+                        price_change_5m >= 10.0 and 
+                        volume_5m >= 12000 and 
                         buys > sells
                     )
 
                     if is_bottom_accumulation or is_pump_breakout:
-                        processed_tokens.add(token_addr)
+                        with state_lock:
+                            processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(0.01)
                         success, result_info = execute_real_buy(token_addr, 0.01)
                         if not success:
@@ -1265,13 +1303,14 @@ def unified_market_scanner_loop(app):
                         solscan_link = f"https://solscan.io/tx/{result_info}"
                         signal_reason = "🐳 شکار کف معتبر و انباشت نهنگ" if is_bottom_accumulation else "🚀 شروع پامپ و شتاب‌دهنده صعودی"
                         
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": 22.0,
-                            "sl": -8.0,
-                            "highest_price": price
-                        }
+                        with state_lock:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": 22.0,
+                                "sl": -8.0,
+                                "highest_price": price
+                            }
                         
                         send_graphic_signal_to_vip_channel(
                             token_addr=token_addr, symbol=symbol, price=price, tp=22.0, sl=-8.0,
@@ -1283,7 +1322,8 @@ def unified_market_scanner_loop(app):
                 if SYNCHRONIZED_MODE and token_addr not in processed_tokens:
                     is_approved, entry_p, calc_tp, calc_sl, eval_reason = evaluate_ultimate_super_signal(token_addr, pair)
                     if is_approved:
-                        processed_tokens.add(token_addr)
+                        with state_lock:
+                            processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(0.01)
                         success, result_info = execute_real_buy(token_addr, 0.01)
                         if not success:
@@ -1303,13 +1343,14 @@ def unified_market_scanner_loop(app):
                             f"🔗 [Solscan]({solscan_link})"
                         )
                         
-                        active_positions[token_addr] = {
-                            "entry_price": entry_p,
-                            "symbol": symbol,
-                            "tp": calc_tp,
-                            "sl": calc_sl,
-                            "highest_price": entry_p
-                        }
+                        with state_lock:
+                            active_positions[token_addr] = {
+                                "entry_price": entry_p,
+                                "symbol": symbol,
+                                "tp": calc_tp,
+                                "sl": calc_sl,
+                                "highest_price": entry_p
+                            }
                         
                         send_telegram_msg(super_msg)
                         send_graphic_signal_to_vip_channel(
@@ -1324,8 +1365,9 @@ def unified_market_scanner_loop(app):
                         volume_5m >= GOLDEN_MIN_VOLUME_5M and 
                         liquidity >= GOLDEN_MIN_LIQUIDITY):
                         
-                        golden_processed_tokens.add(token_addr)
-                        processed_tokens.add(token_addr)
+                        with state_lock:
+                            golden_processed_tokens.add(token_addr)
+                            processed_tokens.add(token_addr)
 
                         current_buy_amt = get_dynamic_buy_amount(GOLDEN_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, GOLDEN_BUY_AMOUNT_SOL)
@@ -1340,13 +1382,14 @@ def unified_market_scanner_loop(app):
                             f"🪙 توکن: {symbol}\n📍 آدرس:\n{token_addr}\n"
                             f"💵 ورود: ${price:.8f}\n🔗 [Solscan]({solscan_link})"
                         )
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": GOLDEN_TAKE_PROFIT,
-                            "sl": GOLDEN_STOP_LOSS,
-                            "highest_price": price
-                        }
+                        with state_lock:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": GOLDEN_TAKE_PROFIT,
+                                "sl": GOLDEN_STOP_LOSS,
+                                "highest_price": price
+                            }
                         send_telegram_msg(golden_msg)
                         send_graphic_signal_to_vip_channel(
                             token_addr=token_addr, symbol=symbol, price=price, tp=GOLDEN_TAKE_PROFIT,
@@ -1360,8 +1403,9 @@ def unified_market_scanner_loop(app):
                         volume_5m >= COMBO_MIN_VOLUME_5M and 
                         liquidity >= COMBO_MIN_LIQUIDITY):
                         
-                        trend_alerted_tokens.add(token_addr)
-                        processed_tokens.add(token_addr)
+                        with state_lock:
+                            trend_alerted_tokens.add(token_addr)
+                            processed_tokens.add(token_addr)
 
                         current_buy_amt = get_dynamic_buy_amount(COMBO_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, COMBO_BUY_AMOUNT_SOL)
@@ -1370,13 +1414,14 @@ def unified_market_scanner_loop(app):
                         
                         solscan_link = f"https://solscan.io/tx/{result_info}"
 
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": COMBO_TAKE_PROFIT,
-                            "sl": COMBO_STOP_LOSS,
-                            "highest_price": price
-                        }
+                        with state_lock:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": COMBO_TAKE_PROFIT,
+                                "sl": COMBO_STOP_LOSS,
+                                "highest_price": price
+                            }
                         send_graphic_signal_to_vip_channel(
                             token_addr=token_addr, symbol=symbol, price=price, tp=COMBO_TAKE_PROFIT,
                             sl=COMBO_STOP_LOSS, buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
@@ -1388,8 +1433,9 @@ def unified_market_scanner_loop(app):
                     if (liquidity >= FIRE_MIN_LIQUIDITY and 
                         volume_5m >= FIRE_MIN_VOLUME_5M and 
                         price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M):
-                        
-                        processed_tokens.add(token_addr)
+
+                        with state_lock:
+                            processed_tokens.add(token_addr)
                         current_buy_amt = get_dynamic_buy_amount(FIRE_BUY_AMOUNT_SOL)
                         success, result_info = execute_real_buy(token_addr, FIRE_BUY_AMOUNT_SOL)
                         if not success:
@@ -1397,13 +1443,14 @@ def unified_market_scanner_loop(app):
                         
                         solscan_link = f"https://solscan.io/tx/{result_info}"
                         
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": FIRE_TAKE_PROFIT,
-                            "sl": FIRE_STOP_LOSS,
-                            "highest_price": price
-                        }
+                        with state_lock:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": FIRE_TAKE_PROFIT,
+                                "sl": FIRE_STOP_LOSS,
+                                "highest_price": price
+                            }
                         send_graphic_signal_to_vip_channel(
                             token_addr=token_addr, symbol=symbol, price=price, tp=FIRE_TAKE_PROFIT,
                             sl=FIRE_STOP_LOSS, buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
@@ -1617,16 +1664,17 @@ def api_check_status():
             has_sub = True
             expiry_str = exp_date.strftime("%Y-%m-%d %H:%M:%S")
         else:
-            try:
-                conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-                cursor = conn.cursor()
-                cursor.execute("SELECT expiry_date FROM subscribers WHERE telegram_id = ?", (str(t_id),))
-                row = cursor.fetchone()
-                conn.close()
-                if row:
-                    last_exp = row[0]
-            except:
-                pass
+            with db_lock:
+                try:
+                    conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT expiry_date FROM subscribers WHERE telegram_id = ?", (str(t_id),))
+                    row = cursor.fetchone()
+                    conn.close()
+                    if row:
+                        last_exp = row[0]
+                except:
+                    pass
     return jsonify({"has_subscription": has_sub, "expiry_date": expiry_str, "last_expiry": last_exp})
 
 @web_app.route('/api/subscribe', methods=['POST'])
@@ -1685,8 +1733,11 @@ def get_main_keyboard():
 
     open_pnl_usd = 0.0
     open_pnl_percent = 0.0
-    if len(active_positions) > 0:
-        for token_addr, pos in active_positions.items():
+    with state_lock:
+        pos_items = list(active_positions.items())
+
+    if len(pos_items) > 0:
+        for token_addr, pos in pos_items:
             try:
                 pair_res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=2).json()
                 if pair_res.get('pairs'):
@@ -1804,11 +1855,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_u = analytics['total_usd']
         win_rate = analytics['win_rate']
 
-        conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 3")
-        best_trades = cursor.fetchall()
-        conn.close()
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 3")
+            best_trades = cursor.fetchall()
+            conn.close()
 
         chart_bars = "🟩" * min(int(max(total_pct, 0) // 5), 10) if total_pct >= 0 else "🟥" * min(int(abs(total_pct) // 5), 10)
 
@@ -1830,7 +1882,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AWAITING_STATE
-    AWAITING_STATE = None
+    with state_lock:
+        AWAITING_STATE = None
     user_id = str(update.effective_user.id)
 
     if user_id == str(TELEGRAM_CHAT_ID):
@@ -1872,55 +1925,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    if query.data == "toggle_sec_ultra":
-        SECTION_ULTRA_OPEN = not SECTION_ULTRA_OPEN
-    elif query.data == "toggle_sec_vip":
-        SECTION_VIP_OPEN = not SECTION_VIP_OPEN
-    elif query.data == "toggle_sec_prot":
-        SECTION_PROTECTION_OPEN = not SECTION_PROTECTION_OPEN
-    elif query.data == "toggle_sec_ai":
-        SECTION_AI_OPEN = not SECTION_AI_OPEN
-    elif query.data == "toggle_sec_trade":
-        SECTION_TRADING_OPEN = not SECTION_TRADING_OPEN
-    elif query.data == "toggle_smart_money_copy":
-        SMART_MONEY_COPY_ENABLED = not SMART_MONEY_COPY_ENABLED
-    elif query.data == "toggle_social_sentiment":
-        SOCIAL_SENTIMENT_ENABLED = not SOCIAL_SENTIMENT_ENABLED
-    elif query.data == "toggle_dynamic_trailing":
-        DYNAMIC_TRAILING_TP_ENABLED = not DYNAMIC_TRAILING_TP_ENABLED
-    elif query.data == "toggle_bottom_whale":
-        BOTTOM_WHALE_RUNNING = not BOTTOM_WHALE_RUNNING
-    elif query.data == "toggle_hulk_moon":
-        MOONBAG_HULK_ENABLED = not MOONBAG_HULK_ENABLED
-    elif query.data == "toggle_wash":
-        ANTI_WASH_TRADING_ENABLED = not ANTI_WASH_TRADING_ENABLED
-    elif query.data == "toggle_ai_learning":
-        SELF_LEARNING_AI_ENABLED = not SELF_LEARNING_AI_ENABLED
-    elif query.data == "toggle_mempool":
-        MEMPOOL_SMART_MONEY_ENABLED = not MEMPOOL_SMART_MONEY_ENABLED
-    elif query.data == "toggle_ultimate_21":
-        ULTIMATE_21_ENGINE_ENABLED = not ULTIMATE_21_ENGINE_ENABLED
-    elif query.data == "toggle_smart_filter":
-        SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
-    elif query.data == "toggle_risk":
-        DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
-    elif query.data == "toggle_sync":
-        SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
-    elif query.data == "toggle_copy":
-        COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
-    elif query.data == "toggle_manual":
-        MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
-    elif query.data == "toggle_technical":
-        TECHNICAL_RUNNING = not TECHNICAL_RUNNING
-    elif query.data == "toggle_golden":
-        GOLDEN_OPTION = not GOLDEN_OPTION
-    elif query.data == "toggle_combo":
-        COMBO_RUNNING = not COMBO_RUNNING
-    elif query.data == "toggle_trader":
-        IS_RUNNING = not IS_RUNNING
-    elif query.data == "toggle_trend":
-        TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
-    elif query.data == "status":
+    with state_lock:
+        if query.data == "toggle_sec_ultra":
+            SECTION_ULTRA_OPEN = not SECTION_ULTRA_OPEN
+        elif query.data == "toggle_sec_vip":
+            SECTION_VIP_OPEN = not SECTION_VIP_OPEN
+        elif query.data == "toggle_sec_prot":
+            SECTION_PROTECTION_OPEN = not SECTION_PROTECTION_OPEN
+        elif query.data == "toggle_sec_ai":
+            SECTION_AI_OPEN = not SECTION_AI_OPEN
+        elif query.data == "toggle_sec_trade":
+            SECTION_TRADING_OPEN = not SECTION_TRADING_OPEN
+        elif query.data == "toggle_smart_money_copy":
+            SMART_MONEY_COPY_ENABLED = not SMART_MONEY_COPY_ENABLED
+        elif query.data == "toggle_social_sentiment":
+            SOCIAL_SENTIMENT_ENABLED = not SOCIAL_SENTIMENT_ENABLED
+        elif query.data == "toggle_dynamic_trailing":
+            DYNAMIC_TRAILING_TP_ENABLED = not DYNAMIC_TRAILING_TP_ENABLED
+        elif query.data == "toggle_bottom_whale":
+            BOTTOM_WHALE_RUNNING = not BOTTOM_WHALE_RUNNING
+        elif query.data == "toggle_hulk_moon":
+            MOONBAG_HULK_ENABLED = not MOONBAG_HULK_ENABLED
+        elif query.data == "toggle_wash":
+            ANTI_WASH_TRADING_ENABLED = not ANTI_WASH_TRADING_ENABLED
+        elif query.data == "toggle_ai_learning":
+            SELF_LEARNING_AI_ENABLED = not SELF_LEARNING_AI_ENABLED
+        elif query.data == "toggle_mempool":
+            MEMPOOL_SMART_MONEY_ENABLED = not MEMPOOL_SMART_MONEY_ENABLED
+        elif query.data == "toggle_ultimate_21":
+            ULTIMATE_21_ENGINE_ENABLED = not ULTIMATE_21_ENGINE_ENABLED
+        elif query.data == "toggle_smart_filter":
+            SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
+        elif query.data == "toggle_risk":
+            DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
+        elif query.data == "toggle_sync":
+            SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
+        elif query.data == "toggle_copy":
+            COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
+        elif query.data == "toggle_manual":
+            MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
+        elif query.data == "toggle_technical":
+            TECHNICAL_RUNNING = not TECHNICAL_RUNNING
+        elif query.data == "toggle_golden":
+            GOLDEN_OPTION = not GOLDEN_OPTION
+        elif query.data == "toggle_combo":
+            COMBO_RUNNING = not COMBO_RUNNING
+        elif query.data == "toggle_trader":
+            IS_RUNNING = not IS_RUNNING
+        elif query.data == "toggle_trend":
+            TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
+
+    if query.data == "status":
         status_text = (
             f"📊 وضعیت سیستم (هالکی شکست‌ناپذیر):\n"
             f"💎 استراتژی‌های تضمینی ۹۹٪: {'🟢 روشن' if (SMART_MONEY_COPY_ENABLED or SOCIAL_SENTIMENT_ENABLED) else '🔴 خاموش'}\n"
@@ -1944,43 +1999,43 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
     elif query.data == "menu_t_vol":
-        AWAITING_STATE, cur_val, prefix = "tech_vol", TECH_BUY_AMOUNT_SOL, "📊 [پرایس اکشن] حجم معامله"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "tech_vol"
+        await prompt_input(query, "📊 [پرایس اکشن] حجم معامله", TECH_BUY_AMOUNT_SOL)
     elif query.data == "menu_t_tp":
-        AWAITING_STATE, cur_val, prefix = "tech_tp", TECH_TAKE_PROFIT, "📊 [پرایس اکشن] تارگت سود"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "tech_tp"
+        await prompt_input(query, "📊 [پرایس اکشن] تارگت سود", TECH_TAKE_PROFIT)
     elif query.data == "menu_t_sl":
-        AWAITING_STATE, cur_val, prefix = "tech_sl", TECH_STOP_LOSS, "📊 [پرایس اکشن] حد ضرر"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "tech_sl"
+        await prompt_input(query, "📊 [پرایس اکشن] حد ضرر", TECH_STOP_LOSS)
     elif query.data == "menu_g_vol":
-        AWAITING_STATE, cur_val, prefix = "golden_vol", GOLDEN_BUY_AMOUNT_SOL, "🚀 [گزینه طلایی] حجم معامله"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "golden_vol"
+        await prompt_input(query, "🚀 [گزینه طلایی] حجم معامله", GOLDEN_BUY_AMOUNT_SOL)
     elif query.data == "menu_g_tp":
-        AWAITING_STATE, cur_val, prefix = "golden_tp", GOLDEN_TAKE_PROFIT, "🚀 [گزینه طلایی] تارگت سود"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "golden_tp"
+        await prompt_input(query, "🚀 [گزینه طلایی] تارگت سود", GOLDEN_TAKE_PROFIT)
     elif query.data == "menu_g_sl":
-        AWAITING_STATE, cur_val, prefix = "golden_sl", GOLDEN_STOP_LOSS, "🚀 [گزینه طلایی] حد ضرر"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "golden_sl"
+        await prompt_input(query, "🚀 [گزینه طلایی] حد ضرر", GOLDEN_STOP_LOSS)
     elif query.data == "menu_c_vol":
-        AWAITING_STATE, cur_val, prefix = "combo_vol", COMBO_BUY_AMOUNT_SOL, "🚨 [حالت ترکیبی] حجم معامله"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "combo_vol"
+        await prompt_input(query, "🚨 [حالت ترکیبی] حجم معامله", COMBO_BUY_AMOUNT_SOL)
     elif query.data == "menu_c_tp":
-        AWAITING_STATE, cur_val, prefix = "combo_tp", COMBO_TAKE_PROFIT, "🚨 [حالت ترکیبی] تارگت سود"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "combo_tp"
+        await prompt_input(query, "🚨 [حالت ترکیبی] تارگت سود", COMBO_TAKE_PROFIT)
     elif query.data == "menu_c_sl":
-        AWAITING_STATE, cur_val, prefix = "combo_sl", COMBO_STOP_LOSS, "🚨 [حالت ترکیبی] حد ضرر"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "combo_sl"
+        await prompt_input(query, "🚨 [حالت ترکیبی] حد ضرر", COMBO_STOP_LOSS)
     elif query.data == "menu_f_vol":
-        AWAITING_STATE, cur_val, prefix = "fire_vol", FIRE_BUY_AMOUNT_SOL, "🔥 [خرید و فروش] حجم معامله"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "fire_vol"
+        await prompt_input(query, "🔥 [خرید و فروش] حجم معامله", FIRE_BUY_AMOUNT_SOL)
     elif query.data == "menu_f_tp":
-        AWAITING_STATE, cur_val, prefix = "fire_tp", FIRE_TAKE_PROFIT, "🔥 [خرید و فروش] تارگت سود"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "fire_tp"
+        await prompt_input(query, "🔥 [خرید و فروش] تارگت سود", FIRE_TAKE_PROFIT)
     elif query.data == "menu_f_sl":
-        AWAITING_STATE, cur_val, prefix = "fire_sl", FIRE_STOP_LOSS, "🔥 [خرید و فروش] حد ضرر"
-        await prompt_input(query, prefix, cur_val)
+        with state_lock: AWAITING_STATE = "fire_sl"
+        await prompt_input(query, "🔥 [خرید و فروش] حد ضرر", FIRE_STOP_LOSS)
     elif query.data == "cancel_input":
-        AWAITING_STATE = None
+        with state_lock: AWAITING_STATE = None
         try:
             await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
         except:
@@ -2007,26 +2062,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
 
-    if AWAITING_STATE:
+    with state_lock:
+        current_state = AWAITING_STATE
+
+    if current_state:
         text_input = update.message.text.strip().replace(',', '.')
         try:
             val = float(text_input)
-            st = AWAITING_STATE
-            if st == "tech_vol": TECH_BUY_AMOUNT_SOL = val
-            elif st == "tech_tp": TECH_TAKE_PROFIT = val
-            elif st == "tech_sl": TECH_STOP_LOSS = val
-            elif st == "golden_vol": GOLDEN_BUY_AMOUNT_SOL = val
-            elif st == "golden_tp": GOLDEN_TAKE_PROFIT = val
-            elif st == "golden_sl": GOLDEN_STOP_LOSS = val
-            elif st == "combo_vol": COMBO_BUY_AMOUNT_SOL = val
-            elif st == "combo_tp": COMBO_TAKE_PROFIT = val
-            elif st == "combo_sl": COMBO_STOP_LOSS = val
-            elif st == "fire_vol": FIRE_BUY_AMOUNT_SOL = val
-            elif st == "fire_tp": FIRE_TAKE_PROFIT = val
-            elif st == "fire_sl": FIRE_STOP_LOSS = val
+            with state_lock:
+                st = current_state
+                if st == "tech_vol": TECH_BUY_AMOUNT_SOL = val
+                elif st == "tech_tp": TECH_TAKE_PROFIT = val
+                elif st == "tech_sl": TECH_STOP_LOSS = val
+                elif st == "golden_vol": GOLDEN_BUY_AMOUNT_SOL = val
+                elif st == "golden_tp": GOLDEN_TAKE_PROFIT = val
+                elif st == "golden_sl": GOLDEN_STOP_LOSS = val
+                elif st == "combo_vol": COMBO_BUY_AMOUNT_SOL = val
+                elif st == "combo_tp": COMBO_TAKE_PROFIT = val
+                elif st == "combo_sl": COMBO_STOP_LOSS = val
+                elif st == "fire_vol": FIRE_BUY_AMOUNT_SOL = val
+                elif st == "fire_tp": FIRE_TAKE_PROFIT = val
+                elif st == "fire_sl": FIRE_STOP_LOSS = val
+                AWAITING_STATE = None
 
             msg = f"✅ تنظیمات با موفقیت به {val} بروزرسانی شد."
-            AWAITING_STATE = None
             await update.message.reply_text(msg, reply_markup=get_main_keyboard())
         except ValueError:
             await update.message.reply_text("❌ عدد نامعتبر است. مجدد وارد کنید:")
