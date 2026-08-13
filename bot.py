@@ -396,7 +396,6 @@ def mempool_smart_money_scanner_loop(app):
             print(f"⚠️ خطای اسکن ممپول: {e}")
         time.sleep(5)
 
-# سیستم جدید و واقعی بررسی تراکنش روی بلاکچین (On-Chain Verification)
 def verify_blockchain_transaction(tx_signature, expected_currency="SOL"):
     if not tx_signature or len(tx_signature) < 30:
         return False, "هش تراکنش نامعتبر است."
@@ -450,7 +449,6 @@ def check_user_subscription(telegram_id):
                     return True, exp_date
                 else:
                     update_sub_status(telegram_id, "EXPIRED")
-                    # حذف خودکار از کانال به محض منقضی شدن در بررسی مستقیم
                     kick_user_from_channel(telegram_id)
         return False, None
     except Exception:
@@ -474,7 +472,7 @@ def kick_user_from_channel(telegram_id):
         payload = {
             "chat_id": CHANNEL_ID,
             "user_id": int(telegram_id),
-            "until_date": int(time.time() + 35) # بن موقت برای بیرون انداختن از کانال و امکان بازگشت بعدی با لینک جدید
+            "until_date": int(time.time() + 35)
         }
         res = requests.post(url, json=payload, timeout=5).json()
         if res.get("ok"):
@@ -588,11 +586,11 @@ def register_subscription(telegram_id, wallet_addr, tx_sig, currency="SOL"):
         print(f"Error registering sub: {e}")
         return False
 
-def register_free_vip(telegram_id, wallet_addr):
+def register_free_vip(telegram_id, wallet_addr="FREE_PASS_WALLET"):
     try:
         conn = sqlite3.connect("bot_analytics.db", check_same_thread=False)
         cursor = conn.cursor()
-        expiry = datetime.now() + timedelta(days=365)
+        expiry = datetime.now() + timedelta(days=30) # اعطای ۳۰ روز اشتراک رایگان استاندارد
         cursor.execute("""
             INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
             VALUES (?, ?, ?, ?, 'ACTIVE')
@@ -602,7 +600,7 @@ def register_free_vip(telegram_id, wallet_addr):
         
         free_msg = (
             f"🎉 اشتراک VIP رایگان شما توسط ادمین فعال شد!\n\n"
-            f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"⏳ تاریخ انقضا و قطع ارتباط: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
             f"📢 از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
             f"{CHANNEL_INVITE_LINK}"
@@ -1534,11 +1532,27 @@ def admin_panel():
     admin_html = f"""
     <!DOCTYPE html>
     <html lang="fa" dir="rtl">
-    <head><meta charset="UTF-8"><title>پنل ادمین و گزارش پیشرفته هالکی</title></head>
-    <body style="background:#0f172a;color:#fff;text-align:center;font-family:Tahoma;padding:15px;">
-        <div style="background:#1e293b;padding:20px;border-radius:12px;max-width:500px;margin:auto;text-align:right;">
-            <h1 style="color:#a855f7;text-align:center;">👑 پنل مدیریت و گزارش پیشرفته</h1>
+    <head>
+        <meta charset="UTF-8">
+        <title>پنل ادمین و گزارش پیشرفته هالکی</title>
+        <style>
+            body {{ background:#0f172a; color:#fff; text-align:center; font-family:Tahoma; padding:15px; margin:0; }}
+            .card {{ background:#1e293b; padding:20px; border-radius:12px; max-width:500px; margin:auto; text-align:right; box-shadow: 0 4px 20px rgba(0,0,0,0.7); }}
+            h1 {{ color:#a855f7; text-align:center; font-size:16px; }}
+            input {{ width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }}
+            .btn-free {{ background: #8b5cf6; color: white; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 5px; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>👑 پنل مدیریت و گزارش پیشرفته</h1>
             
+            <div style="background:#0f172a;padding:12px;border-radius:8px;margin-bottom:15px;border:1px solid #334155;">
+                <h3 style="color:#38bdf8;margin-top:0;font-size:14px;text-align:center;">🎁 اعطای اشتراک رایگان سریع</h3>
+                <input type="text" id="freeTelegramId" placeholder="آیدی تلگرام کاربر (عدد)">
+                <button class="btn-free" onclick="grantFreeSub()">ثبت عضویت رایگان ۳۰ روزه</button>
+            </div>
+
             <div style="background:#0f172a;padding:12px;border-radius:8px;margin-bottom:15px;border:1px solid #334155;">
                 <h3 style="color:#38bdf8;margin-top:0;font-size:14px;text-align:center;">📊 آمار جامع عملکرد ربات</h3>
                 <p>🔹 کل معاملات ثبت‌شده: <b>{analytics['total_trades']}</b></p>
@@ -1553,8 +1567,45 @@ def admin_panel():
     """
     for sub in subs:
         admin_html += f"<div style='background:#0f172a;padding:8px;margin:5px 0;border-radius:6px;font-size:11px;'>🆔 {sub['telegram_id']} | ⏳ انقضا: {sub['expiry']}</div>"
-    admin_html += "</div></body></html>"
+    
+    admin_html += """
+        </div>
+        <script>
+            function grantFreeSub() {
+                const tId = document.getElementById('freeTelegramId').value;
+                if(!tId) { alert('لطفاً آیدی تلگرام کاربر را وارد کنید!'); return; }
+                
+                fetch('/api/admin/free-sub', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({telegram_id: tId, admin_id: """ + str(TELEGRAM_CHAT_ID) + """})
+                }).then(res => res.json()).then(data => {
+                    alert(data.message);
+                    if(data.status === 'success') { location.reload(); }
+                }).catch(err => { alert('خطا در ارتباط با سرور.'); });
+            }
+        </script>
+    </body>
+    </html>
+    """
     return admin_html
+
+@web_app.route('/api/admin/free-sub', methods=['POST'])
+def api_admin_free_sub():
+    data = request.json
+    t_id = data.get("telegram_id")
+    admin_id = str(data.get("admin_id"))
+    
+    if admin_id != str(TELEGRAM_CHAT_ID):
+        return jsonify({"status": "error", "message": "دسترسی غیرمجاز!"})
+    if not t_id:
+        return jsonify({"status": "error", "message": "آیدی تلگرام معتبر نیست."})
+        
+    success = register_free_vip(t_id)
+    if success:
+        return jsonify({"status": "success", "message": f"کاربر {t_id} با موفقیت به صورت رایگان عضو VIP شد و لینک کانال ارسال گردید."})
+    else:
+        return jsonify({"status": "error", "message": "خطا در ثبت نام رایگان کاربر."})
 
 @web_app.route('/api/check-status')
 def api_check_status():
@@ -1792,14 +1843,14 @@ async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
         return
     args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("❌ فرمت اشتباه! استفاده صحیح:\n\n/free آیدی_تلگرام آدرس_ولت")
+    if len(args) < 1:
+        await update.message.reply_text("❌ فرمت اشتباه! استفاده صحیح:\n\n/free آیدی_تلگرام")
         return
-    success = register_free_vip(args[0], args[1])
+    success = register_free_vip(args[0])
     if success:
-        await update.message.reply_text(f"✅ کاربر {args[0]} به صورت رایگان VIP ثبت شد!")
+        await update.message.reply_text(f"✅ کاربر {args[0]} به صورت رایگان VIP ثبت شد و لینک ورود ارسال گردید!")
     else:
-        await update.message.reply_text("❌ خطا در ثبت.")
+        await update.message.reply_text("❌ خطا در ثبت اشتراک رایگان.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING
