@@ -623,19 +623,57 @@ def subscription_monitor_loop():
                 logger.error(f"⚠️ خطا در مانیتورینگ اشتراک‌ها: {e}")
         time.sleep(60)
 
-def send_telegram_msg(text, target_chat=None):
-    chat_target = target_chat if target_chat else TELEGRAM_CHAT_ID
+def send_telegram_msg(text, target_chat=None, reply_markup=None):
+    """ارسال امن پیام تلگرام و ثبت پاسخ واقعی API برای عیب‌یابی."""
+    chat_target = target_chat if target_chat is not None else TELEGRAM_CHAT_ID
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN in ("TOKEN_YOW", "YOUR_BOT_TOKEN"):
+        logger.error("❌ TELEGRAM_BOT_TOKEN تنظیم نشده است.")
+        return False
+    if not chat_target or chat_target in ("CHAT_ID_YOW", "YOUR_CHAT_ID"):
+        logger.error("❌ TELEGRAM_CHAT_ID/target_chat تنظیم نشده است.")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": str(chat_target),
+        "text": str(text),
+        "disable_web_page_preview": True,
+    }
+    # Markdown در متن‌های تولیدشده ممکن است به خاطر کاراکترهای خاص خطا بدهد؛
+    # ابتدا Markdown را امتحان می‌کنیم و در صورت خطا یک بار متن ساده می‌فرستیم.
+    payload["parse_mode"] = "Markdown"
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup.to_dict() if hasattr(reply_markup, "to_dict") else reply_markup
+
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_target,
-            "text": text,
-            "disable_web_page_preview": True,
-            "parse_mode": "Markdown"
-        }
-        http_session.post(url, json=payload, timeout=5)
+        res = http_session.post(url, json=payload, timeout=10)
+        try:
+            data = res.json()
+        except Exception:
+            data = {"ok": False, "description": res.text[:500]}
+
+        if data.get("ok"):
+            return True
+
+        logger.error(f"❌ Telegram API error [{res.status_code}]: {data.get('description', data)}")
+
+        # اگر مشکل از Markdown باشد، همان پیام را بدون parse_mode دوباره می‌فرستیم.
+        if payload.get("parse_mode") == "Markdown":
+            fallback = dict(payload)
+            fallback.pop("parse_mode", None)
+            res2 = http_session.post(url, json=fallback, timeout=10)
+            try:
+                data2 = res2.json()
+            except Exception:
+                data2 = {"ok": False, "description": res2.text[:500]}
+            if data2.get("ok"):
+                logger.info("✅ پیام تلگرام با حالت متن ساده ارسال شد.")
+                return True
+            logger.error(f"❌ Telegram fallback error [{res2.status_code}]: {data2.get('description', data2)}")
+        return False
     except Exception as e:
-        logger.error(f"❌ خطای ارسال پیام به تلگرام: {e}")
+        logger.error(f"❌ خطای اتصال هنگام ارسال پیام به تلگرام: {e}")
+        return False
 
 def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP"):
     if not CHANNEL_ID:
@@ -1805,34 +1843,127 @@ def api_subscribe():
         return jsonify({"status": "error", "message": "خطا در ثبت اشتراک."}), 500
 
 def start_telegram_bot():
+    """راه‌اندازی پایدار ربات تلگرام با منوی اصلی و کنترل موتورهای موجود."""
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN in ("TOKEN_YOW", "YOUR_BOT_TOKEN"):
+        logger.error("❌ ربات تلگرام اجرا نشد: TELEGRAM_BOT_TOKEN تنظیم نشده است.")
+        return
+
     try:
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        
+
+        def main_keyboard(chat_id):
+            return InlineKeyboardMarkup([
+                [InlineKeyboardButton("📱 مینی‌اپلیکیشن VIP", web_app=WebAppInfo(url=f"{WEBAPP_URL}?telegram_id={chat_id}"))],
+                [InlineKeyboardButton("📊 وضعیت ربات", callback_data="status"),
+                 InlineKeyboardButton("⚙️ موتورهای سیگنال", callback_data="engines")],
+                [InlineKeyboardButton("🔄 بروزرسانی", callback_data="refresh"),
+                 InlineKeyboardButton("📢 کانال VIP", url=CHANNEL_INVITE_LINK)],
+            ])
+
+        def engines_keyboard():
+            return InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"🔥 Fire: {'ON' if IS_RUNNING else 'OFF'}", callback_data="toggle_fire"),
+                 InlineKeyboardButton(f"📈 Trend: {'ON' if TREND_ALERT_RUNNING else 'OFF'}", callback_data="toggle_trend")],
+                [InlineKeyboardButton(f"🧠 Combo: {'ON' if COMBO_RUNNING else 'OFF'}", callback_data="toggle_combo"),
+                 InlineKeyboardButton(f"🥇 Golden: {'ON' if GOLDEN_OPTION else 'OFF'}", callback_data="toggle_golden")],
+                [InlineKeyboardButton(f"📐 Technical: {'ON' if TECHNICAL_RUNNING else 'OFF'}", callback_data="toggle_technical"),
+                 InlineKeyboardButton(f"🛡 Smart Filter: {'ON' if SMART_FILTER_ENABLED else 'OFF'}", callback_data="toggle_smart")],
+                [InlineKeyboardButton(f"⚡ Mempool: {'ON' if MEMPOOL_SMART_MONEY_ENABLED else 'OFF'}", callback_data="toggle_mempool"),
+                 InlineKeyboardButton(f"🤖 AI: {'ON' if SELF_LEARNING_AI_ENABLED else 'OFF'}", callback_data="toggle_ai")],
+                [InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")],
+            ])
+
         async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id = update.effective_chat.id
             is_active, exp_date = check_user_subscription(chat_id)
             if is_active:
                 text = (
-                    f"🤖 **ربات هوشمند ترید هالکی**\n\n"
-                    f"✅ اشتراک VIP شما فعال است تا: `{exp_date}`\n"
-                    f"📢 لینک کانال سیگنال: {CHANNEL_INVITE_LINK}"
+                    "🤖 *ربات هوشمند ترید هالکی*\n\n"
+                    f"✅ اشتراک VIP فعال است تا: `{exp_date}`\n"
+                    "📡 سیستم مانیتورینگ و موتورهای سیگنال فعال هستند."
                 )
             else:
                 text = (
-                    f"🤖 **ربات هوشمند ترید هالکی**\n\n"
-                    f"❌ اشتراک VIP شما فعال نیست.\n"
-                    f"برای دریافت سیگنال‌ها و کپی‌تریدینگ وارد مینی‌اپلیکیشن شوید."
+                    "🤖 *ربات هوشمند ترید هالکی*\n\n"
+                    "❌ اشتراک VIP شما فعال نیست.\n"
+                    "برای دریافت سیگنال‌ها و کپی‌تریدینگ از مینی‌اپلیکیشن استفاده کنید."
                 )
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📱 باز کردن مینی‌اپلیکیشن VIP", web_app=WebAppInfo(url=f"{WEBAPP_URL}?telegram_id={chat_id}"))]
-            ])
-            await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+            await update.message.reply_text(text, reply_markup=main_keyboard(chat_id), parse_mode="Markdown", disable_web_page_preview=True)
+
+        async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            await start_cmd(update, context)
+
+        async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION
+            global TECHNICAL_RUNNING, SMART_FILTER_ENABLED, MEMPOOL_SMART_MONEY_ENABLED
+            global SELF_LEARNING_AI_ENABLED
+            query = update.callback_query
+            await query.answer()
+            data = query.data
+
+            if data == "home" or data == "refresh":
+                chat_id = query.message.chat_id
+                is_active, exp_date = check_user_subscription(chat_id)
+                status = f"✅ فعال تا `{exp_date}`" if is_active else "❌ اشتراک فعال نیست"
+                await query.edit_message_text(
+                    f"🤖 *ربات هوشمند ترید هالکی*\n\n{status}\n\nموتورهای سیستم از این بخش قابل کنترل هستند.",
+                    reply_markup=main_keyboard(chat_id), parse_mode="Markdown"
+                )
+                return
+
+            if data == "status":
+                active_count = len(get_active_subscribers())
+                text = (
+                    "📊 *وضعیت سیستم*\n\n"
+                    f"🔥 Fire: {'🟢' if IS_RUNNING else '🔴'}\n"
+                    f"📈 Trend: {'🟢' if TREND_ALERT_RUNNING else '🔴'}\n"
+                    f"🧠 Combo: {'🟢' if COMBO_RUNNING else '🔴'}\n"
+                    f"🥇 Golden: {'🟢' if GOLDEN_OPTION else '🔴'}\n"
+                    f"📐 Technical: {'🟢' if TECHNICAL_RUNNING else '🔴'}\n"
+                    f"⚡ Mempool: {'🟢' if MEMPOOL_SMART_MONEY_ENABLED else '🔴'}\n"
+                    f"🤖 Self-Learning AI: {'🟢' if SELF_LEARNING_AI_ENABLED else '🔴'}\n"
+                    f"👥 مشترک فعال: `{active_count}`"
+                )
+                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")]]), parse_mode="Markdown")
+                return
+
+            if data == "engines":
+                await query.edit_message_text("⚙️ *کنترل موتورهای سیگنال*\n\nهر دکمه فقط همان موتور را روشن/خاموش می‌کند.", reply_markup=engines_keyboard(), parse_mode="Markdown")
+                return
+
+            toggles = {
+                "toggle_fire": ("🔥 Fire", "IS_RUNNING"),
+                "toggle_trend": ("📈 Trend", "TREND_ALERT_RUNNING"),
+                "toggle_combo": ("🧠 Combo", "COMBO_RUNNING"),
+                "toggle_golden": ("🥇 Golden", "GOLDEN_OPTION"),
+                "toggle_technical": ("📐 Technical", "TECHNICAL_RUNNING"),
+                "toggle_smart": ("🛡 Smart Filter", "SMART_FILTER_ENABLED"),
+                "toggle_mempool": ("⚡ Mempool", "MEMPOOL_SMART_MONEY_ENABLED"),
+                "toggle_ai": ("🤖 Self-Learning AI", "SELF_LEARNING_AI_ENABLED"),
+            }
+            if data in toggles:
+                label, var_name = toggles[data]
+                current = globals().get(var_name, False)
+                globals()[var_name] = not current
+                logger.info(f"⚙️ {label} -> {'ON' if not current else 'OFF'} توسط {query.from_user.id}")
+                await query.edit_message_text(
+                    f"⚙️ *{label}* اکنون {'🟢 روشن' if not current else '🔴 خاموش'} است.",
+                    reply_markup=engines_keyboard(), parse_mode="Markdown"
+                )
+                return
+
+        async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+            logger.error(f"❌ Telegram handler error: {context.error}")
 
         app.add_handler(CommandHandler("start", start_cmd))
-        logger.info("🤖 ربات تلگرام با موفقیت استارت شد.")
-        app.run_polling(drop_pending_updates=True)
+        app.add_handler(CommandHandler("menu", menu_cmd))
+        app.add_handler(CallbackQueryHandler(callback_handler))
+        app.add_error_handler(error_handler)
+
+        logger.info("🤖 ربات تلگرام با منوی کامل و کنترل موتورهای موجود استارت شد.")
+        app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
     except Exception as e:
-        logger.error(f"Telegram bot runtime error: {e}")
+        logger.exception(f"❌ Telegram bot runtime error: {e}")
 
 if __name__ == "__main__":
     logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
