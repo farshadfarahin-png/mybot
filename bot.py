@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import logging
 from datetime import datetime, timedelta
-from threading import Thread, Lock
+from threading import Thread, Lock, RLock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from flask import Flask, render_template_string, request, jsonify
@@ -28,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger("HulkSolBot")
 
 # قفل‌های همزمانی برای ایمنی کامل در ثردها (Thread Safety)
-db_lock = Lock()
+db_lock = RLock()
 state_lock = Lock()
 rpc_lock = Lock()
 
@@ -40,15 +40,15 @@ http_session.mount("https://", adapter)
 http_session.mount("http://", adapter)
 
 # تنظیمات کلیدی محیطی و کانال انتشار سیگنال
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "TOKEN_YOW")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "CHAT_ID_YOW")
-ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY", "HULK_SUPER_SECRET_ADMIN_PASS_99")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY", "").strip()
 
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1003840577545") 
-CHANNEL_INVITE_LINK = "https://t.me/+c_o1BlwD7Q4ZjZk"
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip() 
+CHANNEL_INVITE_LINK = os.environ.get("CHANNEL_INVITE_LINK", "").strip()
 
-PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://your-render-or-hosting-url.com")
+PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "").strip()
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -65,10 +65,8 @@ for i in range(1, 5):
         RPC_ENDPOINTS.append(env_rpc)
 
 if not RPC_ENDPOINTS:
-    RPC_ENDPOINTS = [
-        "https://api.mainnet-beta.solana.com",
-        "https://solana-api.projectserum.com"
-    ]
+    RPC_ENDPOINTS = ["https://api.mainnet-beta.solana.com"]
+logger.info(f"🔁 RPC rotation loaded: {len(RPC_ENDPOINTS)} endpoint(s)")
 
 rpc_current_index = 0
 
@@ -206,9 +204,16 @@ def init_db():
                     wallet_address TEXT,
                     expiry_date TEXT,
                     tx_signature TEXT,
-                    status TEXT
+                    status TEXT,
+                    copy_enabled INTEGER DEFAULT 1,
+                    trade_amount_sol REAL DEFAULT 0.01
                 )
             """)
+            for col, definition in [("copy_enabled", "INTEGER DEFAULT 1"), ("trade_amount_sol", "REAL DEFAULT 0.01")]:
+                try:
+                    cursor.execute(f"ALTER TABLE subscribers ADD COLUMN {col} {definition}")
+                except sqlite3.OperationalError:
+                    pass
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS ai_learning_params (
                     param_name TEXT PRIMARY KEY,
@@ -623,102 +628,53 @@ def subscription_monitor_loop():
                 logger.error(f"⚠️ خطا در مانیتورینگ اشتراک‌ها: {e}")
         time.sleep(60)
 
-def send_telegram_msg(text, target_chat=None, reply_markup=None):
-    """ارسال امن پیام تلگرام و ثبت پاسخ واقعی API برای عیب‌یابی."""
+def send_telegram_msg(text, target_chat=None, reply_markup=None, parse_mode="Markdown"):
+    """ارسال امن پیام تلگرام و بررسی پاسخ API."""
     chat_target = target_chat if target_chat is not None else TELEGRAM_CHAT_ID
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN in ("TOKEN_YOW", "YOUR_BOT_TOKEN"):
-        logger.error("❌ TELEGRAM_BOT_TOKEN تنظیم نشده است.")
+    if not TELEGRAM_BOT_TOKEN or not chat_target:
+        logger.error("❌ Telegram config ناقص است: TELEGRAM_BOT_TOKEN / chat_id")
         return False
-    if not chat_target or chat_target in ("CHAT_ID_YOW", "YOUR_CHAT_ID"):
-        logger.error("❌ TELEGRAM_CHAT_ID/target_chat تنظیم نشده است.")
-        return False
-
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": str(chat_target),
-        "text": str(text),
-        "disable_web_page_preview": True,
-    }
-    # Markdown در متن‌های تولیدشده ممکن است به خاطر کاراکترهای خاص خطا بدهد؛
-    # ابتدا Markdown را امتحان می‌کنیم و در صورت خطا یک بار متن ساده می‌فرستیم.
-    payload["parse_mode"] = "Markdown"
+    payload = {"chat_id": chat_target, "text": str(text), "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup.to_dict() if hasattr(reply_markup, "to_dict") else reply_markup
-
     try:
-        res = http_session.post(url, json=payload, timeout=10)
-        try:
-            data = res.json()
-        except Exception:
-            data = {"ok": False, "description": res.text[:500]}
-
+        res = http_session.post(url, json=payload, timeout=8)
+        data = res.json()
         if data.get("ok"):
             return True
-
-        logger.error(f"❌ Telegram API error [{res.status_code}]: {data.get('description', data)}")
-
-        # اگر مشکل از Markdown باشد، همان پیام را بدون parse_mode دوباره می‌فرستیم.
-        if payload.get("parse_mode") == "Markdown":
-            fallback = dict(payload)
-            fallback.pop("parse_mode", None)
-            res2 = http_session.post(url, json=fallback, timeout=10)
-            try:
-                data2 = res2.json()
-            except Exception:
-                data2 = {"ok": False, "description": res2.text[:500]}
-            if data2.get("ok"):
-                logger.info("✅ پیام تلگرام با حالت متن ساده ارسال شد.")
+        logger.error(f"❌ Telegram sendMessage failed: {data.get('description', data)}")
+        if parse_mode:
+            payload.pop("parse_mode", None)
+            retry = http_session.post(url, json=payload, timeout=8)
+            retry_data = retry.json()
+            if retry_data.get("ok"):
+                logger.warning("⚠️ پیام با fallback بدون Markdown ارسال شد.")
                 return True
-            logger.error(f"❌ Telegram fallback error [{res2.status_code}]: {data2.get('description', data2)}")
+            logger.error(f"❌ Telegram fallback failed: {retry_data.get('description', retry_data)}")
         return False
     except Exception as e:
-        logger.error(f"❌ خطای اتصال هنگام ارسال پیام به تلگرام: {e}")
+        logger.error(f"❌ خطای ارسال پیام به تلگرام: {e}")
         return False
 
-def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP"):
-    if not CHANNEL_ID:
-        return
-    
+def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY"):
+    if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
+        logger.error("❌ CHANNEL_ID یا TELEGRAM_BOT_TOKEN تنظیم نشده است.")
+        return False
+    side_icon = "🟢 خرید" if str(side).upper() == "BUY" else "🔴 فروش"
     graphic_text = (
-        f"╔══════════════════════╗\n"
-        f"  {signal_title}\n"
-        f"╚══════════════════════╝\n\n"
-        f"🪙 نام توکن: #{symbol}\n"
-        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-        f"💵 قیمت ورود: ${price:.8f}\n"
-        f"💰 حجم معامله: SOL {buy_amt}\n"
-        f"🎯 تارگت سود: +%{tp}\n"
-        f"🛑 حد ضرر: %{sl}\n\n"
-        f"📊 آمار زنده بازار:\n"
-        f"▪️ روند ۵ دقیقه: +%{p_change:.2f}\n"
-        f"▪️ حجم معاملات: ${volume:,.0f}\n"
-        f"▪️ نقدینگی کل: ${liquidity:,.0f}\n\n"
-        f"⚡️ *سیستم هوشمند هولکی*\n"
-        f"━━━━━━━━━━━━━━━━━━━"
+        f"╔══════════════════════════╗\n  {signal_title}\n  {side_icon}\n╚══════════════════════════╝\n\n"
+        f"🪙 نام توکن: #{symbol}\n📍 آدرس قرارداد:\n{token_addr}\n\n"
+        f"💵 قیمت: ${price:.8f}\n💰 حجم معامله: SOL {buy_amt}\n🎯 حد سود: +%{tp}\n🛑 حد ضرر: %{sl}\n\n"
+        f"📊 آمار زنده بازار:\n▪️ روند ۵ دقیقه: %{p_change:+.2f}\n▪️ حجم معاملات: ${volume:,.0f}\n▪️ نقدینگی کل: ${liquidity:,.0f}\n\n"
+        f"⚡️ سیستم هوشمند هالکی\n━━━━━━━━━━━━━━━━━━━━"
     )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔍 بررسی در Solscan", url=solscan_link),
-            InlineKeyboardButton("📈 نمودار DexScreener", url=f"https://dexscreener.com/solana/{token_addr}")
-        ],
-        [
-            InlineKeyboardButton("🤖 ورود به مینی‌اپلیکیشن و کپی‌ترید", url=WEBAPP_URL)
-        ]
-    ])
-
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": CHANNEL_ID,
-            "text": graphic_text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True,
-            "reply_markup": keyboard.to_dict()
-        }
-        http_session.post(url, json=payload, timeout=5)
-    except Exception as e:
-        logger.error(f"❌ خطا در ارسال سیگنال گرافیکی به کانال: {e}")
+    buttons = [[InlineKeyboardButton("🔍 Solscan", url=solscan_link), InlineKeyboardButton("📈 DexScreener", url=f"https://dexscreener.com/solana/{token_addr}")]]
+    if WEBAPP_URL:
+        buttons.append([InlineKeyboardButton("🤖 ورود به Mini App و کپی‌ترید", url=WEBAPP_URL)])
+    return send_telegram_msg(graphic_text, target_chat=CHANNEL_ID, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=None)
 
 def register_subscription(telegram_id, wallet_addr, tx_sig, currency="SOL"):
     with db_lock:
@@ -727,9 +683,9 @@ def register_subscription(telegram_id, wallet_addr, tx_sig, currency="SOL"):
             cursor = conn.cursor()
             expiry = datetime.now() + timedelta(days=30)
             cursor.execute("""
-                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
-                VALUES (?, ?, ?, ?, 'ACTIVE')
-            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), f"{currency}:{tx_sig}"))
+                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status, copy_enabled, trade_amount_sol)
+                VALUES (?, ?, ?, ?, 'ACTIVE', 1, COALESCE((SELECT trade_amount_sol FROM subscribers WHERE telegram_id = ?), 0.01))
+            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), f"{currency}:{tx_sig}", str(telegram_id)))
             conn.commit()
             conn.close()
             
@@ -753,9 +709,9 @@ def register_free_vip(telegram_id, wallet_addr="FREE_PASS_WALLET"):
             cursor = conn.cursor()
             expiry = datetime.now() + timedelta(days=30)
             cursor.execute("""
-                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status)
-                VALUES (?, ?, ?, ?, 'ACTIVE')
-            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), "ADMIN_FREE_PASS"))
+                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status, copy_enabled, trade_amount_sol)
+                VALUES (?, ?, ?, ?, 'ACTIVE', 1, COALESCE((SELECT trade_amount_sol FROM subscribers WHERE telegram_id = ?), 0.01))
+            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), "ADMIN_FREE_PASS", str(telegram_id)))
             conn.commit()
             conn.close()
             
@@ -800,10 +756,9 @@ try:
     WALLET_PUBKEY = str(sender_keypair.pubkey())
     logger.info(f"✅ ولت با موفقیت لود شد: {WALLET_PUBKEY}")
 except Exception as e:
-    err_txt = f"خطا در کلید خصوصی ولت: {e}"
-    logger.error(err_txt)
-    send_telegram_msg(err_txt)
+    logger.error(f"❌ خطا در بارگذاری کلید خصوصی از Environment: {e}")
     WALLET_PUBKEY = None
+    sender_keypair = None
 
 def get_sol_balance():
     if not WALLET_PUBKEY:
@@ -941,7 +896,7 @@ def trigger_copy_trading_for_subscribers(token_mint, amount_sol):
         send_telegram_msg(copy_msg, target_chat=t_id)
 
 def execute_real_buy(token_mint, amount_sol):
-    if not WALLET_PUBKEY:
+    if not WALLET_PUBKEY or sender_keypair is None:
         return False, "کلید عمومی ولت نامعتبر است"
 
     dynamic_amount = get_dynamic_buy_amount(amount_sol)
@@ -1078,7 +1033,7 @@ def close_wsol_account():
         logger.warning(f"⚠️ هشدار در بستن اکانت WSOL: {e}")
 
 def execute_real_sell(token_mint, token_amount):
-    if not WALLET_PUBKEY:
+    if not WALLET_PUBKEY or sender_keypair is None:
         return False, "ولتی یافت نشد ❌"
 
     headers = {
@@ -1698,83 +1653,36 @@ def home():
     """
     return render_template_string(html_template, wallet=WALLET_PUBKEY)
 
+def get_all_subscribers():
+    rows = []
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("SELECT telegram_id, wallet_address, expiry_date, tx_signature, status, copy_enabled, trade_amount_sol FROM subscribers ORDER BY expiry_date DESC")
+            rows = cursor.fetchall()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Get all subscribers error: {e}")
+    return rows
+
+def get_wallet_status():
+    return {"pubkey": WALLET_PUBKEY or "-", "sol": get_sol_balance() if WALLET_PUBKEY else 0.0}
+
 @web_app.route('/admin-panel')
 def admin_panel():
     t_id = request.args.get("telegram_id", "")
     secret_key = request.args.get("secret", "")
-    
-    is_admin_id = str(t_id) == str(TELEGRAM_CHAT_ID)
-    is_secret_valid = secret_key == ADMIN_SECRET_KEY
-
-    if not (is_admin_id or is_secret_valid):
-        return "<h3 style='color:red; text-align:center;'>⛔ دسترسی غیرمجاز! احراز هویت ادمین ناموفق بود.</h3>", 403
-    
-    subs = get_active_subscribers()
+    if not ((TELEGRAM_CHAT_ID and str(t_id) == str(TELEGRAM_CHAT_ID)) or (ADMIN_SECRET_KEY and secret_key == ADMIN_SECRET_KEY)):
+        return "<h3 style='color:red;text-align:center'>⛔ دسترسی غیرمجاز</h3>", 403
     analytics = get_advanced_trade_analytics()
-
-    best_str = f"🪙 {analytics['best_trade'][0]} ({analytics['best_trade'][1]:+.2f}%)" if analytics['best_trade'] else "ثبت نشده"
-    worst_str = f"🪙 {analytics['worst_trade'][0]} ({analytics['worst_trade'][1]:+.2f}%)" if analytics['worst_trade'] else "ثبت نشده"
-
-    admin_html = f"""
-    <!DOCTYPE html>
-    <html lang="fa" dir="rtl">
-    <head>
-        <meta charset="UTF-8">
-        <title>پنل ادمین و گزارش پیشرفته هالکی</title>
-        <style>
-            body {{ background:#0f172a; color:#fff; text-align:center; font-family:Tahoma; padding:15px; margin:0; }}
-            .card {{ background:#1e293b; padding:20px; border-radius:12px; max-width:500px; margin:auto; text-align:right; box-shadow: 0 4px 20px rgba(0,0,0,0.7); }}
-            h1 {{ color:#a855f7; text-align:center; font-size:16px; }}
-            input {{ width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; text-align: center; }}
-            .btn-free {{ background: #8b5cf6; color: white; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 5px; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>👑 پنل مدیریت و گزارش پیشرفته (امنیت ۱۰۰۰/۱۰۰۰)</h1>
-            
-            <div style="background:#0f172a;padding:12px;border-radius:8px;margin-bottom:15px;border:1px solid #334155;">
-                <h3 style="color:#38bdf8;margin-top:0;font-size:14px;text-align:center;">🎁 اعطای اشتراک رایگان سریع</h3>
-                <input type="text" id="freeTelegramId" placeholder="آیدی تلگرام کاربر (عدد)">
-                <button class="btn-free" onclick="grantFreeSub()">ثبت عضویت رایگان ۳۰ روزه</button>
-            </div>
-
-            <div style="background:#0f172a;padding:12px;border-radius:8px;margin-bottom:15px;border:1px solid #334155;">
-                <h3 style="color:#38bdf8;margin-top:0;font-size:14px;text-align:center;">📊 آمار جامع عملکرد ربات</h3>
-                <p>🔹 کل معاملات ثبت‌شده: <b>{analytics['total_trades']}</b></p>
-                <p>📈 مجموع سود/زیان درصدی: <b style="color:#22c55e;">{analytics['total_pct']:+.2f}%</b></p>
-                <p>💵 مجموع سود/زیان دلاری: <b style="color:#22c55e;">${analytics['total_usd']:+.2f}</b></p>
-                <p>🎯 نرخ موفقیت (Win Rate): <b style="color:#38bdf8;">{analytics['win_rate']}%</b></p>
-                <p>🏆 بهترین معامله: <b style="color:#22c55e;">{best_str}</b></p>
-                <p>📉 بدترین معامله: <b style="color:#ef4444;">{worst_str}</b></p>
-            </div>
-
-            <p>👥 کاربران فعال VIP (با تاریخ انقضا و اخراج خودکار): <b>{len(subs)}</b></p>
-    """
-    for sub in subs:
-        admin_html += f"<div style='background:#0f172a;padding:8px;margin:5px 0;border-radius:6px;font-size:11px;'>🆔 {sub['telegram_id']} | ⏳ انقضا: {sub['expiry']}</div>"
-    
-    admin_html += f"""
-        </div>
-        <script>
-            function grantFreeSub() {{
-                const tId = document.getElementById('freeTelegramId').value;
-                if(!tId) {{ alert('لطفاً آیدی تلگرام کاربر را وارد کنید!'); return; }}
-                
-                fetch('/api/admin/free-sub', {{
-                    method: 'POST',
-                    headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify({{telegram_id: tId, admin_id: "{TELEGRAM_CHAT_ID}", secret: "{ADMIN_SECRET_KEY}"}})
-                }}).then(res => res.json()).then(data => {{
-                    alert(data.message);
-                    if(data.status === 'success') {{ location.reload(); }}
-                }}).catch(err => {{ alert('خطا در ارتباط با سرور.'); }});
-            }}
-        </script>
-    </body>
-    </html>
-    """
-    return admin_html
+    wallet = get_wallet_status()
+    subs = get_all_subscribers()
+    best = analytics["best_trade"]; worst = analytics["worst_trade"]
+    best_str = f"{best[0]} ({best[1]:+.2f}%)" if best else "ثبت نشده"
+    worst_str = f"{worst[0]} ({worst[1]:+.2f}%)" if worst else "ثبت نشده"
+    rows_html = "".join(f"<div class='row'>🆔 {r[0]}<br>💳 ولت: <span class='mono'>{r[1] or '-'}</span><br>⏳ انقضا: {r[2]}<br>📌 وضعیت: {r[4]} | 🤖 کپی: {'فعال' if len(r)>5 and r[5] else 'خاموش'} | 💰 حجم: {r[6] if len(r)>6 else 0.01} SOL</div>" for r in subs) or "<div class='row'>هنوز کاربری ثبت نشده است.</div>"
+    return f"""<!doctype html><html lang='fa' dir='rtl'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>پنل مدیریت هالکی</title><style>body{{background:#07111f;color:#fff;font-family:Tahoma;padding:14px}}.wrap{{max-width:720px;margin:auto}}.card{{background:#101c2d;border:1px solid #24364f;border-radius:18px;padding:16px;margin:10px 0;box-shadow:0 8px 30px #0008}}h1,h2{{text-align:center}}h1{{font-size:20px;color:#38bdf8}}h2{{font-size:14px;color:#c084fc}}.grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}}.stat{{background:#0b1524;border-radius:14px;padding:12px;text-align:center}}.value{{font-size:19px;font-weight:bold;color:#22c55e}}.row{{background:#0b1524;border-radius:12px;padding:10px;margin:7px 0;font-size:11px;line-height:1.8}}.mono{{word-break:break-all;color:#94a3b8}}</style></head><body><div class='wrap'><div class='card'><h1>👑 پنل مدیریت هوشمند هالکی</h1><p style='text-align:center;color:#94a3b8'>کنترل و گزارش خصوصی ادمین</p></div><div class='card'><h2>📊 آمار معاملات</h2><div class='grid'><div class='stat'>کل معاملات<br><span class='value'>{analytics['total_trades']}</span></div><div class='stat'>Win Rate<br><span class='value'>{analytics['win_rate']:.2f}%</span></div><div class='stat'>سود/زیان<br><span class='value'>{analytics['total_pct']:+.2f}%</span></div><div class='stat'>P/L دلاری<br><span class='value'>${analytics['total_usd']:+.2f}</span></div></div><p>🏆 بهترین: {best_str}</p><p>📉 بدترین: {worst_str}</p></div><div class='card'><h2>💼 ولت اصلی</h2><p>موجودی لحظه‌ای: <b>{wallet['sol']:.6f} SOL</b></p><p class='mono'>{wallet['pubkey']}</p><p style='color:#64748b;font-size:10px'>این اطلاعات فقط در پنل مدیریت نمایش داده می‌شود و به کانال VIP ارسال نمی‌شود.</p></div><div class='card'><h2>👥 کاربران و اشتراک‌ها</h2><p>تعداد رکوردها: <b>{len(subs)}</b></p>{rows_html}</div></div></body></html>"""
 
 @web_app.route('/api/admin/free-sub', methods=['POST'])
 def api_admin_free_sub():
@@ -1842,128 +1750,50 @@ def api_subscribe():
     else:
         return jsonify({"status": "error", "message": "خطا در ثبت اشتراک."}), 500
 
+def _engine_status_lines():
+    return (f"🔥 Fire: {'🟢' if IS_RUNNING else '🔴'}\n" f"📈 Trend: {'🟢' if TREND_ALERT_RUNNING else '🔴'}\n" f"🤝 Combo: {'🟢' if COMBO_RUNNING else '🔴'}\n" f"🏆 Golden: {'🟢' if GOLDEN_OPTION else '🔴'}\n" f"📊 Technical: {'🟢' if TECHNICAL_RUNNING else '🔴'}\n" f"🧠 Ultimate/AI: {'🟢' if ULTIMATE_21_ENGINE_ENABLED else '🔴'}\n" f"⚡ Mempool: {'🟢' if MEMPOOL_SMART_MONEY_ENABLED else '🔴'}\n" f"🐋 Whale: {'🟢' if BOTTOM_WHALE_RUNNING else '🔴'}\n" f"🛡 Anti-Wash: {'🟢' if ANTI_WASH_TRADING_ENABLED else '🔴'}\n" f"🤖 Copy: {'🟢' if COPY_TRADING_ENABLED else '🔴'}")
+
+def _main_keyboard(is_admin=False):
+    rows=[[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
+    if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
+    elif CHANNEL_INVITE_LINK: rows.append([InlineKeyboardButton("📢 کانال VIP",url=CHANNEL_INVITE_LINK)])
+    if is_admin: rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
+    return InlineKeyboardMarkup(rows)
+
+def _control_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Fire",callback_data="toggle_fire"),InlineKeyboardButton("📈 Trend",callback_data="toggle_trend")],[InlineKeyboardButton("🤝 Combo",callback_data="toggle_combo"),InlineKeyboardButton("🏆 Golden",callback_data="toggle_golden")],[InlineKeyboardButton("📊 Technical",callback_data="toggle_tech"),InlineKeyboardButton("⚡ Mempool",callback_data="toggle_mempool")],[InlineKeyboardButton("🐋 Whale",callback_data="toggle_whale"),InlineKeyboardButton("🤖 Copy",callback_data="toggle_copy")],[InlineKeyboardButton("🔙 بازگشت",callback_data="home")]])
+
 def start_telegram_bot():
-    """راه‌اندازی پایدار ربات تلگرام با منوی اصلی و کنترل موتورهای موجود."""
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN in ("TOKEN_YOW", "YOUR_BOT_TOKEN"):
-        logger.error("❌ ربات تلگرام اجرا نشد: TELEGRAM_BOT_TOKEN تنظیم نشده است.")
-        return
-
     try:
-        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-        def main_keyboard(chat_id):
-            return InlineKeyboardMarkup([
-                [InlineKeyboardButton("📱 مینی‌اپلیکیشن VIP", web_app=WebAppInfo(url=f"{WEBAPP_URL}?telegram_id={chat_id}"))],
-                [InlineKeyboardButton("📊 وضعیت ربات", callback_data="status"),
-                 InlineKeyboardButton("⚙️ موتورهای سیگنال", callback_data="engines")],
-                [InlineKeyboardButton("🔄 بروزرسانی", callback_data="refresh"),
-                 InlineKeyboardButton("📢 کانال VIP", url=CHANNEL_INVITE_LINK)],
-            ])
-
-        def engines_keyboard():
-            return InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"🔥 Fire: {'ON' if IS_RUNNING else 'OFF'}", callback_data="toggle_fire"),
-                 InlineKeyboardButton(f"📈 Trend: {'ON' if TREND_ALERT_RUNNING else 'OFF'}", callback_data="toggle_trend")],
-                [InlineKeyboardButton(f"🧠 Combo: {'ON' if COMBO_RUNNING else 'OFF'}", callback_data="toggle_combo"),
-                 InlineKeyboardButton(f"🥇 Golden: {'ON' if GOLDEN_OPTION else 'OFF'}", callback_data="toggle_golden")],
-                [InlineKeyboardButton(f"📐 Technical: {'ON' if TECHNICAL_RUNNING else 'OFF'}", callback_data="toggle_technical"),
-                 InlineKeyboardButton(f"🛡 Smart Filter: {'ON' if SMART_FILTER_ENABLED else 'OFF'}", callback_data="toggle_smart")],
-                [InlineKeyboardButton(f"⚡ Mempool: {'ON' if MEMPOOL_SMART_MONEY_ENABLED else 'OFF'}", callback_data="toggle_mempool"),
-                 InlineKeyboardButton(f"🤖 AI: {'ON' if SELF_LEARNING_AI_ENABLED else 'OFF'}", callback_data="toggle_ai")],
-                [InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")],
-            ])
-
-        async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            chat_id = update.effective_chat.id
-            is_active, exp_date = check_user_subscription(chat_id)
-            if is_active:
-                text = (
-                    "🤖 *ربات هوشمند ترید هالکی*\n\n"
-                    f"✅ اشتراک VIP فعال است تا: `{exp_date}`\n"
-                    "📡 سیستم مانیتورینگ و موتورهای سیگنال فعال هستند."
-                )
-            else:
-                text = (
-                    "🤖 *ربات هوشمند ترید هالکی*\n\n"
-                    "❌ اشتراک VIP شما فعال نیست.\n"
-                    "برای دریافت سیگنال‌ها و کپی‌تریدینگ از مینی‌اپلیکیشن استفاده کنید."
-                )
-            await update.message.reply_text(text, reply_markup=main_keyboard(chat_id), parse_mode="Markdown", disable_web_page_preview=True)
-
-        async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            await start_cmd(update, context)
-
-        async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION
-            global TECHNICAL_RUNNING, SMART_FILTER_ENABLED, MEMPOOL_SMART_MONEY_ENABLED
-            global SELF_LEARNING_AI_ENABLED
-            query = update.callback_query
-            await query.answer()
-            data = query.data
-
-            if data == "home" or data == "refresh":
-                chat_id = query.message.chat_id
-                is_active, exp_date = check_user_subscription(chat_id)
-                status = f"✅ فعال تا `{exp_date}`" if is_active else "❌ اشتراک فعال نیست"
-                await query.edit_message_text(
-                    f"🤖 *ربات هوشمند ترید هالکی*\n\n{status}\n\nموتورهای سیستم از این بخش قابل کنترل هستند.",
-                    reply_markup=main_keyboard(chat_id), parse_mode="Markdown"
-                )
-                return
-
-            if data == "status":
-                active_count = len(get_active_subscribers())
-                text = (
-                    "📊 *وضعیت سیستم*\n\n"
-                    f"🔥 Fire: {'🟢' if IS_RUNNING else '🔴'}\n"
-                    f"📈 Trend: {'🟢' if TREND_ALERT_RUNNING else '🔴'}\n"
-                    f"🧠 Combo: {'🟢' if COMBO_RUNNING else '🔴'}\n"
-                    f"🥇 Golden: {'🟢' if GOLDEN_OPTION else '🔴'}\n"
-                    f"📐 Technical: {'🟢' if TECHNICAL_RUNNING else '🔴'}\n"
-                    f"⚡ Mempool: {'🟢' if MEMPOOL_SMART_MONEY_ENABLED else '🔴'}\n"
-                    f"🤖 Self-Learning AI: {'🟢' if SELF_LEARNING_AI_ENABLED else '🔴'}\n"
-                    f"👥 مشترک فعال: `{active_count}`"
-                )
-                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 منوی اصلی", callback_data="home")]]), parse_mode="Markdown")
-                return
-
-            if data == "engines":
-                await query.edit_message_text("⚙️ *کنترل موتورهای سیگنال*\n\nهر دکمه فقط همان موتور را روشن/خاموش می‌کند.", reply_markup=engines_keyboard(), parse_mode="Markdown")
-                return
-
-            toggles = {
-                "toggle_fire": ("🔥 Fire", "IS_RUNNING"),
-                "toggle_trend": ("📈 Trend", "TREND_ALERT_RUNNING"),
-                "toggle_combo": ("🧠 Combo", "COMBO_RUNNING"),
-                "toggle_golden": ("🥇 Golden", "GOLDEN_OPTION"),
-                "toggle_technical": ("📐 Technical", "TECHNICAL_RUNNING"),
-                "toggle_smart": ("🛡 Smart Filter", "SMART_FILTER_ENABLED"),
-                "toggle_mempool": ("⚡ Mempool", "MEMPOOL_SMART_MONEY_ENABLED"),
-                "toggle_ai": ("🤖 Self-Learning AI", "SELF_LEARNING_AI_ENABLED"),
-            }
-            if data in toggles:
-                label, var_name = toggles[data]
-                current = globals().get(var_name, False)
-                globals()[var_name] = not current
-                logger.info(f"⚙️ {label} -> {'ON' if not current else 'OFF'} توسط {query.from_user.id}")
-                await query.edit_message_text(
-                    f"⚙️ *{label}* اکنون {'🟢 روشن' if not current else '🔴 خاموش'} است.",
-                    reply_markup=engines_keyboard(), parse_mode="Markdown"
-                )
-                return
-
-        async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-            logger.error(f"❌ Telegram handler error: {context.error}")
-
-        app.add_handler(CommandHandler("start", start_cmd))
-        app.add_handler(CommandHandler("menu", menu_cmd))
-        app.add_handler(CallbackQueryHandler(callback_handler))
-        app.add_error_handler(error_handler)
-
-        logger.info("🤖 ربات تلگرام با منوی کامل و کنترل موتورهای موجود استارت شد.")
-        app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
-    except Exception as e:
-        logger.exception(f"❌ Telegram bot runtime error: {e}")
+        if not TELEGRAM_BOT_TOKEN:
+            logger.error("❌ TELEGRAM_BOT_TOKEN تنظیم نشده؛ ربات تلگرام اجرا نشد."); return
+        app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        async def start_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+            chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
+            text=(f"🎉 **خوش آمدید به هالکی VIP**\n\n🟢 اشتراک شما فعال است.\n⏳ پایان اشتراک: `{exp_date}`" if active else "🤖 **ربات هوشمند ترید هالکی**\n\n🔴 اشتراک VIP فعال نیست.\nبرای ثبت‌نام و فعال‌سازی، Mini App را باز کنید.")
+            await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+        async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED
+            q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
+            if data=="home": await q.edit_message_text("🤖 **مرکز کنترل هالکی VIP**\n\nاز دکمه‌های شیشه‌ای زیر انتخاب کنید.",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            elif data=="engines": await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n"+_engine_status_lines(),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت",callback_data="home")]]),parse_mode="Markdown")
+            elif data=="controls": await q.edit_message_text("🎛 **کنترل سریع موتورها**\n\nهر موتور مستقل کنترل می‌شود.",reply_markup=_control_keyboard(),parse_mode="Markdown") if is_admin else await q.edit_message_text("⛔ این بخش فقط برای ادمین است.",reply_markup=_main_keyboard(False))
+            elif data=="wallet":
+                if not is_admin: await q.edit_message_text("⛔ اطلاعات ولت اصلی خصوصی است.",reply_markup=_main_keyboard(False))
+                else: await q.edit_message_text(f"💼 **ولت اصلی**\n\n💰 موجودی: `{get_sol_balance():.6f} SOL`\n\n📍 `{WALLET_PUBKEY or '-'} `",reply_markup=_main_keyboard(True),parse_mode="Markdown")
+            elif data=="stats":
+                a=get_advanced_trade_analytics(); await q.edit_message_text(f"📊 **آمار واقعی ثبت‌شده**\n\nمعاملات: `{a['total_trades']}`\nWin Rate: `{a['win_rate']:.2f}%`\nسود/زیان: `{a['total_pct']:+.2f}%`\nP/L: `${a['total_usd']:+.2f}`",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            elif data=="security":
+                if not is_admin: await q.edit_message_text("⛔ فقط ادمین.",reply_markup=_main_keyboard(False))
+                else: await q.edit_message_text(f"🔐 **امنیت**\n\nPrivate Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\nRPCها: `{len(RPC_ENDPOINTS)}`\nAdmin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",reply_markup=_main_keyboard(True),parse_mode="Markdown")
+            elif data=="admin":
+                if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.")
+                else: await q.edit_message_text(f"👑 **پنل مدیریت**\n\nکاربران: `{len(get_all_subscribers())}`\nمعاملات: `{get_advanced_trade_analytics()['total_trades']}`",reply_markup=_main_keyboard(True),parse_mode="Markdown")
+            elif data.startswith("toggle_"):
+                if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.",reply_markup=_main_keyboard(False)); return
+                mapping={"toggle_fire":"IS_RUNNING","toggle_trend":"TREND_ALERT_RUNNING","toggle_combo":"COMBO_RUNNING","toggle_golden":"GOLDEN_OPTION","toggle_tech":"TECHNICAL_RUNNING","toggle_mempool":"MEMPOOL_SMART_MONEY_ENABLED","toggle_whale":"BOTTOM_WHALE_RUNNING","toggle_copy":"COPY_TRADING_ENABLED"}; name=mapping[data]; globals()[name]=not bool(globals()[name]); await q.edit_message_text("🎛 **کنترل موتورها**\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
+        app.add_handler(CommandHandler("start",start_cmd)); app.add_handler(CallbackQueryHandler(button_handler)); logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد."); app.run_polling(drop_pending_updates=True)
+    except Exception as e: logger.exception(f"Telegram bot runtime error: {e}")
 
 if __name__ == "__main__":
     logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
