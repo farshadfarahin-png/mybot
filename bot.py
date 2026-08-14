@@ -30,6 +30,7 @@ logger = logging.getLogger("HulkSolBot")
 # قفل‌های همزمانی برای ایمنی کامل در ثردها (Thread Safety)
 db_lock = Lock()
 state_lock = Lock()
+rpc_lock = Lock()
 
 # ایجاد جلسه ارتباطی پرسرعت با قابلیت Re-use اتصالات و ریتراپ
 http_session = requests.Session()
@@ -49,7 +50,58 @@ CHANNEL_INVITE_LINK = "https://t.me/+c_o1BlwD7Q4ZjZk"
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "YOUR_PRIVATE_KEY")
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://your-render-or-hosting-url.com")
 
-RPC_URL = os.environ.get
+# =========================================================================
+# مدیریت حالت چرخشی ۴ لینک خصوصی RPC (Round-Robin RPC Manager with Failover)
+# =========================================================================
+rpc_env_candidates = [
+    os.environ.get("RPC_URL_1"),
+    os.environ.get("RPC_URL_2"),
+    os.environ.get("RPC_URL_3"),
+    os.environ.get("RPC_URL_4"),
+    os.environ.get("RPC_URL"),
+]
+
+# استخراج و پالایش آدرس‌های معتبر
+RPC_URL_LIST = [url.strip() for url in rpc_env_candidates if url and str(url).strip().startswith("http")]
+
+# در صورتی که لینک‌ها در یک متغیر به صورت جدا شده با کاما ذخیره شده باشند
+if not RPC_URL_LIST:
+    raw_rpc_str = os.environ.get("RPC_URLS", "")
+    if raw_rpc_str:
+        RPC_URL_LIST = [u.strip() for u in raw_rpc_str.split(",") if u.strip().startswith("http")]
+
+# فال‌بک به RPC عمومی در صورت عدم دریافت متغیرهای محیطی
+if not RPC_URL_LIST:
+    RPC_URL_LIST = [
+        "https://api.mainnet-beta.solana.com",
+        "https://solana-api.projectserum.com"
+    ]
+
+rpc_index = 0
+
+def get_rpc_url():
+    """دریافت آدرس RPC بعدی به صورت چرخشی نوبت‌گردان (Round-Robin)"""
+    global rpc_index
+    with rpc_lock:
+        url = RPC_URL_LIST[rpc_index % len(RPC_URL_LIST)]
+        rpc_index = (rpc_index + 1) % len(RPC_URL_LIST)
+        return url
+
+def post_rpc(payload, timeout=5):
+    """ارسال درخواست به شبکه سولانا با قابلیت چرخش خودکار در صورت خطا روی لینک فعال"""
+    for _ in range(len(RPC_URL_LIST) * 2):
+        current_url = get_rpc_url()
+        try:
+            res = http_session.post(current_url, json=payload, timeout=timeout)
+            if res.status_code == 200:
+                json_data = res.json()
+                if "error" not in json_data or "result" in json_data:
+                    return json_data
+        except Exception as e:
+            logger.debug(f"RPC Failover: خطا روی {current_url} -> سوئیچ به RPC بعدی | detail: {e}")
+            time.sleep(0.1)
+    return {}
+
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" 
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -87,29 +139,29 @@ SECTION_TRADING_OPEN = True
 FIRE_BUY_AMOUNT_SOL = 0.01
 FIRE_TAKE_PROFIT = 18.0
 FIRE_STOP_LOSS = -10.0
-FIRE_MIN_LIQUIDITY = 35000       
-FIRE_MIN_VOLUME_5M = 8000       
-FIRE_MIN_PRICE_CHANGE_5M = 8.0  
+FIRE_MIN_LIQUIDITY = 20000       
+FIRE_MIN_VOLUME_5M = 5000       
+FIRE_MIN_PRICE_CHANGE_5M = 5.0  
 
 COMBO_BUY_AMOUNT_SOL = 0.01
 COMBO_TAKE_PROFIT = 18.0
 COMBO_STOP_LOSS = -10.0
-COMBO_MIN_LIQUIDITY = 45000
-COMBO_MIN_VOLUME_5M = 25000  
-COMBO_MIN_CHANGE_5M = 30.0   
+COMBO_MIN_LIQUIDITY = 25000
+COMBO_MIN_VOLUME_5M = 12000  
+COMBO_MIN_CHANGE_5M = 15.0   
 
 GOLDEN_BUY_AMOUNT_SOL = 0.01
 GOLDEN_TAKE_PROFIT = 16.0
 GOLDEN_STOP_LOSS = -8.0
-GOLDEN_MIN_LIQUIDITY = 55000
-GOLDEN_MIN_VOLUME_5M = 35000
-GOLDEN_MIN_CHANGE_5M = 25.0
+GOLDEN_MIN_LIQUIDITY = 30000
+GOLDEN_MIN_VOLUME_5M = 15000
+GOLDEN_MIN_CHANGE_5M = 12.0
 
 TECH_BUY_AMOUNT_SOL = 0.01
 TECH_TAKE_PROFIT = 20.0
 TECH_STOP_LOSS = -8.0
-TECH_MIN_LIQUIDITY = 40000
-TECH_MIN_VOLUME_5M = 20000
+TECH_MIN_LIQUIDITY = 20000
+TECH_MIN_VOLUME_5M = 10000
 
 AWAITING_STATE = None 
 processed_tokens = set()
@@ -235,11 +287,11 @@ def self_learning_ai_optimizer_loop():
                         total_t = row[1]
                         logger.info(f"🧠 [AI Learning]: آنالیز {total_t} معامله گذشته. میانگین سود: {avg_pnl:.2f}%")
                         if avg_pnl < 2.0:
-                            FIRE_MIN_LIQUIDITY += 1000
-                            GOLDEN_MIN_LIQUIDITY += 1500
+                            FIRE_MIN_LIQUIDITY += 500
+                            GOLDEN_MIN_LIQUIDITY += 1000
                             logger.info("🧠 [AI Adjustment]: فیلتر نقدینگی سخت‌تر شد.")
                         elif avg_pnl > 10.0:
-                            FIRE_MIN_LIQUIDITY = max(25000, FIRE_MIN_LIQUIDITY - 500)
+                            FIRE_MIN_LIQUIDITY = max(15000, FIRE_MIN_LIQUIDITY - 500)
                             logger.info("🧠 [AI Adjustment]: الگوریتم در حالت بهینه حداکثری قرار گرفت.")
                     conn.close()
                 except Exception as e:
@@ -255,7 +307,7 @@ def check_social_sentiment_and_hype(pair):
         txns = pair.get('txns', {}).get('m5', {})
         buys = txns.get('buys', 0)
         sells = txns.get('sells', 0)
-        if (len(socials) > 0 or len(websites) > 0) and buys >= (sells * 1.25):
+        if (len(socials) > 0 or len(websites) > 0) and buys >= (sells * 1.05):
             return True, "تایید سنتیمنت و هجوم هایپ شبکه‌های اجتماعی 🚀"
         return True, "گذر از فیلتر سنتیمنت پایه"
     except Exception as e:
@@ -269,7 +321,8 @@ def get_real_market_trending_tokens():
         "https://api.dexscreener.com/token-boosts/latest/v1",
         "https://api.dexscreener.com/token-profiles/latest/v1",
         "https://api.dexscreener.com/latest/dex/search?q=solana",
-        "https://api.dexscreener.com/latest/dex/search?q=raydium"
+        "https://api.dexscreener.com/latest/dex/search?q=raydium",
+        "https://api.dexscreener.com/latest/dex/search?q=pump"
     ]
     
     # مدیریت حافظه RAM: پاک‌سازی اتوماتیک مجموعه توکن‌ها هنگام بزرگ شدن بیش از حد
@@ -334,7 +387,7 @@ def ultra_accuracy_scanner_loop(app):
                 symbol = pair.get('baseToken', {}).get('symbol', 'ULTRA')
                 price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
 
-                if liquidity < 25000 or volume_5m < 8000 or price <= 0:
+                if liquidity < 15000 or volume_5m < 4000 or price <= 0:
                     continue
 
                 is_social_ok, social_msg = check_social_sentiment_and_hype(pair)
@@ -415,7 +468,7 @@ def mempool_smart_money_scanner_loop(app):
                 symbol = pair.get('baseToken', {}).get('symbol', 'SMART')
                 price = float(pair.get('priceUsd', 0))
 
-                if liquidity > 20000 and volume_5m > 6000 and price > 0:
+                if liquidity > 15000 and volume_5m > 3000 and price > 0:
                     current_buy_amt = get_dynamic_buy_amount(0.01)
                     success, result_info = execute_real_buy(token_addr, 0.01)
                     if not success:
@@ -470,7 +523,7 @@ def verify_blockchain_transaction(tx_signature, expected_currency="SOL"):
                 {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
             ]
         }
-        res = http_session.post(RPC_URL, json=payload, timeout=5).json()
+        res = post_rpc(payload, timeout=5)
         result = res.get("result")
         if not result:
             return False, "تراکنش روی بلاکچین یافت نشد یا هنوز تایید نشده است."
@@ -714,21 +767,15 @@ except Exception as e:
 def get_sol_balance():
     if not WALLET_PUBKEY:
         return 0.0
-    for attempt in range(3):
-        try:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getBalance",
-                "params": [WALLET_PUBKEY]
-            }
-            res = http_session.post(RPC_URL, json=payload, timeout=5).json()
-            lamports = res.get("result", {}).get("value", 0)
-            return lamports / 1_000_000_000
-        except Exception as e:
-            logger.debug(f"Balance fetch retry ({attempt}): {e}")
-            time.sleep(0.5)
-    return 0.0
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getBalance",
+        "params": [WALLET_PUBKEY]
+    }
+    res = post_rpc(payload, timeout=5)
+    lamports = res.get("result", {}).get("value", 0)
+    return lamports / 1_000_000_000
 
 def get_dynamic_buy_amount(base_amount):
     if not DYNAMIC_RISK_ENABLED:
@@ -750,30 +797,24 @@ def get_dynamic_buy_amount(base_amount):
     return base_amount
 
 def get_token_balance(token_mint):
-    for attempt in range(3):
-        try:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getTokenAccountsByOwner",
-                "params": [
-                    WALLET_PUBKEY,
-                    {"mint": token_mint},
-                    {"encoding": "jsonParsed"}
-                ]
-            }
-            res = http_session.post(RPC_URL, json=payload, timeout=8).json()
-            accounts = res.get("result", {}).get("value", [])
-            if accounts:
-                for acc in accounts:
-                    info = acc["account"]["data"]["parsed"]["info"]
-                    amount = int(info["tokenAmount"]["amount"])
-                    if amount > 0:
-                        return amount
-            return 0
-        except Exception as e:
-            logger.debug(f"Token balance fetch retry ({attempt}): {e}")
-            time.sleep(0.5)
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenAccountsByOwner",
+        "params": [
+            WALLET_PUBKEY,
+            {"mint": token_mint},
+            {"encoding": "jsonParsed"}
+        ]
+    }
+    res = post_rpc(payload, timeout=8)
+    accounts = res.get("result", {}).get("value", [])
+    if accounts:
+        for acc in accounts:
+            info = acc["account"]["data"]["parsed"]["info"]
+            amount = int(info["tokenAmount"]["amount"])
+            if amount > 0:
+                return amount
     return 0
 
 def is_token_worthy(pair):
@@ -782,12 +823,12 @@ def is_token_worthy(pair):
             txns = pair.get('txns', {}).get('m5', {})
             buys = txns.get('buys', 0)
             sells = txns.get('sells', 0)
-            if buys < (sells * 1.25):
+            if buys > 0 and sells > 0 and buys < (sells * 1.05):
                 return False
         
         liquidity = float(pair.get('liquidity', {}).get('usd', 0))
         volume_5m = float(pair.get('volume', {}).get('m5', 0))
-        if liquidity < 25000 or volume_5m < 8000:
+        if liquidity < 15000 or volume_5m < 3000:
             return False
         return True
     except Exception:
@@ -812,15 +853,9 @@ def validate_ultimate_21_layers(token_addr, pair):
         liquidity = float(pair.get('liquidity', {}).get('usd', 0))
         volume_5m = float(pair.get('volume', {}).get('m5', 0))
         price = float(pair.get('priceUsd', 0))
-        txns = pair.get('txns', {}).get('m5', {})
-        buys = txns.get('buys', 0)
-        sells = txns.get('sells', 0)
 
-        if price <= 0 or liquidity < 25000 or volume_5m < 8000:
+        if price <= 0 or liquidity < 15000 or volume_5m < 3000:
             return False, "رد شده در لایه‌های نقدینگی یا حجم پایه"
-        
-        if buys < (sells * 1.2):
-            return False, "رد شده در لایه فشار خرید"
             
         return True, "تأیید کامل لایه‌های حفاظتی و الگوریتمی هوشمند پیشرفته"
     except Exception as e:
@@ -835,9 +870,9 @@ def evaluate_ultimate_super_signal(token_addr, pair):
 
         if price <= 0:
             return False, 0.0, 0.0, 0.0, "قیمت نامعتبر"
-        if liquidity < 25000 or volume_5m < 8000:
+        if liquidity < 15000 or volume_5m < 3000:
             return False, 0.0, 0.0, 0.0, "نقدینگی یا حجم کافی نیست"
-        if price_change_5m < 5.0:
+        if price_change_5m < 3.0:
             return False, 0.0, 0.0, 0.0, "مومنتوم کافی نیست"
 
         is_21_valid, msg_21 = validate_ultimate_21_layers(token_addr, pair)
@@ -940,7 +975,7 @@ def execute_real_buy(token_mint, amount_sol):
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": False, "maxRetries": 3}]
         }
         
-        tx_res = http_session.post(RPC_URL, json=rpc_payload, timeout=8).json()
+        tx_res = post_rpc(rpc_payload, timeout=8)
 
         if "result" in tx_res:
             sig = tx_res["result"]
@@ -978,7 +1013,7 @@ def close_wsol_account():
         ]
 
         instruction = Instruction(token_program_pubkey, data, keys)
-        blockhash_res = http_session.post(RPC_URL, json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"}, timeout=3).json()
+        blockhash_res = post_rpc({"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"}, timeout=3)
         blockhash = blockhash_res["result"]["value"]["blockhash"]
         
         compiled_message = MessageV0.try_compile(
@@ -996,7 +1031,7 @@ def close_wsol_account():
             "method": "sendTransaction",
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True}]
         }
-        http_session.post(RPC_URL, json=rpc_payload, timeout=3)
+        post_rpc(rpc_payload, timeout=3)
     except Exception as e:
         logger.warning(f"⚠️ هشدار در بستن اکانت WSOL: {e}")
 
@@ -1066,7 +1101,7 @@ def execute_real_sell(token_mint, token_amount):
             "params": [serialized_tx, {"encoding": "base58", "skipPreflight": True, "maxRetries": 3}]
         }
         
-        tx_res = http_session.post(RPC_URL, json=rpc_payload, timeout=8).json()
+        tx_res = post_rpc(rpc_payload, timeout=8)
         if "result" in tx_res:
             sig = tx_res["result"]
             time.sleep(1)
@@ -1338,14 +1373,14 @@ def unified_market_scanner_loop(app):
 
                     is_bottom_accumulation = (
                         -3.0 <= price_change_5m <= 8.0 and 
-                        volume_5m >= (liquidity * 0.2) and 
-                        buys > (sells * 1.25)
+                        volume_5m >= (liquidity * 0.15) and 
+                        buys >= sells
                     )
                     
                     is_pump_breakout = (
-                        price_change_5m >= 10.0 and 
-                        volume_5m >= 12000 and 
-                        buys > (sells * 1.2)
+                        price_change_5m >= 8.0 and 
+                        volume_5m >= 8000 and 
+                        buys >= sells
                     )
 
                     if is_bottom_accumulation or is_pump_breakout:
@@ -1772,7 +1807,7 @@ def run_web():
     web_app.run(host="0.0.0.0", port=port)
 
 def get_main_keyboard():
-    def s(val): return "روشن" if val else "خاموش"
+    def s(val): return "روشن 🟢" if val else "خاموش 🔴"
 
     bottom_whale_status = f"🐳 کف معتبر و نهنگ: {s(BOTTOM_WHALE_RUNNING)}"
     golden_status = f"🚀 گزینه طلایی: {s(GOLDEN_OPTION)}"
@@ -1796,409 +1831,111 @@ def get_main_keyboard():
     social_sentiment_status = f"📈 سنتیمنت و هجوم هایپ: {s(SOCIAL_SENTIMENT_ENABLED)}"
     dynamic_trailing_status = f"📊 تریلینگ استاپ پویا (۹۹٪): {s(DYNAMIC_TRAILING_TP_ENABLED)}"
 
-    open_pnl_usd = 0.0
-    open_pnl_percent = 0.0
-    with state_lock:
-        pos_items = list(active_positions.items())
-
-    if len(pos_items) > 0:
-        for token_addr, pos in pos_items:
-            try:
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=2)
-                if pair_res_obj.status_code == 200:
-                    pair_res = pair_res_obj.json()
-                    if pair_res.get('pairs'):
-                        cur_p = float(pair_res['pairs'][0].get('priceUsd', 0))
-                        entry_p = pos['entry_price']
-                        if entry_p > 0 and cur_p > 0:
-                            diff_pct = ((cur_p - entry_p) / entry_p) * 100
-                            open_pnl_percent += diff_pct
-                            open_pnl_usd += 0.75 * (diff_pct / 100)
-            except Exception as e:
-                logger.debug(f"Open PnL fetch error: {e}")
-
-    grand_total_percent = total_realized_pnl_percent + open_pnl_percent
-    grand_total_usd = total_realized_pnl_usd + open_pnl_usd
-
-    pnl_percent_label = f"📈 کل سود/زیان: {grand_total_percent:+.2f}%"
-    pnl_usd_label = f"💵 درآمد/ضرر دلاری: ${grand_total_usd:+.2f}"
-    admin_webapp_url = f"{WEBAPP_URL}/admin-panel?telegram_id={TELEGRAM_CHAT_ID}&secret={ADMIN_SECRET_KEY}"
-
-    keyboard = []
-
-    ultra_arrow = "🔽" if SECTION_ULTRA_OPEN else "◀️"
-    keyboard.append([InlineKeyboardButton(f"💎 استراتژی‌های تضمینی (دقت ۹۹٪) {ultra_arrow}", callback_data="toggle_sec_ultra")])
-    if SECTION_ULTRA_OPEN:
-        keyboard.append([InlineKeyboardButton(smart_money_copy_status, callback_data="toggle_smart_money_copy")])
-        keyboard.append([InlineKeyboardButton(social_sentiment_status, callback_data="toggle_social_sentiment")])
-        keyboard.append([InlineKeyboardButton(dynamic_trailing_status, callback_data="toggle_dynamic_trailing")])
-
-    vip_arrow = "🔽" if SECTION_VIP_OPEN else "◀️"
-    keyboard.append([InlineKeyboardButton(f"👑 مدیریت و دسترسی VIP {vip_arrow}", callback_data="toggle_sec_vip")])
-    if SECTION_VIP_OPEN:
-        keyboard.append([InlineKeyboardButton("👑 پنل گزارش پیشرفته و مدیریت", web_app=WebAppInfo(url=admin_webapp_url))])
-        keyboard.append([InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و درگاه ارزی", web_app=WebAppInfo(url=WEBAPP_URL))])
-        keyboard.append([InlineKeyboardButton(copy_status, callback_data="toggle_copy")])
-
-    prot_arrow = "🔽" if SECTION_PROTECTION_OPEN else "◀️"
-    keyboard.append([InlineKeyboardButton(f"🛡️ لایه‌های حفاظتی و امنیتی {prot_arrow}", callback_data="toggle_sec_prot")])
-    if SECTION_PROTECTION_OPEN:
-        keyboard.append([InlineKeyboardButton(bottom_whale_status, callback_data="toggle_bottom_whale")])
-        keyboard.append([
-            InlineKeyboardButton(hulk_moon_status, callback_data="toggle_hulk_moon"),
-            InlineKeyboardButton(wash_status, callback_data="toggle_wash")
-        ])
-        keyboard.append([
-            InlineKeyboardButton(ai_learning_status, callback_data="toggle_ai_learning"),
-            InlineKeyboardButton(mempool_status, callback_data="toggle_mempool")
-        ])
-        keyboard.append([InlineKeyboardButton(ultimate_21_status, callback_data="toggle_ultimate_21")])
-        keyboard.append([
-            InlineKeyboardButton(smart_status, callback_data="toggle_smart_filter"),
-            InlineKeyboardButton(risk_status, callback_data="toggle_risk")
-        ])
-
-    ai_arrow = "🔽" if SECTION_AI_OPEN else "◀️"
-    keyboard.append([InlineKeyboardButton(f"⚡ سیگنال‌های هوش مصنوعی و Vision {ai_arrow}", callback_data="toggle_sec_ai")])
-    if SECTION_AI_OPEN:
-        keyboard.append([InlineKeyboardButton(sync_status, callback_data="toggle_sync")])
-        keyboard.append([InlineKeyboardButton(tech_status, callback_data="toggle_technical")])
-
-    trade_arrow = "🔽" if SECTION_TRADING_OPEN else "◀️"
-    keyboard.append([InlineKeyboardButton(f"🚀 موتورها و استراتژی‌های معاملاتی {trade_arrow}", callback_data="toggle_sec_trade")])
-    if SECTION_TRADING_OPEN:
-        keyboard.append([InlineKeyboardButton(manual_status, callback_data="toggle_manual")])
-        keyboard.append([InlineKeyboardButton(golden_status, callback_data="toggle_golden")])
-        keyboard.append([InlineKeyboardButton(combo_status, callback_data="toggle_combo")])
-        keyboard.append([
-            InlineKeyboardButton(trader_status, callback_data="toggle_trader"),
-            InlineKeyboardButton(trend_status, callback_data="toggle_trend")
-        ])
-
-    keyboard.append([
-        InlineKeyboardButton("📊 وضعیت سیستم", callback_data="status"),
-        InlineKeyboardButton("💰 موجودی ولت ادمین", callback_data="wallet_balance")
-    ])
-    keyboard.append([
-        InlineKeyboardButton(pnl_percent_label, callback_data="refresh_pnl"),
-        InlineKeyboardButton(pnl_usd_label, callback_data="refresh_pnl")
-    ])
-
-    if MANUAL_SETTINGS_ENABLED:
-        if TECHNICAL_RUNNING:
-            keyboard.append([InlineKeyboardButton(f"⚙️ حجم (پرایس اکشن): {TECH_BUY_AMOUNT_SOL} SOL", callback_data="menu_t_vol")])
-            keyboard.append([
-                InlineKeyboardButton(f"📊 [پرایس اکشن] تارگت: +{TECH_TAKE_PROFIT}%", callback_data="menu_t_tp"),
-                InlineKeyboardButton(f"📊 [پرایس اکشن] ضرر: {TECH_STOP_LOSS}%", callback_data="menu_t_sl")
-            ])
-        if GOLDEN_OPTION:
-            keyboard.append([InlineKeyboardButton(f"⚙️ حجم (گزینه طلایی): {GOLDEN_BUY_AMOUNT_SOL} SOL", callback_data="menu_g_vol")])
-            keyboard.append([
-                InlineKeyboardButton(f"🚀 [گزینه طلایی] تارگت: +{GOLDEN_TAKE_PROFIT}%", callback_data="menu_g_tp"),
-                InlineKeyboardButton(f"🚀 [گزینه طلایی] ضرر: {GOLDEN_STOP_LOSS}%", callback_data="menu_g_sl")
-            ])
-        if COMBO_RUNNING:
-            keyboard.append([InlineKeyboardButton(f"⚙️ حجم (حالت ترکیبی): {COMBO_BUY_AMOUNT_SOL} SOL", callback_data="menu_c_vol")])
-            keyboard.append([
-                InlineKeyboardButton(f"🚨 [حالت ترکیبی] تارگت: +{COMBO_TAKE_PROFIT}%", callback_data="menu_c_tp"),
-                InlineKeyboardButton(f"🚨 [حالت ترکیبی] ضرر: {COMBO_STOP_LOSS}%", callback_data="menu_c_sl")
-            ])
-        if IS_RUNNING:
-            keyboard.append([InlineKeyboardButton(f"⚙️ حجم (خرید و فروش): {FIRE_BUY_AMOUNT_SOL} SOL", callback_data="menu_f_vol")])
-            keyboard.append([
-                InlineKeyboardButton(f"🔥 [خرید و فروش] تارگت: +{FIRE_TAKE_PROFIT}%", callback_data="menu_f_tp"),
-                InlineKeyboardButton(f"🔥 [خرید و فروش] ضرر: {FIRE_STOP_LOSS}%", callback_data="menu_f_sl")
-            ])
-
+    keyboard = [
+        [InlineKeyboardButton(trader_status, callback_data="toggle_trader"), InlineKeyboardButton(golden_status, callback_data="toggle_golden")],
+        [InlineKeyboardButton(combo_status, callback_data="toggle_combo"), InlineKeyboardButton(trend_status, callback_data="toggle_trend")],
+        [InlineKeyboardButton(tech_status, callback_data="toggle_tech"), InlineKeyboardButton(bottom_whale_status, callback_data="toggle_bottom_whale")],
+        [InlineKeyboardButton(sync_status, callback_data="toggle_sync"), InlineKeyboardButton(smart_status, callback_data="toggle_smart")],
+        [InlineKeyboardButton(risk_status, callback_data="toggle_risk"), InlineKeyboardButton(copy_status, callback_data="toggle_copy")],
+        [InlineKeyboardButton(ultimate_21_status, callback_data="toggle_ultimate_21"), InlineKeyboardButton(ai_learning_status, callback_data="toggle_ai_learning")],
+        [InlineKeyboardButton(mempool_status, callback_data="toggle_mempool"), InlineKeyboardButton(hulk_moon_status, callback_data="toggle_moonbag")],
+        [InlineKeyboardButton(wash_status, callback_data="toggle_wash"), InlineKeyboardButton(smart_money_copy_status, callback_data="toggle_smart_money_copy")],
+        [InlineKeyboardButton(social_sentiment_status, callback_data="toggle_social_sentiment"), InlineKeyboardButton(dynamic_trailing_status, callback_data="toggle_dynamic_trailing")],
+        [InlineKeyboardButton("📊 گزارش پیشرفته PnL", callback_data="show_pnl_report"), InlineKeyboardButton("🌐 ورود به پنل ادمین", url=f"{WEBAPP_URL}/admin-panel?secret={ADMIN_SECRET_KEY}")]
+    ]
     return InlineKeyboardMarkup(keyboard)
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
-        return
-    try:
-        analytics = get_advanced_trade_analytics()
-        total_trades = analytics['total_trades']
-        total_pct = analytics['total_pct']
-        total_u = analytics['total_usd']
-        win_rate = analytics['win_rate']
-
-        with db_lock:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 3")
-            best_trades = cursor.fetchall()
-            conn.close()
-
-        chart_bars = "🟩" * min(int(max(total_pct, 0) // 5), 10) if total_pct >= 0 else "🟥" * min(int(abs(total_pct) // 5), 10)
-
-        stats_text = (
-            f"📊 گزارش پیشرفته و عملکرد پورتفو:\n\n"
-            f"🔹 کل معاملات انجام شده: {total_trades}\n"
-            f"📈 مجموع درصد سود/زیان: {total_pct:+.2f}%\n"
-            f"💵 درآمد/ضرر دلاری کل: ${total_u:+.2f}\n"
-            f"🎯 نرخ موفقیت (Win Rate): {win_rate}%\n\n"
-            f"📉 نمودار روند عملکرد:\n[{chart_bars}]\n\n"
-            f"🏆 برترین معاملات ثبت‌شده:\n"
-        )
-        for t in best_trades:
-            stats_text += f"🪙 {t[0]} : {t[1]:+.2f}% (در {t[2]})\n"
-
-        await update.message.reply_text(stats_text, parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطا در دریافت آمار: {e}")
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global AWAITING_STATE
-    with state_lock:
-        AWAITING_STATE = None
     user_id = str(update.effective_user.id)
-
-    if user_id == str(TELEGRAM_CHAT_ID):
-        await update.message.reply_text("🤖 اتاق کنترل ربات ترید و کپی‌تریدینگ (نسخه هالکی شکست‌ناپذیر):", reply_markup=get_main_keyboard())
-    else:
-        user_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🌐 مینی‌اپلیکیشن صرافی و درگاه ارزی VIP", web_app=WebAppInfo(url=WEBAPP_URL))]])
-        await update.message.reply_text("👋 به ربات هوشمند ترید و کپی‌تریدینگ سولانا خوش آمدید. برای مشاهده تاریخ انقضای اشتراک و ورود به صرافی از دکمه زیر استفاده کنید:", reply_markup=user_keyboard)
-
-async def free_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
+    if user_id != TELEGRAM_CHAT_ID:
+        await update.message.reply_text("⛔ دسترسی غیرمجاز!")
         return
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text("❌ فرمت اشتباه! استفاده صحیح:\n\n/free آیدی_تلگرام")
-        return
-    success = register_free_vip(args[0])
-    if success:
-        await update.message.reply_text(f"✅ کاربر {args[0]} به صورت رایگان VIP ثبت شد و لینک ورود ارسال گردید!")
-    else:
-        await update.message.reply_text("❌ خطا در ثبت اشتراک رایگان.")
+
+    sol_balance = get_sol_balance()
+    rpc_count = len(RPC_URL_LIST)
+    msg = (
+        f"🤖 *ربات فوق‌پیشرفته ترید و سیگنال‌دهی هالکی (نسخه شبکه چرخشی 4-RPC)*\n\n"
+        f"💼 *موجودی کیف پول:* `{sol_balance:.4f} SOL`\n"
+        f"🔑 *آدرس ولت:* `{WALLET_PUBKEY[:8]}...{WALLET_PUBKEY[-8:]}`\n"
+        f"⚡ *تعداد لینک‌های خصوصی RPC فعال:* `{rpc_count}` عدد (با Failover خودکار)\n"
+        f"📍 *پوزیشن‌های فعال:* `{len(active_positions)}` توکن\n\n"
+        f"کنترل‌پنل مدیریت موتورها و فیلترها:"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global IS_RUNNING, TREND_ALERT_RUNNING, COMBO_RUNNING, GOLDEN_OPTION, TECHNICAL_RUNNING
-    global SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED, MANUAL_SETTINGS_ENABLED, SYNCHRONIZED_MODE
-    global COPY_TRADING_ENABLED, ULTIMATE_21_ENGINE_ENABLED, SELF_LEARNING_AI_ENABLED, MEMPOOL_SMART_MONEY_ENABLED
-    global MOONBAG_HULK_ENABLED, ANTI_WASH_TRADING_ENABLED, BOTTOM_WHALE_RUNNING
+    global IS_RUNNING, GOLDEN_OPTION, COMBO_RUNNING, TREND_ALERT_RUNNING, TECHNICAL_RUNNING
+    global BOTTOM_WHALE_RUNNING, SYNCHRONIZED_MODE, SMART_FILTER_ENABLED, DYNAMIC_RISK_ENABLED
+    global COPY_TRADING_ENABLED, ULTIMATE_21_ENGINE_ENABLED, SELF_LEARNING_AI_ENABLED
+    global MEMPOOL_SMART_MONEY_ENABLED, MOONBAG_HULK_ENABLED, ANTI_WASH_TRADING_ENABLED
     global SMART_MONEY_COPY_ENABLED, SOCIAL_SENTIMENT_ENABLED, DYNAMIC_TRAILING_TP_ENABLED
-    global SECTION_ULTRA_OPEN, SECTION_VIP_OPEN, SECTION_PROTECTION_OPEN, SECTION_AI_OPEN, SECTION_TRADING_OPEN, AWAITING_STATE
-    
+
     query = update.callback_query
-    if str(query.from_user.id) != str(TELEGRAM_CHAT_ID):
-        try:
-            await query.answer("⛔ دسترسی غیرمجاز!", show_alert=True)
-        except Exception:
-            pass
-        return
-    try:
-        await query.answer()
-    except Exception:
-        pass
+    await query.answer()
 
-    with state_lock:
-        if query.data == "toggle_sec_ultra":
-            SECTION_ULTRA_OPEN = not SECTION_ULTRA_OPEN
-        elif query.data == "toggle_sec_vip":
-            SECTION_VIP_OPEN = not SECTION_VIP_OPEN
-        elif query.data == "toggle_sec_prot":
-            SECTION_PROTECTION_OPEN = not SECTION_PROTECTION_OPEN
-        elif query.data == "toggle_sec_ai":
-            SECTION_AI_OPEN = not SECTION_AI_OPEN
-        elif query.data == "toggle_sec_trade":
-            SECTION_TRADING_OPEN = not SECTION_TRADING_OPEN
-        elif query.data == "toggle_smart_money_copy":
-            SMART_MONEY_COPY_ENABLED = not SMART_MONEY_COPY_ENABLED
-        elif query.data == "toggle_social_sentiment":
-            SOCIAL_SENTIMENT_ENABLED = not SOCIAL_SENTIMENT_ENABLED
-        elif query.data == "toggle_dynamic_trailing":
-            DYNAMIC_TRAILING_TP_ENABLED = not DYNAMIC_TRAILING_TP_ENABLED
-        elif query.data == "toggle_bottom_whale":
-            BOTTOM_WHALE_RUNNING = not BOTTOM_WHALE_RUNNING
-        elif query.data == "toggle_hulk_moon":
-            MOONBAG_HULK_ENABLED = not MOONBAG_HULK_ENABLED
-        elif query.data == "toggle_wash":
-            ANTI_WASH_TRADING_ENABLED = not ANTI_WASH_TRADING_ENABLED
-        elif query.data == "toggle_ai_learning":
-            SELF_LEARNING_AI_ENABLED = not SELF_LEARNING_AI_ENABLED
-        elif query.data == "toggle_mempool":
-            MEMPOOL_SMART_MONEY_ENABLED = not MEMPOOL_SMART_MONEY_ENABLED
-        elif query.data == "toggle_ultimate_21":
-            ULTIMATE_21_ENGINE_ENABLED = not ULTIMATE_21_ENGINE_ENABLED
-        elif query.data == "toggle_smart_filter":
-            SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
-        elif query.data == "toggle_risk":
-            DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
-        elif query.data == "toggle_sync":
-            SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
-        elif query.data == "toggle_copy":
-            COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
-        elif query.data == "toggle_manual":
-            MANUAL_SETTINGS_ENABLED = not MANUAL_SETTINGS_ENABLED
-        elif query.data == "toggle_technical":
-            TECHNICAL_RUNNING = not TECHNICAL_RUNNING
-        elif query.data == "toggle_golden":
-            GOLDEN_OPTION = not GOLDEN_OPTION
-        elif query.data == "toggle_combo":
-            COMBO_RUNNING = not COMBO_RUNNING
-        elif query.data == "toggle_trader":
-            IS_RUNNING = not IS_RUNNING
-        elif query.data == "toggle_trend":
-            TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
-
-    if query.data == "status":
-        status_text = (
-            f"📊 وضعیت سیستم (هالکی شکست‌ناپذیر - نسخه پرسرعت ۱۰۰۰/۱۰۰۰):\n"
-            f"💎 استراتژی‌های تضمینی ۹۹٪: {'🟢 روشن' if (SMART_MONEY_COPY_ENABLED or SOCIAL_SENTIMENT_ENABLED) else '🔴 خاموش'}\n"
-            f"🐳 کف معتبر و نهنگ: {'🟢 روشن' if BOTTOM_WHALE_RUNNING else '🔴 خاموش'}\n"
-            f"💪 موم‌بگ هالکی: {'🟢 روشن' if MOONBAG_HULK_ENABLED else '🔴 خاموش'}\n"
-            f"🛡️ ضد حجم فیک: {'🟢 روشن' if ANTI_WASH_TRADING_ENABLED else '🔴 خاموش'}\n"
-            f"🧠 هوش مصنوعی یادگیرنده: {'🟢 روشن' if SELF_LEARNING_AI_ENABLED else '🔴 خاموش'}\n"
-            f"⚡🕵️ ممپول & اسمارت‌مانی: {'🟢 روشن' if MEMPOOL_SMART_MONEY_ENABLED else '🔴 خاموش'}\n"
-            f"💰 موجودی ولت: {get_sol_balance():.4f} SOL"
+    data = query.data
+    if data == "toggle_trader": IS_RUNNING = not IS_RUNNING
+    elif data == "toggle_golden": GOLDEN_OPTION = not GOLDEN_OPTION
+    elif data == "toggle_combo": COMBO_RUNNING = not COMBO_RUNNING
+    elif data == "toggle_trend": TREND_ALERT_RUNNING = not TREND_ALERT_RUNNING
+    elif data == "toggle_tech": TECHNICAL_RUNNING = not TECHNICAL_RUNNING
+    elif data == "toggle_bottom_whale": BOTTOM_WHALE_RUNNING = not BOTTOM_WHALE_RUNNING
+    elif data == "toggle_sync": SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
+    elif data == "toggle_smart": SMART_FILTER_ENABLED = not SMART_FILTER_ENABLED
+    elif data == "toggle_risk": DYNAMIC_RISK_ENABLED = not DYNAMIC_RISK_ENABLED
+    elif data == "toggle_copy": COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
+    elif data == "toggle_ultimate_21": ULTIMATE_21_ENGINE_ENABLED = not ULTIMATE_21_ENGINE_ENABLED
+    elif data == "toggle_ai_learning": SELF_LEARNING_AI_ENABLED = not SELF_LEARNING_AI_ENABLED
+    elif data == "toggle_mempool": MEMPOOL_SMART_MONEY_ENABLED = not MEMPOOL_SMART_MONEY_ENABLED
+    elif data == "toggle_moonbag": MOONBAG_HULK_ENABLED = not MOONBAG_HULK_ENABLED
+    elif data == "toggle_wash": ANTI_WASH_TRADING_ENABLED = not ANTI_WASH_TRADING_ENABLED
+    elif data == "toggle_smart_money_copy": SMART_MONEY_COPY_ENABLED = not SMART_MONEY_COPY_ENABLED
+    elif data == "toggle_social_sentiment": SOCIAL_SENTIMENT_ENABLED = not SOCIAL_SENTIMENT_ENABLED
+    elif data == "toggle_dynamic_trailing": DYNAMIC_TRAILING_TP_ENABLED = not DYNAMIC_TRAILING_TP_ENABLED
+    elif data == "show_pnl_report":
+        analytics = get_advanced_trade_analytics()
+        report_msg = (
+            f"📊 *گزارش کامل PnL معاملات دیتابیس:*\n\n"
+            f"🔹 کل معاملات: `{analytics['total_trades']}`\n"
+            f"📈 مجموع درصد سود/زیان: `{analytics['total_pct']:+.2f}%`\n"
+            f"💵 مجموع سود دلاری: `${analytics['total_usd']:+.2f}`\n"
+            f"🎯 وین‌ریت (Win Rate): `{analytics['win_rate']}%`\n"
         )
-        try:
-            await query.edit_message_text(status_text, reply_markup=get_main_keyboard())
-            return
-        except Exception:
-            pass
-    elif query.data == "wallet_balance":
-        balance_text = f"💰 موجودی لحظه‌ای ولت ادمین: {get_sol_balance():.4f} SOL"
-        try:
-            await query.edit_message_text(balance_text, reply_markup=get_main_keyboard())
-            return
-        except Exception:
-            pass
-    elif query.data == "menu_t_vol":
-        with state_lock: AWAITING_STATE = "tech_vol"
-        await prompt_input(query, "📊 [پرایس اکشن] حجم معامله", TECH_BUY_AMOUNT_SOL)
-    elif query.data == "menu_t_tp":
-        with state_lock: AWAITING_STATE = "tech_tp"
-        await prompt_input(query, "📊 [پرایس اکشن] تارگت سود", TECH_TAKE_PROFIT)
-    elif query.data == "menu_t_sl":
-        with state_lock: AWAITING_STATE = "tech_sl"
-        await prompt_input(query, "📊 [پرایس اکشن] حد ضرر", TECH_STOP_LOSS)
-    elif query.data == "menu_g_vol":
-        with state_lock: AWAITING_STATE = "golden_vol"
-        await prompt_input(query, "🚀 [گزینه طلایی] حجم معامله", GOLDEN_BUY_AMOUNT_SOL)
-    elif query.data == "menu_g_tp":
-        with state_lock: AWAITING_STATE = "golden_tp"
-        await prompt_input(query, "🚀 [گزینه طلایی] تارگت سود", GOLDEN_TAKE_PROFIT)
-    elif query.data == "menu_g_sl":
-        with state_lock: AWAITING_STATE = "golden_sl"
-        await prompt_input(query, "🚀 [گزینه طلایی] حد ضرر", GOLDEN_STOP_LOSS)
-    elif query.data == "menu_c_vol":
-        with state_lock: AWAITING_STATE = "combo_vol"
-        await prompt_input(query, "🚨 [حالت ترکیبی] حجم معامله", COMBO_BUY_AMOUNT_SOL)
-    elif query.data == "menu_c_tp":
-        with state_lock: AWAITING_STATE = "combo_tp"
-        await prompt_input(query, "🚨 [حالت ترکیبی] تارگت سود", COMBO_TAKE_PROFIT)
-    elif query.data == "menu_c_sl":
-        with state_lock: AWAITING_STATE = "combo_sl"
-        await prompt_input(query, "🚨 [حالت ترکیبی] حد ضرر", COMBO_STOP_LOSS)
-    elif query.data == "menu_f_vol":
-        with state_lock: AWAITING_STATE = "fire_vol"
-        await prompt_input(query, "🔥 [خرید و فروش] حجم معامله", FIRE_BUY_AMOUNT_SOL)
-    elif query.data == "menu_f_tp":
-        with state_lock: AWAITING_STATE = "fire_tp"
-        await prompt_input(query, "🔥 [خرید و فروش] تارگت سود", FIRE_TAKE_PROFIT)
-    elif query.data == "menu_f_sl":
-        with state_lock: AWAITING_STATE = "fire_sl"
-        await prompt_input(query, "🔥 [خرید و فروش] حد ضرر", FIRE_STOP_LOSS)
-    elif query.data == "cancel_input":
-        with state_lock: AWAITING_STATE = None
-        try:
-            await query.edit_message_text("🤖 لغو شد.", reply_markup=get_main_keyboard())
-        except Exception:
-            pass
-
-    try:
-        await query.edit_message_text("🤖 وضعیت تنظیمات هالکی بروز شد:", reply_markup=get_main_keyboard())
-    except Exception:
-        pass
-
-async def prompt_input(query, prefix, cur_val):
-    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="cancel_input")]])
-    try:
-        await query.edit_message_text(f"{prefix} فعلی: {cur_val}\nلطفاً مقدار جدید را تایپ کنید:", reply_markup=cancel_kb)
-    except Exception:
-        pass
-
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS
-    global GOLDEN_BUY_AMOUNT_SOL, GOLDEN_TAKE_PROFIT, GOLDEN_STOP_LOSS
-    global COMBO_BUY_AMOUNT_SOL, COMBO_TAKE_PROFIT, COMBO_STOP_LOSS
-    global FIRE_BUY_AMOUNT_SOL, FIRE_TAKE_PROFIT, FIRE_STOP_LOSS, AWAITING_STATE
-    
-    if str(update.effective_user.id) != str(TELEGRAM_CHAT_ID):
+        await query.message.reply_text(report_msg, parse_mode="Markdown")
         return
 
-    with state_lock:
-        current_state = AWAITING_STATE
+    try:
+        await query.edit_message_reply_markup(reply_markup=get_main_keyboard())
+    except Exception as e:
+        logger.debug(f"Edit markup error: {e}")
 
-    if current_state:
-        text_input = update.message.text.strip().replace(',', '.')
-        try:
-            val = float(text_input)
-            with state_lock:
-                st = current_state
-                if st == "tech_vol": TECH_BUY_AMOUNT_SOL = val
-                elif st == "tech_tp": TECH_TAKE_PROFIT = val
-                elif st == "tech_sl": TECH_STOP_LOSS = val
-                elif st == "golden_vol": GOLDEN_BUY_AMOUNT_SOL = val
-                elif st == "golden_tp": GOLDEN_TAKE_PROFIT = val
-                elif st == "golden_sl": GOLDEN_STOP_LOSS = val
-                elif st == "combo_vol": COMBO_BUY_AMOUNT_SOL = val
-                elif st == "combo_tp": COMBO_TAKE_PROFIT = val
-                elif st == "combo_sl": COMBO_STOP_LOSS = val
-                elif st == "fire_vol": FIRE_BUY_AMOUNT_SOL = val
-                elif st == "fire_tp": FIRE_TAKE_PROFIT = val
-                elif st == "fire_sl": FIRE_STOP_LOSS = val
-                AWAITING_STATE = None
+def main():
+    logger.info("🚀 در حال استارت سرور وب و ربات تلگرام...")
 
-            msg = f"✅ تنظیمات با موفقیت به {val} بروزرسانی شد."
-            await update.message.reply_text(msg, reply_markup=get_main_keyboard())
-        except ValueError:
-            await update.message.reply_text("❌ عدد نامعتبر است. مجدد وارد کنید:")
-    else:
-        await update.message.reply_text("🤖 از دکمه‌ها استفاده کنید:", reply_markup=get_main_keyboard())
-
-if __name__ == "__main__":
-    web_thread = Thread(target=run_web)
-    web_thread.daemon = True
+    # ۱. اجرای سِروِر وب روی ثرد مجزا
+    web_thread = Thread(target=run_web, daemon=True)
     web_thread.start()
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("free", free_user_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    # ۲. راه‌اندازی ثردهای اسکنر بازار و مانیتورینگ
+    Thread(target=subscription_monitor_loop, daemon=True).start()
+    Thread(target=self_learning_ai_optimizer_loop, daemon=True).start()
+    Thread(target=check_positions_loop, daemon=True).start()
+    Thread(target=ultra_accuracy_scanner_loop, args=(None,), daemon=True).start()
+    Thread(target=mempool_smart_money_scanner_loop, args=(None,), daemon=True).start()
+    Thread(target=technical_analysis_scanner_loop, args=(None,), daemon=True).start()
+    Thread(target=unified_market_scanner_loop, args=(None,), daemon=True).start()
 
-    ai_thread = Thread(target=self_learning_ai_optimizer_loop)
-    ai_thread.daemon = True
-    ai_thread.start()
+    # ۳. راه‌اندازی اپلیکیشن تلگرام
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_TOKEN != "TOKEN_YOW":
+        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        app.add_handler(CommandHandler("start", start_command))
+        app.add_handler(CallbackQueryHandler(button_handler))
+        logger.info("✅ ربات تلگرام با موفقیت متصل شد و در حال دریافت پیام‌ها است.")
+        app.run_polling()
+    else:
+        logger.warning("⚠️ TELEGRAM_BOT_TOKEN تنظیم نشده است. ربات تلگرام غیرفعال ماند اما اسکنرها کار می‌کنند.")
+        while True:
+            time.sleep(10)
 
-    ultra_thread = Thread(target=ultra_accuracy_scanner_loop, args=(app,))
-    ultra_thread.daemon = True
-    ultra_thread.start()
-
-    mempool_thread = Thread(target=mempool_smart_money_scanner_loop, args=(app,))
-    mempool_thread.daemon = True
-    mempool_thread.start()
-
-    unified_thread = Thread(target=unified_market_scanner_loop, args=(app,))
-    unified_thread.daemon = True
-    unified_thread.start()
-
-    tech_thread = Thread(target=technical_analysis_scanner_loop, args=(app,))
-    tech_thread.daemon = True
-    tech_thread.start()
-
-    pos_thread = Thread(target=check_positions_loop)
-    pos_thread.daemon = True
-    pos_thread.start()
-
-    sub_monitor_thread = Thread(target=subscription_monitor_loop)
-    sub_monitor_thread.daemon = True
-    sub_monitor_thread.start()
-
-    logger.info("🚀 امپراتوری ربات ترید و کپی‌تریدینگ VIP (نسخه هالکی شکست‌ناپذیر با مانیتورینگ دقیق و اخراج خودکار کانال) با موفقیت اجرا شد.")
-    app.run_polling()
+if __name__ == "__main__":
+    main()
