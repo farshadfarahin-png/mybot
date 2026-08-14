@@ -689,14 +689,20 @@ def register_subscription(telegram_id, wallet_addr, tx_sig, currency="SOL"):
             conn.commit()
             conn.close()
             
+            rows = []
+            if WEBAPP_URL:
+                rows.append([InlineKeyboardButton("📱 ورود به Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
+            if CHANNEL_INVITE_LINK:
+                rows.append([InlineKeyboardButton("📢 ورود مستقیم به کانال VIP", url=CHANNEL_INVITE_LINK)])
+            markup = InlineKeyboardMarkup(rows) if rows else None
             success_msg = (
-                f"🎉 اشتراک ۳۰ روزه VIP شما با موفقیت پس از تایید تراکنش بلاکچین ({currency}) فعال شد!\n\n"
+                f"🎉 تبریک! اشتراک ۳۰ روزه VIP شما با موفقیت پس از تایید تراکنش بلاکچین ({currency}) فعال شد!\n\n"
                 f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n"
-                f"📢 برای ورود مستقیم به کانال VIP از طریق لینک زیر اقدام کنید:\n\n"
-                f"{CHANNEL_INVITE_LINK}"
+                "🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n\n"
+                "📱 با دکمه Mini App وارد شوید؛ اشتراک فعال شما خودکار شناسایی می‌شود و فرم ثبت‌نام نمایش داده نخواهد شد.\n"
+                "📢 برای عضویت در کانال VIP دکمه ورود مستقیم را بزنید."
             )
-            send_telegram_msg(success_msg, target_chat=str(telegram_id))
+            send_telegram_msg(success_msg, target_chat=str(telegram_id), reply_markup=markup)
             return True
         except Exception as e:
             logger.error(f"Error registering sub: {e}")
@@ -715,14 +721,20 @@ def register_free_vip(telegram_id, wallet_addr="FREE_PASS_WALLET"):
             conn.commit()
             conn.close()
             
+            rows = []
+            if WEBAPP_URL:
+                rows.append([InlineKeyboardButton("📱 ورود به Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
+            if CHANNEL_INVITE_LINK:
+                rows.append([InlineKeyboardButton("📢 ورود مستقیم به کانال VIP", url=CHANNEL_INVITE_LINK)])
+            markup = InlineKeyboardMarkup(rows) if rows else None
             free_msg = (
                 f"🎉🎊 تبریک! اشتراک VIP رایگان شما با موفقیت فعال شد.\n\n"
-                f"⏳ تاریخ انقضا و قطع ارتباط: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
-                f"📱 Mini App: {WEBAPP_URL}\n"
-                f"📢 ورود به کانال VIP: {CHANNEL_INVITE_LINK}"
+                f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                "🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n\n"
+                "📱 با دکمه Mini App وارد شوید؛ چون اشتراک شما فعال است، مستقیماً کارت سبز VIP، تاریخ انقضا و زمان باقی‌مانده را می‌بینید.\n"
+                "📢 برای عضویت در کانال VIP دکمه ورود مستقیم را بزنید."
             )
-            send_telegram_msg(free_msg, target_chat=str(telegram_id))
+            send_telegram_msg(free_msg, target_chat=str(telegram_id), reply_markup=markup)
             return True
         except Exception as e:
             logger.error(f"Error registering free sub: {e}")
@@ -1870,7 +1882,7 @@ def start_telegram_bot():
         app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         async def start_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
-            text=(f"🎉 **خوش آمدید به هالکی VIP**\n\n🟢 اشتراک شما فعال است.\n⏳ پایان اشتراک: `{exp_date}`" if active else "🤖 **ربات هوشمند ترید هالکی**\n\n🔴 اشتراک VIP فعال نیست.\nبرای ثبت‌نام و فعال‌سازی، Mini App را باز کنید.")
+            text=(f"🎉 **خوش آمدید به هالکی VIP**\n\n🟢 اشتراک شما فعال است.\n⏳ پایان اشتراک: `{exp_date}`\n\n📱 از دکمه Mini App وارد شوید تا وضعیت فعال شما خودکار نمایش داده شود." if active else "🤖 **ربات هوشمند ترید هالکی**\n\n🔴 اشتراک VIP فعال نیست.\nبرای ثبت‌نام و فعال‌سازی، Mini App را باز کنید.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             cid = str(update.effective_user.id)
