@@ -1912,7 +1912,11 @@ def start_telegram_bot():
             elif data.startswith("toggle_"):
                 if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.",reply_markup=_main_keyboard(False)); return
                 mapping={"toggle_fire":"IS_RUNNING","toggle_trend":"TREND_ALERT_RUNNING","toggle_combo":"COMBO_RUNNING","toggle_golden":"GOLDEN_OPTION","toggle_tech":"TECHNICAL_RUNNING","toggle_mempool":"MEMPOOL_SMART_MONEY_ENABLED","toggle_whale":"BOTTOM_WHALE_RUNNING","toggle_copy":"COPY_TRADING_ENABLED"}; name=mapping[data]; globals()[name]=not bool(globals()[name]); await q.edit_message_text("🎛 **کنترل موتورها**\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
-        app.add_handler(CommandHandler("start",start_cmd)); app.add_handler(CallbackQueryHandler(button_handler)); logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد."); app.run_polling(drop_pending_updates=True)
+        app.add_handler(CommandHandler("start",start_cmd))
+        app.add_handler(CommandHandler("free",free_cmd))
+        app.add_handler(CallbackQueryHandler(button_handler))
+        logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
+        app.run_polling(drop_pending_updates=False)
     except Exception as e: logger.exception(f"Telegram bot runtime error: {e}")
 
 if __name__ == "__main__":
