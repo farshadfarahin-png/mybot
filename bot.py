@@ -49,6 +49,8 @@ CHANNEL_INVITE_LINK = os.environ.get("CHANNEL_INVITE_LINK", "").strip()
 
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "").strip()
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()
+VIP_PRICE_SOL = 0.0  # پرداخت SOL غیرفعال است
+VIP_PRICE_USDC = 50.0  # قیمت ثابت اشتراک ۳۰ روزه: 50 USDC
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -518,9 +520,18 @@ def mempool_smart_money_scanner_loop(app):
             logger.error(f"⚠️ خطای اسکن ممپول: {e}")
         time.sleep(4)
 
-def verify_blockchain_transaction(tx_signature, expected_currency="SOL"):
+def verify_blockchain_transaction(tx_signature, expected_currency="USDC"):
+    """Verify that a real payment was made to the bot wallet.
+    Amounts are configured through VIP_PRICE_SOL / VIP_PRICE_USDC.
+    """
     if not tx_signature or len(tx_signature) < 30:
         return False, "هش تراکنش نامعتبر است."
+
+    currency = str(expected_currency or "SOL").upper()
+    expected_amount = VIP_PRICE_SOL if currency == "SOL" else VIP_PRICE_USDC
+    if expected_amount <= 0:
+        return False, f"قیمت اشتراک برای {currency} در Environment تنظیم نشده است."
+
     try:
         payload = {
             "jsonrpc": "2.0",
@@ -535,23 +546,63 @@ def verify_blockchain_transaction(tx_signature, expected_currency="SOL"):
         result = res.get("result")
         if not result:
             return False, "تراکنش روی بلاکچین یافت نشد یا هنوز تایید نشده است."
-        
-        meta = result.get("meta", {})
+
+        meta = result.get("meta") or {}
         if meta.get("err") is not None:
-            return False, "تراکنش روی بلاکچین با خطا مواجه شده است (Failed Tx)."
-            
-        account_keys = result.get("transaction", {}).get("message", {}).get("accountKeys", [])
-        admin_wallet_found = False
-        for acc in account_keys:
+            return False, "تراکنش روی بلاکچین ناموفق بوده است."
+
+        tx = result.get("transaction") or {}
+        message = tx.get("message") or {}
+        account_keys = message.get("accountKeys") or []
+
+        # Ensure the configured receiving wallet is actually involved.
+        admin_indexes = []
+        for idx, acc in enumerate(account_keys):
             pubkey_str = acc.get("pubkey") if isinstance(acc, dict) else str(acc)
             if pubkey_str == WALLET_PUBKEY:
-                admin_wallet_found = True
-                break
-                
-        if not admin_wallet_found:
-            return False, "این تراکنش به ولت صرافی/پلتفرم شما واریز نشده است."
+                admin_indexes.append(idx)
 
-        return True, "تراکنش با موفقیت روی بلاکچین تأیید شد ✅"
+        if not admin_indexes:
+            return False, "این تراکنش به ولت دریافت‌کننده اشتراک واریز نشده است."
+
+        if currency == "SOL":
+            pre = meta.get("preBalances") or []
+            post = meta.get("postBalances") or []
+            received_lamports = 0
+            for idx in admin_indexes:
+                if idx < len(pre) and idx < len(post):
+                    received_lamports += max(0, int(post[idx]) - int(pre[idx]))
+            received = received_lamports / 1_000_000_000
+            # Small tolerance for floating-point/env decimal representation.
+            if received + 1e-9 < expected_amount:
+                return False, f"مبلغ کافی نیست. دریافتی: {received:.9f} SOL، مبلغ لازم: {expected_amount:.9f} SOL."
+            return True, f"پرداخت {received:.9f} SOL تایید شد ✅"
+
+        # USDC is a SPL token with 6 decimals.
+        received_units = 0
+        for field in ("preTokenBalances", "postTokenBalances"):
+            pass
+        pre_tokens = meta.get("preTokenBalances") or []
+        post_tokens = meta.get("postTokenBalances") or []
+
+        def token_amount_for_admin(entries):
+            total = 0
+            for item in entries:
+                if item.get("mint") != USDC_MINT:
+                    continue
+                owner = item.get("owner")
+                if owner == WALLET_PUBKEY:
+                    total += int((item.get("uiTokenAmount") or {}).get("amount", "0"))
+            return total
+
+        pre_units = token_amount_for_admin(pre_tokens)
+        post_units = token_amount_for_admin(post_tokens)
+        received_units = max(0, post_units - pre_units)
+        received_usdc = received_units / 1_000_000
+        if received_usdc + 1e-9 < expected_amount:
+            return False, f"مبلغ کافی نیست. دریافتی: {received_usdc:.6f} USDC، مبلغ لازم: {expected_amount:.6f} USDC."
+        return True, f"پرداخت {received_usdc:.6f} USDC تایید شد ✅"
+
     except Exception as e:
         logger.error(f"⚠️ خطا در استعلام بلاکچین: {e}")
         return False, f"خطا در ارتباط با شبکه سولانا: {e}"
@@ -676,7 +727,7 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         buttons.append([InlineKeyboardButton("🤖 ورود به Mini App و کپی‌ترید", url=WEBAPP_URL)])
     return send_telegram_msg(graphic_text, target_chat=CHANNEL_ID, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=None)
 
-def register_subscription(telegram_id, wallet_addr, tx_sig, currency="SOL"):
+def register_subscription(telegram_id, wallet_addr, tx_sig, currency="USDC"):
     with db_lock:
         try:
             conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
@@ -1673,7 +1724,10 @@ def home():
             fetch('/api/check-status?telegram_id=' + encodeURIComponent(telegramId))
             .then(res => res.json())
             .then(data => {
+                window.__VIP_CHANNEL_LINK = data.channel_link || "";
+                window.__VIP_PRICES = data.prices || {};
                 const area = document.getElementById('contentArea');
+                setTimeout(updatePaymentPrice, 0);
                 if(data.has_subscription) {
                     area.innerHTML = `
                         <p>وضعیت سیستم: <span class="badge">آنلاین (اشتراک فعال VIP)</span></p>
@@ -1682,7 +1736,7 @@ def home():
                             <p style="color: #38bdf8; font-size: 13px; font-weight: bold;">⏳ تاریخ انقضا: ${data.expiry_date}</p>
                             <p id="remainingTime" style="color:#facc15;font-size:13px;font-weight:bold;">محاسبه زمان باقی‌مانده...</p>
                             <p style="color: #94a3b8; font-size: 11px;">با پایان اشتراک، دسترسی ربات و کانال به‌صورت خودکار قطع می‌شود.</p>
-                            <a href="${data.channel_link || '#'}" class="btn" style="background: #8b5cf6;">📢 ورود به کانال VIP</a>
+                            <button type="button" class="btn" style="background: #8b5cf6;" onclick="openVipChannel()">📢 ورود به کانال VIP</button>
                         </div>
                     `;
                     const expiryMs = new Date(data.expiry_date.replace(' ', 'T')).getTime();
@@ -1707,11 +1761,12 @@ def home():
                             <code style="word-break: break-all; font-size:11px; color:#facc15;">{{ wallet }}</code>
                         </div>
                         <h3 style="color: #c084fc; font-size: 14px;">اشتراک ۳۰ روزه VIP</h3>
+                        <p style="font-size:11px;color:#facc15;">مبلغ دقیق پرداخت طبق تنظیمات ربات هنگام انتخاب ارز نمایش داده می‌شود.</p>
                         <label style="font-size:11px; color:#94a3b8;">انتخاب ارز پرداخت:</label>
-                        <select id="paymentCurrency">
-                            <option value="SOL">پرداخت با ارز SOL (سولانا)</option>
-                            <option value="USDC">پرداخت با ارز USDC (تتر)</option>
+                        <select id="paymentCurrency" onchange="updatePaymentPrice()">
+                            <option value="USDC">پرداخت با 50 USDC</option>
                         </select>
+                        <p id="paymentPrice" style="color:#22c55e;font-weight:bold;text-align:center;">مبلغ اشتراک در حال بارگذاری...</p>
                         <input type="text" id="userTelegramId" value="${telegramId}" placeholder="آیدی تلگرام شما">
                         <input type="text" id="userWallet" placeholder="آدرس ولت فرستنده شما">
                         <input type="text" id="txSignature" placeholder="هش تراکنش (TxID) واریز شده را اینجا وارد کنید">
@@ -1720,6 +1775,36 @@ def home():
                 }
             });
 
+            function updatePaymentPrice() {
+                const select = document.getElementById("paymentCurrency");
+                const el = document.getElementById("paymentPrice");
+                if (!select || !el || !window.__VIP_PRICES) return;
+                const cur = select.value;
+                const value = Number(window.__VIP_PRICES[cur] || 0);
+                el.textContent = value > 0 ? `💳 مبلغ اشتراک: ${value} ${cur}` : `⚠️ مبلغ ${cur} در تنظیمات ربات تعیین نشده است`;
+            }
+
+            function openVipChannel() {
+                const link = (window.__VIP_CHANNEL_LINK || "").trim();
+                if (!link) {
+                    alert("لینک کانال VIP هنوز در تنظیمات ربات ثبت نشده است.");
+                    return;
+                }
+                try {
+                    if (window.Telegram && window.Telegram.WebApp && typeof window.Telegram.WebApp.openTelegramLink === "function") {
+                        window.Telegram.WebApp.openTelegramLink(link);
+                        return;
+                    }
+                } catch (e) {}
+                try {
+                    if (window.Telegram && window.Telegram.WebApp && typeof window.Telegram.WebApp.openLink === "function") {
+                        window.Telegram.WebApp.openLink(link, {try_instant_view: false});
+                        return;
+                    }
+                } catch (e) {}
+                window.location.href = link;
+            }
+
             function verifyAndPay() {
                 const tId = document.getElementById('userTelegramId').value;
                 const wallet = document.getElementById('userWallet').value;
@@ -1727,7 +1812,7 @@ def home():
                 const currency = document.getElementById('paymentCurrency').value;
                 if(!tId || !wallet || !txSig) { alert('لطفاً تمام فیلدها از جمله هش تراکنش (TxID) را وارد کنید!'); return; }
                 
-                alert('در حال استعلام و تایید تراکنش روی بلاکچین سولانا...');
+                alert('در حال استعلام و تایید پرداخت 50 USDC روی شبکه سولانا...');
                 fetch('/api/subscribe', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -1828,7 +1913,8 @@ def api_check_status():
         "expiry_date": expiry_str,
         "last_expiry": last_exp,
         "remaining_seconds": remaining_seconds,
-        "channel_link": CHANNEL_INVITE_LINK
+        "channel_link": CHANNEL_INVITE_LINK,
+        "prices": {"USDC": VIP_PRICE_USDC}
     })
 
 @web_app.route('/api/subscribe', methods=['POST'])
@@ -1837,7 +1923,10 @@ def api_subscribe():
     t_id = data.get("telegram_id")
     wallet = data.get("wallet_address")
     tx_sig = data.get("tx_signature")
-    currency = data.get("currency", "SOL")
+    currency = str(data.get("currency", "USDC")).upper()
+
+    if currency != "USDC":
+        return jsonify({"status": "error", "message": "فقط پرداخت 50 USDC پذیرفته می‌شود."}), 400
 
     if not (t_id and wallet and tx_sig):
         return jsonify({"status": "error", "message": "اطلاعات ورودی ناقص است."}), 400
@@ -1845,6 +1934,16 @@ def api_subscribe():
     is_valid, v_msg = verify_blockchain_transaction(tx_sig, currency)
     if not is_valid:
         return jsonify({"status": "error", "message": f"تایید تراکنش ناموفق: {v_msg}"}), 400
+
+    # Do not allow the same blockchain transaction to activate multiple accounts.
+    with db_lock:
+        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+        cur = conn.cursor()
+        cur.execute("SELECT telegram_id FROM subscribers WHERE tx_signature = ?", (f"{currency}:{tx_sig}",))
+        already_used = cur.fetchone()
+        conn.close()
+    if already_used:
+        return jsonify({"status": "error", "message": "این تراکنش قبلاً برای یک اشتراک استفاده شده است."}), 400
 
     success = register_subscription(t_id, wallet, tx_sig, currency)
     if success:
