@@ -716,11 +716,11 @@ def register_free_vip(telegram_id, wallet_addr="FREE_PASS_WALLET"):
             conn.close()
             
             free_msg = (
-                f"🎉 اشتراک VIP رایگان شما توسط ادمین فعال شد!\n\n"
+                f"🎉🎊 تبریک! اشتراک VIP رایگان شما با موفقیت فعال شد.\n\n"
                 f"⏳ تاریخ انقضا و قطع ارتباط: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n"
-                f"📢 از طریق لینک زیر وارد کانال سیگنال‌ها شوید:\n\n"
-                f"{CHANNEL_INVITE_LINK}"
+                f"📱 Mini App: {WEBAPP_URL}\n"
+                f"📢 ورود به کانال VIP: {CHANNEL_INVITE_LINK}"
             )
             send_telegram_msg(free_msg, target_chat=str(telegram_id))
             return True
@@ -1326,6 +1326,46 @@ def technical_analysis_scanner_loop(app):
             logger.error(f"⚠️ خطای موتور پرایس اکشن: {e}")
         time.sleep(2)
 
+# ==========================================================
+# موتور اتحاد سریع (Consensus Fusion)
+# موتورهای موجود نقش مکمل دارند و امتیازهای مستقل را برای یک
+# تصمیم واحد جمع می‌کنند؛ خطای یک موتور، بقیه را متوقف نمی‌کند.
+# ==========================================================
+CONSENSUS_MIN_SCORE = 4
+CONSENSUS_COOLDOWN_SECONDS = 45
+consensus_last_signal = {}
+
+def build_consensus_signal(token_addr, pair):
+    try:
+        price = float(pair.get("priceUsd", 0) or 0)
+        liq = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+        vol = float(pair.get("volume", {}).get("m5", 0) or 0)
+        chg = float(pair.get("priceChange", {}).get("m5", 0) or 0)
+        txns = pair.get("txns", {}).get("m5", {}) or {}
+        buys, sells = int(txns.get("buys", 0) or 0), int(txns.get("sells", 0) or 0)
+        votes=[]
+        if chg >= 4 and vol >= 4000: votes.append("Fire")
+        if chg >= 6 and vol >= 5000: votes.append("Trend")
+        if chg >= GOLDEN_MIN_CHANGE_5M and vol >= GOLDEN_MIN_VOLUME_5M and liq >= GOLDEN_MIN_LIQUIDITY: votes.append("Golden")
+        if buys > sells and liq >= COMBO_MIN_LIQUIDITY and vol >= COMBO_MIN_VOLUME_5M: votes.append("SmartMoney")
+        try:
+            ok_pa, reason = check_major_support_resistance_pa(pair)
+            if ok_pa: votes.append("Technical")
+        except Exception: pass
+        try:
+            ok_ai, *_ = evaluate_ultimate_super_signal(token_addr, pair)
+            if ok_ai: votes.append("UltimateAI")
+        except Exception: pass
+        score=len(votes)
+        if score < CONSENSUS_MIN_SCORE: return None
+        now=time.time()
+        if now-consensus_last_signal.get(token_addr,0) < CONSENSUS_COOLDOWN_SECONDS: return None
+        consensus_last_signal[token_addr]=now
+        return {"score":score,"votes":votes,"price":price,"liq":liq,"vol":vol,"chg":chg,"symbol":pair.get("baseToken",{}).get("symbol","TOKEN"),"tp":max(12.0,min(24.0,10.0+score*2.0)),"sl":-8.0}
+    except Exception as e:
+        logger.debug(f"Consensus error {token_addr}: {e}")
+        return None
+
 def unified_market_scanner_loop(app):
     global GOLDEN_OPTION, COMBO_RUNNING, IS_RUNNING, TREND_ALERT_RUNNING, SYNCHRONIZED_MODE, BOTTOM_WHALE_RUNNING
     global GOLDEN_BUY_AMOUNT_SOL, GOLDEN_TAKE_PROFIT, GOLDEN_STOP_LOSS
@@ -1362,6 +1402,21 @@ def unified_market_scanner_loop(app):
 
                 if price <= 0:
                     continue
+
+                fusion = build_consensus_signal(token_addr, pair) if SYNCHRONIZED_MODE else None
+                if fusion and token_addr not in processed_tokens:
+                    amount = get_dynamic_buy_amount(0.01)
+                    success, result_info = execute_real_buy(token_addr, amount)
+                    if success:
+                        with state_lock:
+                            processed_tokens.add(token_addr)
+                            active_positions[token_addr] = {"entry_price": fusion["price"], "symbol": fusion["symbol"], "tp": fusion["tp"], "sl": fusion["sl"], "highest_price": fusion["price"]}
+                        txlink=f"https://solscan.io/tx/{result_info}"
+                        reason=" + ".join(fusion["votes"])
+                        msg=(f"⚡🧠 **ابرسیگنال متحد هالکی**\n\n🎯 اجماع موتورها: `{fusion['score']}`\n🤖 موتورهای تأییدکننده: {reason}\n🪙 `{fusion['symbol']}`\n💵 ورود: `${fusion['price']:.8f}`\n💰 حجم: `{amount}` SOL\n🎯 TP: `+{fusion['tp']:.1f}%`\n🛑 SL: `{fusion['sl']:.1f}%`\n🔗 [Solscan]({txlink})")
+                        send_telegram_msg(msg)
+                        send_graphic_signal_to_vip_channel(token_addr, fusion["symbol"], fusion["price"], fusion["tp"], fusion["sl"], amount, fusion["vol"], fusion["liq"], fusion["chg"], txlink, "⚡🧠 ابرسیگنال متحد VIP")
+                        continue
 
                 if BOTTOM_WHALE_RUNNING and token_addr not in processed_tokens:
                     txns = pair.get('txns', {}).get('m5', {})
@@ -1598,11 +1653,24 @@ def home():
                         <p>وضعیت سیستم: <span class="badge">آنلاین (اشتراک فعال VIP)</span></p>
                         <div style="background: #0f172a; padding: 15px; border-radius: 12px; text-align: center; border: 1px solid #22c55e; margin-top: 15px;">
                             <h3 style="color: #22c55e; margin-top: 0; font-size: 15px;">🎉 اشتراک VIP شما فعال است</h3>
-                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold;">⏳ تاریخ انقضا و قطع ارتباط: ${data.expiry_date}</p>
-                            <p style="color: #94a3b8; font-size: 11px;">پس از اتمام این تاریخ، دسترسی شما به صورت خودکار از ربات و کانال قطع خواهد شد.</p>
-                            <a href="https://t.me/+c_o1BlwD7Q4ZjZk" target="_blank" class="btn" style="background: #8b5cf6;">📢 ورود به کانال VIP</a>
+                            <p style="color: #38bdf8; font-size: 13px; font-weight: bold;">⏳ تاریخ انقضا: ${data.expiry_date}</p>
+                            <p id="remainingTime" style="color:#facc15;font-size:13px;font-weight:bold;">محاسبه زمان باقی‌مانده...</p>
+                            <p style="color: #94a3b8; font-size: 11px;">با پایان اشتراک، دسترسی ربات و کانال به‌صورت خودکار قطع می‌شود.</p>
+                            <a href="${data.channel_link || '#'}" target="_blank" class="btn" style="background: #8b5cf6;">📢 ورود به کانال VIP</a>
                         </div>
                     `;
+                    const expiryMs = new Date(data.expiry_date.replace(' ', 'T')).getTime();
+                    const tick = () => {
+                        const diff = Math.max(0, expiryMs - Date.now());
+                        const d = Math.floor(diff / 86400000);
+                        const h = Math.floor((diff % 86400000) / 3600000);
+                        const m = Math.floor((diff % 3600000) / 60000);
+                        const sec = Math.floor((diff % 60000) / 1000);
+                        const el = document.getElementById('remainingTime');
+                        if (el) el.textContent = `⏱ زمان باقی‌مانده: ${d} روز و ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+                        if (diff <= 0) location.reload();
+                    };
+                    tick(); setInterval(tick, 1000);
                 } else {
                     let expiryNotice = data.last_expiry ? `<p style="color:#ef4444; font-size:11px;">⚠️ اشتراک قبلی شما منقضی شده است: ${data.last_expiry}</p>` : '';
                     area.innerHTML = `
@@ -1723,10 +1791,18 @@ def api_check_status():
                         last_exp = row[0]
                 except Exception as e:
                     logger.error(f"Error checking last expiry: {e}")
+    remaining_seconds = 0
+    if has_sub and expiry_str:
+        try:
+            remaining_seconds = max(0, int((datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S") - datetime.now()).total_seconds()))
+        except Exception:
+            remaining_seconds = 0
     return jsonify({
         "has_subscription": has_sub,
         "expiry_date": expiry_str,
-        "last_expiry": last_exp
+        "last_expiry": last_exp,
+        "remaining_seconds": remaining_seconds,
+        "channel_link": CHANNEL_INVITE_LINK
     })
 
 @web_app.route('/api/subscribe', methods=['POST'])
@@ -1751,13 +1827,37 @@ def api_subscribe():
         return jsonify({"status": "error", "message": "خطا در ثبت اشتراک."}), 500
 
 def _engine_status_lines():
-    return (f"🔥 Fire: {'🟢' if IS_RUNNING else '🔴'}\n" f"📈 Trend: {'🟢' if TREND_ALERT_RUNNING else '🔴'}\n" f"🤝 Combo: {'🟢' if COMBO_RUNNING else '🔴'}\n" f"🏆 Golden: {'🟢' if GOLDEN_OPTION else '🔴'}\n" f"📊 Technical: {'🟢' if TECHNICAL_RUNNING else '🔴'}\n" f"🧠 Ultimate/AI: {'🟢' if ULTIMATE_21_ENGINE_ENABLED else '🔴'}\n" f"⚡ Mempool: {'🟢' if MEMPOOL_SMART_MONEY_ENABLED else '🔴'}\n" f"🐋 Whale: {'🟢' if BOTTOM_WHALE_RUNNING else '🔴'}\n" f"🛡 Anti-Wash: {'🟢' if ANTI_WASH_TRADING_ENABLED else '🔴'}\n" f"🤖 Copy: {'🟢' if COPY_TRADING_ENABLED else '🔴'}")
+    return (f"🔥 Fire: {'🟢' if IS_RUNNING else '🔴'}\n" f"📈 Trend: {'🟢' if TREND_ALERT_RUNNING else '🔴'}\n" f"🤝 Combo: {'🟢' if COMBO_RUNNING else '🔴'}\n" f"🏆 Golden: {'🟢' if GOLDEN_OPTION else '🔴'}\n" f"📊 Technical: {'🟢' if TECHNICAL_RUNNING else '🔴'}\n" f"🧠 Ultimate/AI: {'🟢' if ULTIMATE_21_ENGINE_ENABLED else '🔴'}\n" f"⚡ Mempool: {'🟢' if MEMPOOL_SMART_MONEY_ENABLED else '🔴'}\n" f"🐋 Whale: {'🟢' if BOTTOM_WHALE_RUNNING else '🔴'}\n" f"🛡 Anti-Wash: {'🟢' if ANTI_WASH_TRADING_ENABLED else '🔴'}\n" f"🤖 Copy: {'🟢' if COPY_TRADING_ENABLED else '🔴'}\n" f"⚡ اتحاد موتورها: {'🟢' if SYNCHRONIZED_MODE else '🔴'}")
+
+def _admin_free_panel_text():
+    rows = []
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute("SELECT telegram_id, expiry_date, status FROM subscribers ORDER BY expiry_date DESC LIMIT 20")
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Admin free panel error: {e}")
+    text = "👑 **عضویت رایگان کپی‌ترید + VIP**\n\n"
+    text += "برای فعال‌سازی فوری یک کاربر، دستور زیر را در همین ربات بفرستید:\n`/free USER_TELEGRAM_ID`\n\n"
+    text += "کاربر بلافاصله پیام تبریک می‌گیرد و در Mini App به‌جای فرم ثبت‌نام، تاریخ انقضا و زمان باقی‌مانده را می‌بیند.\n\n"
+    text += "👥 کاربران ثبت‌شده اخیر:\n"
+    if rows:
+        for tid, exp, status in rows[:10]:
+            text += f"• `{tid}` — {status} — {exp}\n"
+    else:
+        text += "هنوز کاربری ثبت نشده است.\n"
+    return text
 
 def _main_keyboard(is_admin=False):
     rows=[[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
     elif CHANNEL_INVITE_LINK: rows.append([InlineKeyboardButton("📢 کانال VIP",url=CHANNEL_INVITE_LINK)])
-    if is_admin: rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
+    if is_admin:
+        rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
+        rows.append([InlineKeyboardButton("🎁 عضویت رایگان کاربر",callback_data="free_users")])
     return InlineKeyboardMarkup(rows)
 
 def _control_keyboard():
@@ -1772,6 +1872,21 @@ def start_telegram_bot():
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🎉 **خوش آمدید به هالکی VIP**\n\n🟢 اشتراک شما فعال است.\n⏳ پایان اشتراک: `{exp_date}`" if active else "🤖 **ربات هوشمند ترید هالکی**\n\n🔴 اشتراک VIP فعال نیست.\nبرای ثبت‌نام و فعال‌سازی، Mini App را باز کنید.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+        async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+            cid = str(update.effective_user.id)
+            if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
+                await update.message.reply_text("⛔ فقط ادمین دسترسی دارد.")
+                return
+            if not context.args:
+                await update.message.reply_text("🎁 برای فعال‌سازی رایگان: `/free 123456789`", parse_mode="Markdown")
+                return
+            target = str(context.args[0]).strip()
+            if not target.isdigit():
+                await update.message.reply_text("❌ Telegram ID باید عددی باشد.")
+                return
+            ok = register_free_vip(target)
+            await update.message.reply_text("✅ اشتراک رایگان یک‌ماهه فعال شد و پیام تبریک برای کاربر ارسال شد." if ok else "❌ فعال‌سازی انجام نشد.")
+
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
@@ -1789,6 +1904,11 @@ def start_telegram_bot():
             elif data=="admin":
                 if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.")
                 else: await q.edit_message_text(f"👑 **پنل مدیریت**\n\nکاربران: `{len(get_all_subscribers())}`\nمعاملات: `{get_advanced_trade_analytics()['total_trades']}`",reply_markup=_main_keyboard(True),parse_mode="Markdown")
+            elif data=="free_users":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                else:
+                    await q.edit_message_text(_admin_free_panel_text(), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]), parse_mode="Markdown")
             elif data.startswith("toggle_"):
                 if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.",reply_markup=_main_keyboard(False)); return
                 mapping={"toggle_fire":"IS_RUNNING","toggle_trend":"TREND_ALERT_RUNNING","toggle_combo":"COMBO_RUNNING","toggle_golden":"GOLDEN_OPTION","toggle_tech":"TECHNICAL_RUNNING","toggle_mempool":"MEMPOOL_SMART_MONEY_ENABLED","toggle_whale":"BOTTOM_WHALE_RUNNING","toggle_copy":"COPY_TRADING_ENABLED"}; name=mapping[data]; globals()[name]=not bool(globals()[name]); await q.edit_message_text("🎛 **کنترل موتورها**\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
