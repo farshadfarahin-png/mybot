@@ -4,6 +4,8 @@ import json
 import base64
 import base58
 import os
+
+VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "-1003840577545")
 import sqlite3
 import threading
 import logging
@@ -416,28 +418,27 @@ def ultra_accuracy_scanner_loop(app):
                 if SMART_MONEY_COPY_ENABLED:
                     current_buy_amt = get_dynamic_buy_amount(0.01)
                     success, result_info = execute_real_buy(token_addr, 0.01)
-                    if not success:
-                        continue
-
-                    with state_lock:
-                        ultra_processed_tokens.add(token_addr)
-                        processed_tokens.add(token_addr)
-
-                    solscan_link = f"https://solscan.io/tx/{result_info}"
+                    execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result_info}"
+                    if success:
+                        with state_lock:
+                            ultra_processed_tokens.add(token_addr)
+                            processed_tokens.add(token_addr)
+                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://dexscreener.com/solana/{token_addr}"
                     init_tp = 30.0
                     init_sl = -7.0
 
-                    with state_lock:
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": init_tp,
-                            "sl": init_sl,
-                            "highest_price": price,
-                            "highest_pnl": 0.0,
-                            "locked_floor": init_sl,
-                            "trailing_active": DYNAMIC_TRAILING_TP_ENABLED
-                        }
+                    if success:
+                        with state_lock:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": init_tp,
+                                "sl": init_sl,
+                                "highest_price": price,
+                                "highest_pnl": 0.0,
+                                "locked_floor": init_sl,
+                                "trailing_active": DYNAMIC_TRAILING_TP_ENABLED
+                            }
 
                     ultra_msg = (
                         f"💎✨ [سیگنال هوش مصنوعی پیش‌رو - دقت ۹۹٪]\n"
@@ -454,7 +455,7 @@ def ultra_accuracy_scanner_loop(app):
                     send_graphic_signal_to_vip_channel(
                         token_addr=token_addr, symbol=symbol, price=price, tp=init_tp, sl=init_sl,
                         buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
-                        p_change=price_change_5m, solscan_link=solscan_link, signal_title="💎✨ سیگنال تضمینی ۹۹٪ (Smart Money + Hype)"
+                        p_change=price_change_5m, solscan_link=solscan_link, signal_title="💎✨ سیگنال تضمینی ۹۹٪ (Smart Money + Hype)", execution_status=execution_status, execution_tx=result_info if success else ""
                     )
         except Exception as e:
             logger.error(f"⚠️ خطای موتور فوق‌پیشرفته: {e}")
@@ -490,15 +491,12 @@ def mempool_smart_money_scanner_loop(app):
                 if liquidity > 12000 and volume_5m > 3000 and price > 0:
                     current_buy_amt = get_dynamic_buy_amount(0.01)
                     success, result_info = execute_real_buy(token_addr, 0.01)
-                    if not success:
-                        continue 
-                    
-                    with state_lock:
-                        mempool_processed_tokens.add(token_addr)
-                        processed_tokens.add(token_addr)
-
-                    buy_status_str = "شکار موفق از ممپول (موفق روی بلاکچین ✅)"
-                    solscan_link = f"https://solscan.io/tx/{result_info}"
+                    buy_status_str = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result_info}"
+                    if success:
+                        with state_lock:
+                            mempool_processed_tokens.add(token_addr)
+                            processed_tokens.add(token_addr)
+                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://dexscreener.com/solana/{token_addr}"
 
                     mempool_msg = (
                         f"⚡🕵️ [شکارچی ممپول & اسمارت مانی هالکی]\n"
@@ -511,19 +509,20 @@ def mempool_smart_money_scanner_loop(app):
                         f"🔍 [Solscan]({solscan_link})\n"
                         f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                     )
-                    with state_lock:
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": 25.0,
-                            "sl": -8.0,
-                            "highest_price": price
-                        }
+                    if success:
+                        with state_lock:
+                            active_positions[token_addr] = {
+                                "entry_price": price,
+                                "symbol": symbol,
+                                "tp": 25.0,
+                                "sl": -8.0,
+                                "highest_price": price
+                            }
                     send_telegram_msg(mempool_msg)
                     send_graphic_signal_to_vip_channel(
                         token_addr=token_addr, symbol=symbol, price=price, tp=25.0, sl=-8.0,
                         buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
-                        p_change=15.0, solscan_link=solscan_link, signal_title="⚡🕵️ شکار ممپول اسمارت‌مانی هالکی VIP"
+                        p_change=15.0, solscan_link=solscan_link, signal_title="⚡🕵️ شکار ممپول اسمارت‌مانی هالکی VIP", execution_status=buy_status_str, execution_tx=result_info if success else ""
                     )
         except Exception as e:
             logger.error(f"⚠️ خطای اسکن ممپول: {e}")
@@ -719,30 +718,83 @@ def send_telegram_msg(text, target_chat=None, reply_markup=None, parse_mode="Mar
         logger.error(f"❌ خطای ارسال پیام به تلگرام: {e}")
         return False
 
+def _get_bot_setting(key, default=""):
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+            cur.execute("SELECT value FROM bot_settings WHERE key=?", (key,))
+            row = cur.fetchone()
+            conn.commit(); conn.close()
+            return row[0] if row else default
+    except Exception as e:
+        logger.error(f"bot setting read error: {e}")
+        return default
+
+def _set_bot_setting(key, value):
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+            cur.execute("INSERT OR REPLACE INTO bot_settings(key,value) VALUES(?,?)", (key, str(value)))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"bot setting write error: {e}")
+        return False
+
+def _load_channel_config():
+    global CHANNEL_ID, CHANNEL_INVITE_LINK
+    if not CHANNEL_ID:
+        CHANNEL_ID = _get_bot_setting("vip_channel_id", "").strip()
+    if not CHANNEL_INVITE_LINK:
+        CHANNEL_INVITE_LINK = _get_bot_setting("vip_channel_invite", "").strip()
+    return CHANNEL_ID, CHANNEL_INVITE_LINK
+
 def ensure_channel_invite_link():
-    global CHANNEL_INVITE_LINK
+    global CHANNEL_ID, CHANNEL_INVITE_LINK
+    _load_channel_config()
     if CHANNEL_INVITE_LINK:
         return CHANNEL_INVITE_LINK
     if not TELEGRAM_BOT_TOKEN or not CHANNEL_ID:
-        logger.error("❌ CHANNEL_ID یا TELEGRAM_BOT_TOKEN برای ساخت لینک VIP تنظیم نشده است.")
+        logger.error("❌ کانال VIP تنظیم نشده. ادمین: /setvipchannel @channel_username یا -100... را ارسال کند.")
         return ""
     try:
+        # اگر کانال عمومی باشد، لینک مستقیم پایدارتر از invite link است.
+        if str(CHANNEL_ID).startswith("@"):
+            username = str(CHANNEL_ID)[1:]
+            if username:
+                CHANNEL_INVITE_LINK = f"https://t.me/{username}"
+                _set_bot_setting("vip_channel_id", CHANNEL_ID)
+                _set_bot_setting("vip_channel_invite", CHANNEL_INVITE_LINK)
+                return CHANNEL_INVITE_LINK
+
         url=f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink"
         payload={"chat_id":CHANNEL_ID,"name":"VIP-30-Day","creates_join_request":False}
         data=http_session.post(url,json=payload,timeout=8).json()
         link=(data.get("result") or {}).get("invite_link")
         if data.get("ok") and link:
             CHANNEL_INVITE_LINK=link
-            logger.info("✅ لینک دعوت VIP خودکار ساخته شد.")
+            _set_bot_setting("vip_channel_id", CHANNEL_ID)
+            _set_bot_setting("vip_channel_invite", CHANNEL_INVITE_LINK)
+            logger.info("✅ لینک دعوت VIP ساخته و ذخیره شد.")
             return link
         logger.error(f"❌ ساخت لینک VIP ناموفق: {data.get('description',data)}")
     except Exception as e:
         logger.error(f"❌ خطای ساخت لینک VIP: {e}")
     return ""
 
-def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY"):
+def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="⏳ در انتظار اجرای معامله", execution_tx=""):
+
+    _load_channel_config()
+    if not CHANNEL_ID and CHANNEL_INVITE_LINK.startswith("https://t.me/"):
+        tail = CHANNEL_INVITE_LINK.split("https://t.me/",1)[1].strip("/")
+        if tail and not tail.startswith("+"):
+            CHANNEL_ID = "@" + tail
     if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
-        logger.error("❌ CHANNEL_ID یا TELEGRAM_BOT_TOKEN تنظیم نشده است.")
+        logger.error("❌ CHANNEL_ID/لینک عمومی کانال VIP تنظیم نشده است. از /setvipchannel استفاده کنید.")
         return False
     side_icon = "🟢 خرید" if str(side).upper() == "BUY" else "🔴 فروش"
     graphic_text = (
@@ -750,6 +802,7 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         f"🪙 نام توکن: #{symbol}\n📍 آدرس قرارداد:\n{token_addr}\n\n"
         f"💵 قیمت: ${price:.8f}\n💰 حجم معامله: SOL {buy_amt}\n🎯 حد سود: +%{tp}\n🛑 حد ضرر: %{sl}\n\n"
         f"📊 آمار زنده بازار:\n▪️ روند ۵ دقیقه: %{p_change:+.2f}\n▪️ حجم معاملات: ${volume:,.0f}\n▪️ نقدینگی کل: ${liquidity:,.0f}\n\n"
+        f"📌 وضعیت اجرا: {execution_status}\n"
         f"⚡️ سیستم هوشمند هالکی\n━━━━━━━━━━━━━━━━━━━━"
     )
     buttons = [[InlineKeyboardButton("🔍 Solscan", url=solscan_link), InlineKeyboardButton("📈 DexScreener", url=f"https://dexscreener.com/solana/{token_addr}")]]
@@ -1319,30 +1372,34 @@ def check_positions_loop():
                             reason = exit_reason_text if exit_reason_text else (f"حد سود (TP) فعال شد 🎯 {sticker}" if is_profit else f"حد ضرر (SL) فعال شد 🛑 {sticker}")
 
                             pnl_usd_val = 0.75 * (pnl_percent / 100)
-                            closed_trades_history.append({
-                                "symbol": symbol,
-                                "percent": pnl_percent,
-                                "usd": pnl_usd_val
-                            })
-                            total_realized_pnl_percent += pnl_percent
-                            total_realized_pnl_usd += pnl_usd_val
-
-                            log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
+                            sell_status = "🟢 فروش موفق روی بلاکچین" if success else f"⚠️ فروش انجام نشد: {sell_res_info}"
+                            # فقط بعد از فروش موفق، معامله را بسته و P/L را نهایی کن.
+                            if success:
+                                closed_trades_history.append({
+                                    "symbol": symbol,
+                                    "percent": pnl_percent,
+                                    "usd": pnl_usd_val
+                                })
+                                total_realized_pnl_percent += pnl_percent
+                                total_realized_pnl_usd += pnl_usd_val
+                                log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
 
                             solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
-
                             exit_msg = (
                                 f"🔴 {reason}\n\n"
                                 f"🪙 توکن: {symbol}\n"
-                                f"📌 وضعیت خروج: {sell_res_info}\n"
+                                f"📌 وضعیت فروش: {sell_status}\n"
                                 f"📍 آدرس:\n{token_addr}\n\n"
                                 f"📉 قیمت خروج: ${current_price:.8f}\n"
                                 f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
                                 f"🔗 تراکنش Solscan:\n{solscan_link}"
                             )
                             send_telegram_msg(exit_msg)
-                            send_telegram_msg(exit_msg, target_chat=CHANNEL_ID)
-                            tokens_to_close.append(token_addr)
+                            _load_channel_config()
+                            if CHANNEL_ID:
+                                send_telegram_msg(exit_msg, target_chat=CHANNEL_ID)
+                            if success:
+                                tokens_to_close.append(token_addr)
                 except Exception as inner_e:
                     logger.error(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
 
@@ -1392,15 +1449,12 @@ def technical_analysis_scanner_loop(app):
 
                 current_buy_amt = get_dynamic_buy_amount(TECH_BUY_AMOUNT_SOL)
                 success, result_info = execute_real_buy(token_addr, TECH_BUY_AMOUNT_SOL)
-                if not success:
-                    continue
-
-                with state_lock:
-                    tech_processed_tokens.add(token_addr)
-                    processed_tokens.add(token_addr)
-
-                buy_status_str = "انجام شد (موفق روی بلاکچین ✅)"
-                solscan_link = f"https://solscan.io/tx/{result_info}"
+                buy_status_str = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result_info}"
+                if success:
+                    with state_lock:
+                        tech_processed_tokens.add(token_addr)
+                        processed_tokens.add(token_addr)
+                solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://dexscreener.com/solana/{token_addr}"
 
                 target_tp_val = price * (1 + (TECH_TAKE_PROFIT / 100))
                 target_sl_val = price * (1 + (TECH_STOP_LOSS / 100))
@@ -1432,7 +1486,7 @@ def technical_analysis_scanner_loop(app):
                 send_graphic_signal_to_vip_channel(
                     token_addr=token_addr, symbol=symbol, price=price, tp=TECH_TAKE_PROFIT,
                     sl=TECH_STOP_LOSS, buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
-                    p_change=price_change_5m, solscan_link=solscan_link, signal_title="📊 سیگنال پرایس اکشن + هالکی"
+                    p_change=price_change_5m, solscan_link=solscan_link, signal_title="📊 سیگنال پرایس اکشن + هالکی", execution_status=buy_status_str, execution_tx=result_info if success else ""
                 )
         except Exception as e:
             logger.error(f"⚠️ خطای موتور پرایس اکشن: {e}")
@@ -1486,9 +1540,11 @@ def send_fused_signal(token_addr,fusion):
          f"📊 تغییر ۵ دقیقه: `{fusion['chg']:+.2f}%`\n💧 نقدینگی: `${fusion['liq']:,.0f}`\n"
          f"📈 حجم ۵ دقیقه: `${fusion['vol']:,.0f}`\n🎯 TP: `+{fusion['tp']:.1f}%`\n🛑 SL: `{fusion['sl']:.1f}%`\n"
          f"📈 [DexScreener]({dex_link})")
-    send_telegram_msg(msg)
-    send_graphic_signal_to_vip_channel(token_addr,fusion["symbol"],fusion["price"],fusion["tp"],fusion["sl"],amount,fusion["vol"],fusion["liq"],fusion["chg"],dex_link,"⚡🧠 ابرسیگنال متحد VIP",side="BUY")
     success,result=execute_real_buy(token_addr,amount)
+    execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result}"
+    msg += f"\n\n📌 وضعیت خرید: {execution_status}"
+    send_telegram_msg(msg)
+    send_graphic_signal_to_vip_channel(token_addr,fusion["symbol"],fusion["price"],fusion["tp"],fusion["sl"],amount,fusion["vol"],fusion["liq"],fusion["chg"],dex_link,"⚡🧠 ابرسیگنال متحد VIP",side="BUY",execution_status=execution_status,execution_tx=result if success else "")
     if success:
         txlink=f"https://solscan.io/tx/{result}"
         with state_lock:
@@ -1945,6 +2001,34 @@ def start_telegram_bot():
             ok = register_free_vip(target)
             await update.message.reply_text("✅ اشتراک رایگان یک‌ماهه فعال شد و پیام تبریک برای کاربر ارسال شد." if ok else "❌ فعال‌سازی انجام نشد.")
 
+        async def setvipchannel_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+            global CHANNEL_ID, CHANNEL_INVITE_LINK
+            cid = str(update.effective_user.id)
+            if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
+                await update.message.reply_text("⛔ فقط ادمین دسترسی دارد.")
+                return
+            if not context.args:
+                await update.message.reply_text("📢 نمونه: /setvipchannel @MyVipChannel\nیا برای کانال خصوصی: /setvipchannel -1001234567890")
+                return
+            channel = str(context.args[0]).strip()
+            if channel.startswith("https://t.me/"):
+                tail = channel.split("https://t.me/",1)[1].strip("/")
+                if tail and not tail.startswith("+"):
+                    channel = "@" + tail
+                else:
+                    CHANNEL_INVITE_LINK = channel
+                    _set_bot_setting("vip_channel_invite", channel)
+                    await update.message.reply_text("✅ لینک دعوت کانال ذخیره شد.")
+                    return
+            CHANNEL_ID = channel
+            CHANNEL_INVITE_LINK = ""
+            _set_bot_setting("vip_channel_id", CHANNEL_ID)
+            link = ensure_channel_invite_link()
+            if link:
+                await update.message.reply_text(f"✅ کانال VIP ثبت شد.\n🔗 {link}")
+            else:
+                await update.message.reply_text("⚠️ کانال ذخیره شد ولی لینک ساخته نشد. ربات باید داخل کانال ادمین باشد و اجازه دعوت داشته باشد.")
+
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
@@ -1972,6 +2056,7 @@ def start_telegram_bot():
                 mapping={"toggle_fire":"IS_RUNNING","toggle_trend":"TREND_ALERT_RUNNING","toggle_combo":"COMBO_RUNNING","toggle_golden":"GOLDEN_OPTION","toggle_tech":"TECHNICAL_RUNNING","toggle_mempool":"MEMPOOL_SMART_MONEY_ENABLED","toggle_whale":"BOTTOM_WHALE_RUNNING","toggle_copy":"COPY_TRADING_ENABLED"}; name=mapping[data]; globals()[name]=not bool(globals()[name]); await q.edit_message_text("🎛 **کنترل موتورها**\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
         app.add_handler(CommandHandler("start",start_cmd))
         app.add_handler(CommandHandler("free",free_cmd))
+        app.add_handler(CommandHandler("setvipchannel",setvipchannel_cmd))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
         app.run_polling(drop_pending_updates=False)
@@ -1979,6 +2064,7 @@ def start_telegram_bot():
 
 if __name__ == "__main__":
     logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
+    _load_channel_config()
     ensure_channel_invite_link()
 
     threads = [
