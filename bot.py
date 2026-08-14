@@ -1645,9 +1645,14 @@ def home():
             <h1>🚀 مینی‌اپلیکیشن هوشمند تریدینگ هالکی & AI</h1>
             <div id="contentArea">بارگذاری اطلاعات...</div>
         </div>
+        <script src="https://telegram.org/js/telegram-web-app.js"></script>
         <script>
             let telegramId = "";
             if (window.Telegram && window.Telegram.WebApp) {
+                try {
+                    window.Telegram.WebApp.expand();
+                    window.Telegram.WebApp.enableClosingConfirmation();
+                } catch (e) {}
                 window.Telegram.WebApp.ready();
                 if (window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user) {
                     telegramId = window.Telegram.WebApp.initDataUnsafe.user.id;
@@ -1656,7 +1661,16 @@ def home():
             const urlParams = new URLSearchParams(window.location.search);
             if (!telegramId) { telegramId = urlParams.get('telegram_id') || ""; }
 
-            fetch('/api/check-status?telegram_id=' + telegramId)
+            // Telegram Mini App normally supplies the user through initDataUnsafe.
+            // Keep the explicit telegram_id fallback only for legacy/direct links.
+            if (!telegramId) {
+                document.getElementById('contentArea').innerHTML = `
+                    <p style="color:#facc15;text-align:center">⚠️ این صفحه باید از داخل دکمه Mini App ربات باز شود.</p>
+                    <p style="font-size:11px;text-align:center;color:#94a3b8">لطفاً به ربات برگردید و روی «📱 ورود به Mini App VIP» بزنید.</p>
+                `;
+            }
+
+            fetch('/api/check-status?telegram_id=' + encodeURIComponent(telegramId))
             .then(res => res.json())
             .then(data => {
                 const area = document.getElementById('contentArea');
@@ -1668,7 +1682,7 @@ def home():
                             <p style="color: #38bdf8; font-size: 13px; font-weight: bold;">⏳ تاریخ انقضا: ${data.expiry_date}</p>
                             <p id="remainingTime" style="color:#facc15;font-size:13px;font-weight:bold;">محاسبه زمان باقی‌مانده...</p>
                             <p style="color: #94a3b8; font-size: 11px;">با پایان اشتراک، دسترسی ربات و کانال به‌صورت خودکار قطع می‌شود.</p>
-                            <a href="${data.channel_link || '#'}" target="_blank" class="btn" style="background: #8b5cf6;">📢 ورود به کانال VIP</a>
+                            <a href="${data.channel_link || '#'}" class="btn" style="background: #8b5cf6;">📢 ورود به کانال VIP</a>
                         </div>
                     `;
                     const expiryMs = new Date(data.expiry_date.replace(' ', 'T')).getTime();
