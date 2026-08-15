@@ -46,7 +46,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY", "").strip()
 
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip() 
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip() or VIP_CHANNEL_ID
 CHANNEL_INVITE_LINK = os.environ.get("CHANNEL_INVITE_LINK", "").strip()
 
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "").strip()
@@ -55,6 +55,7 @@ VIP_PRICE_SOL = 0.0  # پرداخت SOL غیرفعال است
 VIP_PRICE_USDC = 50.0  # قیمت ثابت اشتراک ۳۰ روزه: 50 USDC
 COPY_TRADING_FEE_PERCENT = 1.0  # کارمزد سرویس کپی‌ترید؛ از بودجه همان معامله کاربر محاسبه می‌شود.
 COPY_DEFAULT_ASSET = "USDC"
+UNIFIED_ENGINE_NAME = "🤖⚡ هالک AI — موتور متحد بازار"
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -134,7 +135,29 @@ ANTI_WASH_TRADING_ENABLED = True
 
 SMART_MONEY_COPY_ENABLED = True      
 SOCIAL_SENTIMENT_ENABLED = True      
-DYNAMIC_TRAILING_TP_ENABLED = True   
+DYNAMIC_TRAILING_TP_ENABLED = True
+# مدیریت سود پله‌ای بر پایه سقف سود: حدضرر فقط بالا می‌رود و هیچ‌وقت پایین نمی‌آید.
+# مثال: اگر سقف سود به +1000% برسد، حدضرر روی حدود +950% قفل می‌شود.
+TRAILING_LOCK_TABLE = (
+    (1000.0, 950.0),
+    (750.0, 690.0),
+    (500.0, 430.0),
+    (300.0, 230.0),
+    (200.0, 160.0),
+    (150.0, 115.0),
+    (100.0, 75.0),
+    (75.0, 52.0),
+    (50.0, 30.0),
+    (35.0, 20.0),
+    (25.0, 10.0),
+    (20.0, 5.0),
+    (10.0, 2.0),
+)
+TRAILING_WEAKNESS_ENABLED = True
+TRAILING_WEAK_SELL_RATIO = 1.45
+TRAILING_WEAKNESS_M5_MAX = 0.0
+TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT = 1.5
+   
 
 SECTION_ULTRA_OPEN = True
 SECTION_VIP_OPEN = True
@@ -789,29 +812,48 @@ def ensure_channel_invite_link():
     return ""
 
 def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="⏳ در انتظار اجرای معامله", execution_tx=""):
-
+    global CHANNEL_ID
+    """ارسال سیگنال گرافیکی؛ در خرید موفق لینک تراکنش Solscan و همیشه لینک DexScreener را نشان می‌دهد."""
     _load_channel_config()
     if not CHANNEL_ID and CHANNEL_INVITE_LINK.startswith("https://t.me/"):
-        tail = CHANNEL_INVITE_LINK.split("https://t.me/",1)[1].strip("/")
+        tail = CHANNEL_INVITE_LINK.split("https://t.me/", 1)[1].strip("/")
         if tail and not tail.startswith("+"):
             CHANNEL_ID = "@" + tail
     if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
-        logger.error("❌ CHANNEL_ID/لینک عمومی کانال VIP تنظیم نشده است. از /setvipchannel استفاده کنید.")
+        logger.error("❌ CHANNEL_ID/لینک کانال VIP تنظیم نشده است.")
         return False
+
     side_icon = "🟢 خرید" if str(side).upper() == "BUY" else "🔴 فروش"
+    if execution_tx and not str(execution_tx).startswith("http"):
+        safe_solscan = f"https://solscan.io/tx/{execution_tx}"
+    elif str(solscan_link).startswith("https://solscan.io/"):
+        safe_solscan = solscan_link
+    else:
+        safe_solscan = f"https://solscan.io/token/{token_addr}"
     graphic_text = (
         f"╔══════════════════════════╗\n  {signal_title}\n  {side_icon}\n╚══════════════════════════╝\n\n"
         f"🪙 نام توکن: #{symbol}\n📍 آدرس قرارداد:\n{token_addr}\n\n"
-        f"💵 قیمت: ${price:.8f}\n💰 حجم معامله: SOL {buy_amt}\n🎯 حد سود: +%{tp}\n🛑 حد ضرر: %{sl}\n\n"
-        f"📊 آمار زنده بازار:\n▪️ روند ۵ دقیقه: %{p_change:+.2f}\n▪️ حجم معاملات: ${volume:,.0f}\n▪️ نقدینگی کل: ${liquidity:,.0f}\n\n"
+        f"💵 قیمت: ${price:.8f}\n💰 حجم معامله: SOL {buy_amt:g}\n🎯 حد سود اولیه: +{tp:.1f}%\n🛑 حد ضرر اولیه: {sl:.1f}%\n\n"
+        f"📊 آمار زنده بازار:\n▪️ روند ۵ دقیقه: {p_change:+.2f}%\n▪️ حجم معاملات: ${volume:,.0f}\n▪️ نقدینگی کل: ${liquidity:,.0f}\n\n"
         f"📌 وضعیت اجرا: {execution_status}\n"
-        f"⚡️ سیستم هوشمند هالکی\n━━━━━━━━━━━━━━━━━━━━"
+        f"⚡️ مدیریت سود: Trailing پله‌ای هوشمند\n\n"
+        f"🔗 Solscan: {safe_solscan}\n"
+        f"📈 DexScreener: https://dexscreener.com/solana/{token_addr}\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
     )
-    safe_solscan = solscan_link if str(solscan_link).startswith("https://solscan.io/") else f"https://solscan.io/token/{token_addr}"
-    buttons = [[InlineKeyboardButton("🔍 Solscan", url=safe_solscan), InlineKeyboardButton("📈 DexScreener", url=f"https://dexscreener.com/solana/{token_addr}")]]
+
+    buttons = [[
+        InlineKeyboardButton("🔍 Solscan", url=safe_solscan),
+        InlineKeyboardButton("📈 DexScreener", url=f"https://dexscreener.com/solana/{token_addr}")
+    ]]
     if WEBAPP_URL:
         buttons.append([InlineKeyboardButton("🤖 ورود به Mini App و کپی‌ترید", url=WEBAPP_URL)])
-    return send_telegram_msg(graphic_text, target_chat=CHANNEL_ID, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=None)
+    return send_telegram_msg(
+        graphic_text,
+        target_chat=CHANNEL_ID,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=None
+    )
 
 def register_subscription(telegram_id, wallet_addr, tx_sig, currency="USDC"):
     with db_lock:
@@ -1283,11 +1325,13 @@ def _signal_links(token_addr, tx_signature=""):
     dex = f"https://dexscreener.com/solana/{token_addr}"
     return solscan, dex
 
-def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx_signature=""):
+def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx_signature="", extra_text=""):
     symbol = pos.get("symbol", "TOKEN")
     entry = float(pos.get("entry_price", 0) or 0)
     tp = float(pos.get("tp", 0) or 0)
     sl = float(pos.get("sl", 0) or 0)
+    locked = float(pos.get("locked_floor", sl) or sl)
+    highest = float(pos.get("highest_pnl", pnl_percent) or pnl_percent)
     reason = pos.get("reason", "سیگنال متحد موتورها")
     solscan, dex = _signal_links(token_addr, tx_signature)
 
@@ -1296,9 +1340,9 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     elif outcome == "SELL_FAILED":
         title, status = "⚠️ سیگنال خروج / فروش ناموفق", "⚠️ فروش انجام نشد"
     elif outcome == "SIGNAL_TP":
-        title, status = "🎯 حد سود سیگنال فعال شد", "🟢 سیگنال به تارگت سود رسید"
+        title, status = "🎯 فروش سیگنال؛ حد سود متحرک فعال شد", "🟢 سیگنال سودده بسته شد"
     else:
-        title, status = "🛑 حد ضرر سیگنال فعال شد", "🔴 سیگنال به حد ضرر رسید"
+        title, status = "🛑 فروش سیگنال؛ حد ضرر فعال شد", "🔴 سیگنال به حد ضرر رسید"
 
     msg = (
         f"{title}\n\n"
@@ -1307,10 +1351,13 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
         f"💵 نقطه ورود: ${entry:.8f}\n"
         f"📉 قیمت فعلی/خروج: ${current_price:.8f}\n"
         f"📊 سود/زیان: {pnl_percent:+.2f}%\n"
-        f"🎯 تارگت سود: +{tp:.2f}%\n"
-        f"🛑 حد ضرر: {sl:.2f}%\n"
+        f"📈 بیشترین سود ثبت‌شده: {highest:+.2f}%\n"
+        f"🔒 حدضرر متحرک فعلی: {locked:+.2f}%\n"
+        f"🎯 تارگت اولیه: +{tp:.2f}%\n"
+        f"🛑 حدضرر اولیه: {sl:.2f}%\n"
         f"📌 وضعیت: {status}\n"
-        f"🤖 موتور: {reason}\n\n"
+        f"🤖 اتحاد موتورها: {reason}\n"
+        f"{extra_text}\n\n"
         f"🔗 Solscan: {solscan}\n"
         f"📈 DexScreener: {dex}"
     )
@@ -1319,6 +1366,53 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     if CHANNEL_ID:
         send_telegram_msg(msg, target_chat=CHANNEL_ID)
 
+def _adaptive_locked_floor(highest_pnl, current_floor):
+    """حدضرر پله‌ای؛ فقط رو به بالا حرکت می‌کند."""
+    floor = float(current_floor)
+    for high, lock in TRAILING_LOCK_TABLE:
+        if highest_pnl >= high:
+            floor = max(floor, lock)
+            break
+    return floor
+
+def _update_trailing_state(pos, current_price, pnl_percent, pair):
+    """به‌روزرسانی سقف قیمت، حدضرر متحرک و تشخیص ضعف بازار.
+    این تابع ادعای پیش‌بینی قطعی ریزش ندارد؛ از افت از سقف + مومنتوم/نسبت فروش به خرید استفاده می‌کند.
+    """
+    highest_pnl = max(float(pos.get("highest_pnl", pnl_percent)), pnl_percent)
+    highest_price = max(float(pos.get("highest_price", current_price) or current_price), current_price)
+    pos["highest_pnl"] = highest_pnl
+    pos["highest_price"] = highest_price
+
+    initial_sl = float(pos.get("sl", -8.0) or -8.0)
+    current_floor = float(pos.get("locked_floor", initial_sl) or initial_sl)
+    if DYNAMIC_TRAILING_TP_ENABLED:
+        current_floor = _adaptive_locked_floor(highest_pnl, current_floor)
+
+    txns = (pair.get("txns") or {}).get("m5") or {}
+    buys = int(txns.get("buys", 0) or 0)
+    sells = int(txns.get("sells", 0) or 0)
+    m5 = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+    drawdown_from_high = ((highest_price - current_price) / highest_price * 100.0) if highest_price > 0 else 0.0
+
+    weakness = False
+    if TRAILING_WEAKNESS_ENABLED and highest_pnl >= 20.0:
+        ratio_bad = sells >= max(2, int(buys * TRAILING_WEAK_SELL_RATIO))
+        momentum_bad = m5 <= TRAILING_WEAKNESS_M5_MAX
+        if ratio_bad and momentum_bad and drawdown_from_high >= TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT:
+            weakness = True
+            # در ضعف جدی بازار، حدضرر را تا نزدیک قیمت فعلی بالا می‌آوریم، اما هرگز پایین نمی‌بریم.
+            weakness_floor = pnl_percent - 0.5
+            current_floor = max(current_floor, weakness_floor)
+
+    pos["locked_floor"] = current_floor
+    pos["market_weakness"] = weakness
+    pos["drawdown_from_high"] = drawdown_from_high
+    pos["m5_change"] = m5
+    pos["buys_m5"] = buys
+    pos["sells_m5"] = sells
+    return current_floor, weakness
+
 def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_change,
                       reason, buy_amt, buy_status):
     with state_lock:
@@ -1326,7 +1420,8 @@ def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_ch
             "entry_price": price, "symbol": symbol, "tp": tp, "sl": sl,
             "volume": volume, "liquidity": liquidity, "p_change": p_change,
             "reason": reason, "buy_amt": buy_amt, "buy_status": buy_status,
-            "created_at": time.time(), "highest_pnl": 0.0
+            "created_at": time.time(), "highest_pnl": 0.0, "highest_price": price,
+            "locked_floor": sl, "trailing_active": True, "side": "BUY"
         }
 
 def evaluate_signal_only_positions():
@@ -1336,9 +1431,7 @@ def evaluate_signal_only_positions():
 
     for token_addr, pos in items:
         try:
-            res = http_session.get(
-                f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4
-            )
+            res = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4)
             if res.status_code != 200:
                 continue
             pairs = (res.json() or {}).get("pairs") or []
@@ -1351,15 +1444,28 @@ def evaluate_signal_only_positions():
             if current_price <= 0 or entry <= 0:
                 continue
             pnl = ((current_price - entry) / entry) * 100.0
-            pos["highest_pnl"] = max(float(pos.get("highest_pnl", pnl)), pnl)
-            tp = float(pos.get("tp", 0) or 0)
-            sl = float(pos.get("sl", 0) or 0)
+            locked_floor, weakness = _update_trailing_state(pos, current_price, pnl, pair)
 
-            if pnl >= tp:
-                send_signal_outcome(token_addr, pos, current_price, "SIGNAL_TP", pnl)
-                finished.append(token_addr)
-            elif pnl <= sl:
-                send_signal_outcome(token_addr, pos, current_price, "SIGNAL_SL", pnl)
+            # در سیگنال مجازی، TP اولیه فقط نقطه شروع قفل سود است؛ خروج با trailing انجام می‌شود.
+            should_close = False
+            outcome = "SIGNAL_TP"
+            if pnl <= float(pos.get("sl", -8.0)) and pos.get("highest_pnl", 0) < 10:
+                should_close = True
+                outcome = "SIGNAL_SL"
+            elif pnl <= locked_floor and pos.get("highest_pnl", 0) >= 10:
+                should_close = True
+                outcome = "SIGNAL_TP"
+            elif weakness and pnl <= locked_floor:
+                should_close = True
+                outcome = "SIGNAL_TP"
+
+            if should_close:
+                extra = (
+                    f"🧠 وضعیت بازار: {'ضعف/فشار فروش تأیید شد' if weakness else 'تریلینگ استاپ فعال شد'}\n"
+                    f"📉 افت از سقف: {pos.get('drawdown_from_high', 0):.2f}%\n"
+                    f"📊 معاملات ۵ دقیقه: خرید {pos.get('buys_m5', 0)} | فروش {pos.get('sells_m5', 0)}"
+                )
+                send_signal_outcome(token_addr, pos, current_price, outcome, pnl, extra_text=extra)
                 finished.append(token_addr)
         except Exception as e:
             logger.debug(f"Signal-only monitor error {token_addr}: {e}")
@@ -1373,10 +1479,12 @@ def evaluate_signal_only_positions():
 PARTIAL_TP_LEVELS = ((1.0, 0.30), (2.0, 0.30))
 
 def check_positions_loop():
+    """مدیریت پوزیشن واقعی با trailing پله‌ای، تشخیص ضعف بازار و خروج کامل."""
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
 
     while True:
         try:
+            # اول سیگنال‌هایی که خرید واقعی نشده‌اند را رصد کن.
             evaluate_signal_only_positions()
             tokens_to_close = []
             with state_lock:
@@ -1384,153 +1492,96 @@ def check_positions_loop():
 
             for token_addr, pos in current_positions:
                 try:
-                    pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
-                    if pair_res_obj.status_code != 200:
+                    res = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4)
+                    if res.status_code != 200:
                         continue
-                    pair_res = pair_res_obj.json()
-
-                    if not pair_res.get('pairs'):
+                    pairs = (res.json() or {}).get("pairs") or []
+                    pairs = [p for p in pairs if p.get("chainId") == "solana"]
+                    if not pairs:
                         continue
-                    pair = pair_res['pairs'][0]
-                    current_price = float(pair.get('priceUsd', 0))
-                    entry_price = pos['entry_price']
-                    symbol = pos['symbol']
-                    initial_tp = pos['tp'] 
-                    sl = pos['sl']         
-                    
-                    if entry_price > 0 and current_price > 0:
-                        pnl_percent = ((current_price - entry_price) / entry_price) * 100
+                    pair = max(pairs, key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
+                    current_price = float(pair.get("priceUsd", 0) or 0)
+                    entry_price = float(pos.get("entry_price", 0) or 0)
+                    symbol = pos.get("symbol", "TOKEN")
+                    sl = float(pos.get("sl", -8.0) or -8.0)
+                    if entry_price <= 0 or current_price <= 0:
+                        continue
 
-                        highest_pnl = pos.get('highest_pnl', pnl_percent)
-                        if pnl_percent > highest_pnl:
-                            pos['highest_pnl'] = pnl_percent
-                            highest_pnl = pnl_percent
+                    pnl_percent = ((current_price - entry_price) / entry_price) * 100.0
+                    locked_floor, weakness = _update_trailing_state(pos, current_price, pnl_percent, pair)
+                    highest_pnl = float(pos.get("highest_pnl", pnl_percent))
 
-                        if DYNAMIC_TRAILING_TP_ENABLED and pos.get('trailing_active', True):
-                            floor = pos.get('locked_floor', sl)
-                            if highest_pnl >= 120.0: floor = max(floor, 80.0)
-                            elif highest_pnl >= 80.0: floor = max(floor, 50.0)
-                            elif highest_pnl >= 40.0: floor = max(floor, 20.0)
-                            elif highest_pnl >= 20.0: floor = max(floor, 0.0)
-                            pos['locked_floor'] = floor
-
-                        if MOONBAG_HULK_ENABLED and highest_pnl >= 150.0 and not pos.get('moonbag_saved', False):
-                            pos['moonbag_saved'] = True
-                            token_balance = get_token_balance(token_addr)
-                            if token_balance > 0:
-                                partial_amt = int(token_balance * 0.8)
-                                execute_real_sell(token_addr, partial_amt)
-
-                                moon_msg = (
-                                    f"💪🔥 [موم‌بگ هالکی فعال شد!]\n"
-                                    f"🪙 توکن: {symbol}\n"
-                                    f"🎯 سود از مرز ۱۵۰٪ گذشت!\n"
-                                    f"💰 ۸۰٪ سرمایه و سود نقد شد و ۲۰٪ مابقی به عنوان «تکه‌سنگ مرگ‌بار (Moonbag)» رها شد تا سود نجومی بسازه."
-                                )
-                                send_telegram_msg(moon_msg)
-                                send_telegram_msg(moon_msg, target_chat=CHANNEL_ID)
-
-                        current_locked_floor = pos.get('locked_floor', sl)
-
-                        if highest_pnl >= 100.0:
-                            current_locked_floor = max(current_locked_floor, 50.0)  
-                        elif highest_pnl >= 50.0:
-                            current_locked_floor = max(current_locked_floor, initial_tp) 
-                        elif highest_pnl >= initial_tp:
-                            current_locked_floor = max(current_locked_floor, 0.0)
-
-                        pos['locked_floor'] = current_locked_floor
-
-                        # سیو سود پله‌ای فقط روی پوزیشن واقعی اجرا می‌شود.
-                        for level_mult, sell_fraction in PARTIAL_TP_LEVELS:
-                            stage_key = f"partial_tp_{level_mult:g}"
-                            target_pct = initial_tp * level_mult
-                            if highest_pnl >= target_pct and not pos.get(stage_key, False):
-                                token_balance = get_token_balance(token_addr)
-                                if token_balance > 0:
-                                    partial_amount = int(token_balance * sell_fraction)
-                                    if partial_amount > 0:
-                                        partial_ok, partial_tx = execute_real_sell(token_addr, partial_amount)
-                                        if partial_ok:
-                                            pos[stage_key] = True
-                                            partial_msg = (
-                                                f"🎯💰 سیو سود پله‌ای فعال شد\n\n"
-                                                f"🪙 توکن: {symbol}\n"
-                                                f"📈 سود لحظه‌ای: {highest_pnl:+.2f}%\n"
-                                                f"💸 فروش مرحله: {sell_fraction*100:.0f}%\n"
-                                                f"📌 وضعیت: 🟢 فروش موفق روی بلاکچین\n"
-                                                f"🔗 Solscan: https://solscan.io/tx/{partial_tx}\n"
-                                                f"📈 DexScreener: https://dexscreener.com/solana/{token_addr}"
-                                            )
-                                            send_telegram_msg(partial_msg)
-                                            _load_channel_config()
-                                            if CHANNEL_ID:
-                                                send_telegram_msg(partial_msg, target_chat=CHANNEL_ID)
-
-                        should_exit = False
+                    # اگر به سقف‌های بسیار بزرگ رسید، حدضرر نیز همراه آن بالا می‌رود.
+                    # نمونه: +1000% => حدود +950%؛ +500% => حدود +430%.
+                    should_exit = False
+                    if pnl_percent <= sl and highest_pnl < 10.0:
+                        should_exit = True
+                        exit_reason_text = "فروش خودکار حد ضرر اولیه (SL) فعال شد 🛑"
+                    elif pnl_percent <= locked_floor and highest_pnl >= 10.0:
+                        should_exit = True
+                        exit_reason_text = f"Trailing Stop پله‌ای فعال شد؛ سقف سود {highest_pnl:+.2f}% و حدضرر قفل‌شده {locked_floor:+.2f}% 🎯"
+                    else:
                         exit_reason_text = ""
 
-                        if DYNAMIC_TRAILING_TP_ENABLED and pnl_percent <= current_locked_floor and highest_pnl >= 20.0:
-                            should_exit = True
-                            exit_reason_text = f"تریلینگ استاپ پویا: سیو سود در سقف {current_locked_floor:.0f}% 🎯 🤑"
-                        elif pnl_percent <= current_locked_floor and highest_pnl >= initial_tp:
-                            should_exit = True
-                            exit_reason_text = f"سیو سود پله‌ای هوشمند روی سقف {current_locked_floor:.0f}% 🎯 🤑"
-                        elif pnl_percent <= sl:
-                            should_exit = True
-                            exit_reason_text = f"فروش خودکار حد ضرر (SL) فعال شد 🛑 🧐"
+                    if not should_exit:
+                        continue
 
-                        if should_exit:
-                            success = False
-                            sell_res_info = "خطای عدم موجودی"
-
-                            for attempt_sell in range(2):
-                                token_balance = get_token_balance(token_addr)
-                                if token_balance > 0:
-                                    success, sell_res_info = execute_real_sell(token_addr, token_balance)
-                                    if success:
-                                        break
-                                time.sleep(0.5)
-
-                            is_profit = pnl_percent >= 0
-                            sticker = "🤑" if is_profit else "🧐"
-                            reason = exit_reason_text if exit_reason_text else (f"حد سود (TP) فعال شد 🎯 {sticker}" if is_profit else f"حد ضرر (SL) فعال شد 🛑 {sticker}")
-
-                            pnl_usd_val = 0.75 * (pnl_percent / 100)
-                            sell_status = "🟢 فروش موفق روی بلاکچین" if success else f"⚠️ فروش انجام نشد: {sell_res_info}"
-                            # فقط بعد از فروش موفق، معامله را بسته و P/L را نهایی کن.
+                    success = False
+                    sell_res_info = "موجودی توکن برای فروش پیدا نشد"
+                    for _ in range(3):
+                        token_balance = get_token_balance(token_addr)
+                        if token_balance > 0:
+                            success, sell_res_info = execute_real_sell(token_addr, token_balance)
                             if success:
-                                closed_trades_history.append({
-                                    "symbol": symbol,
-                                    "percent": pnl_percent,
-                                    "usd": pnl_usd_val
-                                })
-                                total_realized_pnl_percent += pnl_percent
-                                total_realized_pnl_usd += pnl_usd_val
-                                log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
+                                break
+                        time.sleep(0.5)
 
-                            solscan_link = f"https://solscan.io/tx/{sell_res_info}" if success else "https://solscan.io"
-                            exit_msg = (
-                                f"🔴 {reason}\n\n"
-                                f"🪙 توکن: {symbol}\n"
-                                f"📌 وضعیت فروش: {sell_status}\n"
-                                f"📍 آدرس:\n{token_addr}\n\n"
-                                f"📉 قیمت خروج: ${current_price:.8f}\n"
-                                f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n\n"
-                                f"🔗 تراکنش Solscan:\n{solscan_link}"
-                            )
-                            send_telegram_msg(exit_msg)
-                            _load_channel_config()
-                            if CHANNEL_ID:
-                                send_telegram_msg(exit_msg, target_chat=CHANNEL_ID)
-                            if success:
-                                tokens_to_close.append(token_addr)
+                    is_profit = pnl_percent >= 0
+                    sticker = "🤑" if is_profit else "🧐"
+                    reason = exit_reason_text or (f"حد سود فعال شد 🎯 {sticker}" if is_profit else "حد ضرر فعال شد 🛑")
+                    sell_status = "🟢 فروش موفق روی بلاکچین" if success else f"⚠️ فروش انجام نشد: {sell_res_info}"
+
+                    # مقدار P/L برای داشبورد تقریبی و بر اساس سرمایه نمونه موجود در پوزیشن.
+                    invested_sol = float(pos.get("buy_amt", 0.01) or 0.01)
+                    pnl_usd_val = invested_sol * pnl_percent / 100.0
+
+                    if success:
+                        closed_trades_history.append({"symbol": symbol, "percent": pnl_percent, "usd": pnl_usd_val})
+                        total_realized_pnl_percent += pnl_percent
+                        total_realized_pnl_usd += pnl_usd_val
+                        log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
+
+                    tx_link = f"https://solscan.io/tx/{sell_res_info}" if success else f"https://solscan.io/token/{token_addr}"
+                    exit_msg = (
+                        f"🔴 {reason}\n\n"
+                        f"🪙 توکن: {symbol}\n"
+                        f"📌 وضعیت فروش: {sell_status}\n"
+                        f"📍 آدرس:\n{token_addr}\n\n"
+                        f"💵 قیمت ورود: ${entry_price:.8f}\n"
+                        f"📉 قیمت خروج: ${current_price:.8f}\n"
+                        f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n"
+                        f"📈 بیشترین سود: {highest_pnl:+.2f}%\n"
+                        f"🔒 حدضرر نهایی: {locked_floor:+.2f}%\n"
+                        f"🧠 ضعف بازار: {'تأیید شد' if weakness else 'خیر'}\n\n"
+                        f"🔗 Solscan: {tx_link}\n"
+                        f"📈 DexScreener: https://dexscreener.com/solana/{token_addr}"
+                    )
+                    send_telegram_msg(exit_msg)
+                    _load_channel_config()
+                    if CHANNEL_ID:
+                        send_telegram_msg(exit_msg, target_chat=CHANNEL_ID)
+
+                    # اگر فروش ناموفق بود پوزیشن را حذف نکن؛ در دور بعد دوباره تلاش می‌شود.
+                    if success:
+                        tokens_to_close.append(token_addr)
+
                 except Exception as inner_e:
                     logger.error(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
 
-            with state_lock:
-                for t_addr in tokens_to_close:
-                    active_positions.pop(t_addr, None)
+            if tokens_to_close:
+                with state_lock:
+                    for t_addr in tokens_to_close:
+                        active_positions.pop(t_addr, None)
         except Exception as e:
             logger.error(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(2)
@@ -1627,77 +1678,173 @@ CONSENSUS_COOLDOWN_SECONDS = 45
 consensus_last_signal = {}
 
 def build_consensus_signal(token_addr, pair):
+    """One decision from all enabled engines; individual engines do not emit separate signals."""
     try:
-        price=float(pair.get("priceUsd",0) or 0); liq=float((pair.get("liquidity") or {}).get("usd",0) or 0)
-        vol=float((pair.get("volume") or {}).get("m5",0) or 0); chg=float((pair.get("priceChange") or {}).get("m5",0) or 0)
-        txns=(pair.get("txns") or {}).get("m5",{}) or {}; buys=int(txns.get("buys",0) or 0); sells=int(txns.get("sells",0) or 0)
-        if price<=0 or liq<12000 or vol<3000: return None
-        votes=[]
-        if IS_RUNNING and chg>=3 and vol>=3000: votes.append("Fire")
-        if TREND_ALERT_RUNNING and chg>=5 and buys>=max(1,sells): votes.append("Trend")
-        if GOLDEN_OPTION and chg>=8 and vol>=7000 and liq>=18000: votes.append("Golden")
-        if COMBO_RUNNING and buys>sells and vol>=5000 and liq>=15000: votes.append("Combo/SmartMoney")
+        price = float(pair.get("priceUsd", 0) or 0)
+        liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+        vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
+        chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+        txns = (pair.get("txns") or {}).get("m5", {}) or {}
+        buys = int(txns.get("buys", 0) or 0)
+        sells = int(txns.get("sells", 0) or 0)
+        if price <= 0 or liq < 12000 or vol < 3000:
+            return None
+
+        votes = []
+        enabled = 0
+
+        # هر موتور فقط رأی می‌دهد؛ ارسال سیگنال فقط یک بار و توسط Fusion انجام می‌شود.
+        if IS_RUNNING:
+            enabled += 1
+            if chg >= 3 and vol >= 3000: votes.append("Fire")
+        if TREND_ALERT_RUNNING:
+            enabled += 1
+            if chg >= 5 and buys >= max(1, sells): votes.append("Trend")
+        if COMBO_RUNNING:
+            enabled += 1
+            if buys > sells and vol >= 5000 and liq >= 15000: votes.append("Combo")
+        if GOLDEN_OPTION:
+            enabled += 1
+            if chg >= 8 and vol >= 7000 and liq >= 18000: votes.append("Golden")
         if TECHNICAL_RUNNING:
+            enabled += 1
             try:
-                ok,_=check_major_support_resistance_pa(pair)
+                ok, _ = check_major_support_resistance_pa(pair)
                 if ok: votes.append("Technical")
             except Exception: pass
         if ULTIMATE_21_ENGINE_ENABLED:
+            enabled += 1
             try:
-                ok,*_=evaluate_ultimate_super_signal(token_addr,pair)
+                ok, *_ = evaluate_ultimate_super_signal(token_addr, pair)
                 if ok: votes.append("UltimateAI")
             except Exception: pass
-        score=len(votes); minimum=2 if (chg>=10 and vol>=10000 and buys>sells) else 3
-        if score<minimum: return None
-        now=time.time()
-        if now-consensus_last_signal.get(token_addr,0)<CONSENSUS_COOLDOWN_SECONDS: return None
-        consensus_last_signal[token_addr]=now
-        return {"score":score,"votes":votes,"price":price,"liq":liq,"vol":vol,"chg":chg,
-                "symbol":(pair.get("baseToken") or {}).get("symbol","TOKEN"),"tp":max(12,min(30,10+score*3)),"sl":-8.0}
-    except Exception as e:
-        logger.debug(f"Consensus error {token_addr}: {e}"); return None
+        if MEMPOOL_SMART_MONEY_ENABLED:
+            enabled += 1
+            if buys >= max(2, int(sells * 1.20) + 1) and vol >= 5000 and liq >= 15000:
+                votes.append("Mempool/SmartMoney")
+        if BOTTOM_WHALE_RUNNING:
+            enabled += 1
+            if buys >= max(3, sells + 2) and vol >= 5000:
+                votes.append("Whale")
+        if SOCIAL_SENTIMENT_ENABLED:
+            enabled += 1
+            try:
+                ok, _ = check_social_sentiment_and_hype(pair)
+                if ok: votes.append("Social/Hype")
+            except Exception: pass
+        if ANTI_WASH_TRADING_ENABLED:
+            enabled += 1
+            if not (sells > 0 and buys < sells * 0.8):
+                votes.append("Anti-Wash")
+        if SMART_FILTER_ENABLED:
+            enabled += 1
+            if is_token_worthy(pair): votes.append("SmartFilter")
 
-def send_fused_signal(token_addr,fusion):
-    amount=get_dynamic_buy_amount(0.01); reason=" + ".join(fusion["votes"])
-    dex_link=f"https://dexscreener.com/solana/{token_addr}"
-    msg=(f"⚡🧠 **ابرسیگنال متحد هالکی**\n\n🎯 اجماع موتورها: `{fusion['score']}`\n"
-         f"🤖 تأییدکننده‌ها: {reason}\n🪙 `{fusion['symbol']}`\n💵 قیمت ورود: `${fusion['price']:.8f}`\n"
-         f"📊 تغییر ۵ دقیقه: `{fusion['chg']:+.2f}%`\n💧 نقدینگی: `${fusion['liq']:,.0f}`\n"
-         f"📈 حجم ۵ دقیقه: `${fusion['vol']:,.0f}`\n🎯 TP: `+{fusion['tp']:.1f}%`\n🛑 SL: `{fusion['sl']:.1f}%`\n"
-         f"📈 [DexScreener]({dex_link})")
-    success,result=execute_real_buy(token_addr,amount)
+        # اجماع پویاست: حداقل 4 رأی و تقریباً نیمی از موتورهای فعال باید تأیید کنند.
+        minimum = max(4, (enabled + 1) // 2)
+        if chg >= 12 and vol >= 15000 and buys >= sells * 1.2:
+            minimum = max(4, minimum - 1)
+        if len(votes) < minimum:
+            return None
+
+        now = time.time()
+        if now - consensus_last_signal.get(token_addr, 0) < CONSENSUS_COOLDOWN_SECONDS:
+            return None
+        consensus_last_signal[token_addr] = now
+        score = len(votes)
+        tp = max(15.0, min(30.0, 12.0 + score * 2.0))
+        return {
+            "score": score, "votes": votes, "price": price, "liq": liq, "vol": vol, "chg": chg,
+            "buys": buys, "sells": sells,
+            "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
+            "tp": tp, "sl": -8.0
+        }
+    except Exception as e:
+        logger.debug(f"Consensus error {token_addr}: {e}")
+        return None
+
+def send_fused_signal(token_addr, fusion):
+    """Emit one unified signal after the enabled engines vote together.
+    A failed real buy is still published and tracked as a signal-only position.
+    """
+    amount = get_dynamic_buy_amount(0.01)
+    reason = " + ".join(fusion["votes"])
+    symbol = fusion["symbol"]
+    price = fusion["price"]
+    tp = fusion["tp"]
+    sl = fusion["sl"]
+    dex_link = f"https://dexscreener.com/solana/{token_addr}"
+    token_link = f"https://solscan.io/token/{token_addr}"
+
+    success, result = execute_real_buy(token_addr, amount)
     execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result}"
-    msg += f"\n\n📌 وضعیت خرید: {execution_status}"
+    solscan_link = f"https://solscan.io/tx/{result}" if success else token_link
+
+    msg = (
+        f"⚡🤖 **{UNIFIED_ENGINE_NAME}**\n"
+        f"🎯 اجماع موتورها: **{fusion['score']} تأیید**\n"
+        f"🤖 تأییدکننده‌ها: {reason}\n\n"
+        f"🪙 توکن: {symbol}\n"
+        f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+        f"💵 نقطه ورود دقیق: ${price:.8f}\n"
+        f"💰 مقدار خرید: SOL {amount:g}\n"
+        f"🎯 تارگت اولیه: +{tp:.1f}%\n"
+        f"🛑 حد ضرر اولیه: {sl:.1f}%\n\n"
+        f"📊 آمار لحظه‌ای بازار:\n"
+        f"🔹 تغییر ۵ دقیقه: {fusion['chg']:+.2f}%\n"
+        f"🔹 حجم ۵ دقیقه: ${fusion['vol']:,.0f}\n"
+        f"🔹 نقدینگی: ${fusion['liq']:,.0f}\n"
+        f"🔹 خرید/فروش ۵ دقیقه: {fusion.get('buys', 0)}/{fusion.get('sells', 0)}\n\n"
+        f"📌 وضعیت خرید: {execution_status}\n"
+        f"📈 مدیریت سود: تریلینگ پله‌ای هوشمند\n\n"
+        f"🔗 Solscan: {solscan_link}\n"
+        f"📈 DexScreener: {dex_link}"
+    )
     send_telegram_msg(msg)
-    send_graphic_signal_to_vip_channel(token_addr,fusion["symbol"],fusion["price"],fusion["tp"],fusion["sl"],amount,fusion["vol"],fusion["liq"],fusion["chg"],dex_link,"⚡🧠 ابرسیگنال متحد VIP",side="BUY",execution_status=execution_status,execution_tx=result if success else "")
+
+    send_graphic_signal_to_vip_channel(
+        token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
+        buy_amt=amount, volume=fusion['vol'], liquidity=fusion['liq'],
+        p_change=fusion['chg'], solscan_link=solscan_link,
+        signal_title=UNIFIED_ENGINE_NAME, side="BUY",
+        execution_status=execution_status, execution_tx=result if success else ""
+    )
+
     if success:
-        txlink=f"https://solscan.io/tx/{result}"
+        txlink = f"https://solscan.io/tx/{result}"
         with state_lock:
             processed_tokens.add(token_addr)
-            active_positions[token_addr]={
-                "entry_price":fusion["price"], "symbol":fusion["symbol"],
-                "tp":fusion["tp"], "sl":fusion["sl"],
-                "highest_price":fusion["price"], "highest_pnl":0.0,
-                "locked_floor":fusion["sl"], "trailing_active":DYNAMIC_TRAILING_TP_ENABLED,
-                "side":"BUY", "reason":reason
+            active_positions[token_addr] = {
+                "entry_price": price, "symbol": symbol,
+                "tp": tp, "sl": sl, "highest_price": price,
+                "highest_pnl": 0.0, "locked_floor": sl,
+                "trailing_active": DYNAMIC_TRAILING_TP_ENABLED,
+                "side": "BUY", "reason": reason, "buy_amt": amount
             }
-        send_telegram_msg(f"🟢 خرید خودکار انجام شد\n🪙 {fusion['symbol']}\n💰 {amount} SOL\n🔗 {txlink}")
+        # کپی‌ترید فقط بعد از خرید واقعی مرجع فعال می‌شود.
+        trigger_copy_trading_for_subscribers(token_addr, amount, side="BUY", tx_signature=result)
+        send_telegram_msg(
+            f"🟢 خرید خودکار انجام شد\n🪙 {symbol}\n💰 {amount:g} SOL\n🔗 {txlink}"
+        )
     else:
+        # حتی با سولانای ناکافی، سیگنال حذف نمی‌شود؛ از قیمت ورود تا خروج پایش می‌شود.
         track_signal_only(
-            token_addr, fusion["symbol"], fusion["price"], fusion["tp"], fusion["sl"],
-            fusion["vol"], fusion["liq"], fusion["chg"], reason, amount, execution_status
+            token_addr, symbol, price, tp, sl, fusion['vol'], fusion['liq'],
+            fusion['chg'], reason, amount, execution_status
         )
         send_telegram_msg(
             f"⚠️ سیگنال ثبت و رصد شد؛ خرید واقعی انجام نشد.\n"
-            f"🪙 {fusion['symbol']}\n📌 علت: {result}\n"
-            f"🎯 TP: +{fusion['tp']:.1f}% | 🛑 SL: {fusion['sl']:.1f}%\n"
-            f"📈 نتیجه سیگنال تا TP/SL پایش می‌شود."
+            f"🪙 {symbol}\n📍 آدرس: `{token_addr}`\n"
+            f"📌 علت: {result}\n"
+            f"🎯 TP: +{tp:.1f}% | 🛑 SL: {sl:.1f}%\n"
+            f"📈 نتیجه سیگنال تا تریلینگ/حدضرر پایش می‌شود.\n\n"
+            f"🔗 Solscan: {token_link}\n📈 DexScreener: {dex_link}"
         )
-    return success,result
+    return success, result
 
 def unified_market_scanner_loop(app):
-    logger.info("⚡🧠 Unified Fusion Radar فعال شد.")
-    send_telegram_msg("⚡🧠 رادار اتحاد موتورها فعال شد؛ DexScreener در حال رصد بازار است.")
+    logger.info(f"{UNIFIED_ENGINE_NAME} فعال شد؛ تمام موتورهای تحلیلی فقط از مسیر Fusion سیگنال می‌دهند.")
+    send_telegram_msg(f"{UNIFIED_ENGINE_NAME} فعال شد؛ DexScreener در حال رصد بازار است.")
     while True:
         if not SYNCHRONIZED_MODE:
             time.sleep(3); continue
@@ -2081,7 +2228,22 @@ def api_subscribe():
         return jsonify({"status": "error", "message": "خطا در ثبت اشتراک."}), 500
 
 def _engine_status_lines():
-    return (f"🔥 Fire: {'🟢' if IS_RUNNING else '🔴'}\n" f"📈 Trend: {'🟢' if TREND_ALERT_RUNNING else '🔴'}\n" f"🤝 Combo: {'🟢' if COMBO_RUNNING else '🔴'}\n" f"🏆 Golden: {'🟢' if GOLDEN_OPTION else '🔴'}\n" f"📊 Technical: {'🟢' if TECHNICAL_RUNNING else '🔴'}\n" f"🧠 Ultimate/AI: {'🟢' if ULTIMATE_21_ENGINE_ENABLED else '🔴'}\n" f"⚡ Mempool: {'🟢' if MEMPOOL_SMART_MONEY_ENABLED else '🔴'}\n" f"🐋 Whale: {'🟢' if BOTTOM_WHALE_RUNNING else '🔴'}\n" f"🛡 Anti-Wash: {'🟢' if ANTI_WASH_TRADING_ENABLED else '🔴'}\n" f"🤖 Copy: {'🟢' if COPY_TRADING_ENABLED else '🔴'}\n" f"⚡ اتحاد موتورها: {'🟢' if SYNCHRONIZED_MODE else '🔴'}")
+    components = [
+        ("Fire", IS_RUNNING), ("Trend", TREND_ALERT_RUNNING), ("Combo", COMBO_RUNNING),
+        ("Golden", GOLDEN_OPTION), ("Technical", TECHNICAL_RUNNING),
+        ("UltimateAI/21", ULTIMATE_21_ENGINE_ENABLED), ("Mempool/SmartMoney", MEMPOOL_SMART_MONEY_ENABLED),
+        ("Whale", BOTTOM_WHALE_RUNNING), ("Social/Hype", SOCIAL_SENTIMENT_ENABLED),
+        ("Anti-Wash", ANTI_WASH_TRADING_ENABLED), ("SmartFilter", SMART_FILTER_ENABLED),
+    ]
+    active = sum(1 for _, state in components if state)
+    detail = " | ".join(f"{name}:{'🟢' if state else '🔴'}" for name, state in components)
+    return (
+        f"🤖⚡ **{UNIFIED_ENGINE_NAME}**\n\n"
+        f"وضعیت: {'🟢 فعال' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
+        f"موتورهای تحلیلی فعال: `{active}/{len(components)}`\n\n"
+        f"{detail}\n\n"
+        f"🤖 کپی‌ترید: {'🟢' if COPY_TRADING_ENABLED else '🔴'}"
+    )
 
 def _admin_free_panel_text():
     rows = []
@@ -2115,7 +2277,12 @@ def _main_keyboard(is_admin=False):
     return InlineKeyboardMarkup(rows)
 
 def _control_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔥 Fire",callback_data="toggle_fire"),InlineKeyboardButton("📈 Trend",callback_data="toggle_trend")],[InlineKeyboardButton("🤝 Combo",callback_data="toggle_combo"),InlineKeyboardButton("🏆 Golden",callback_data="toggle_golden")],[InlineKeyboardButton("📊 Technical",callback_data="toggle_tech"),InlineKeyboardButton("⚡ Mempool",callback_data="toggle_mempool")],[InlineKeyboardButton("🐋 Whale",callback_data="toggle_whale"),InlineKeyboardButton("🤖 Copy",callback_data="toggle_copy")],[InlineKeyboardButton("🔙 بازگشت",callback_data="home")]])
+    unified_on = bool(SYNCHRONIZED_MODE)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🤖⚡ موتور متحد هالک AI: {'ON' if unified_on else 'OFF'}", callback_data="toggle_unified")],
+        [InlineKeyboardButton(f"🤖 کپی‌ترید: {'ON' if COPY_TRADING_ENABLED else 'OFF'}", callback_data="toggle_copy")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
+    ])
 
 def start_telegram_bot():
     try:
@@ -2124,7 +2291,7 @@ def start_telegram_bot():
         app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         async def start_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
-            text=(f"🎉 **خوش آمدید به هالکی VIP**\n\n🟢 اشتراک شما فعال است.\n⏳ پایان اشتراک: `{exp_date}`\n\n📱 از دکمه Mini App وارد شوید تا وضعیت فعال شما خودکار نمایش داده شود." if active else "🤖 **ربات هوشمند ترید هالکی**\n\n🔴 اشتراک VIP فعال نیست.\nبرای ثبت‌نام و فعال‌سازی، Mini App را باز کنید.")
+            text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🟢 موتور متحد بازار فعال است.\n📡 همه فیلترها و موتورهای سیگنال در یک اجماع واحد کار می‌کنند.\n📱 برای VIP و کپی‌ترید، Mini App را باز کنید." if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 موتور متحد بازار آماده رصد بازار است.\n📱 برای ثبت‌نام VIP و کپی‌ترید، Mini App را باز کنید.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             cid = str(update.effective_user.id)
@@ -2172,7 +2339,7 @@ def start_telegram_bot():
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
-            if data=="home": await q.edit_message_text("🤖 **مرکز کنترل هالکی VIP**\n\nاز دکمه‌های شیشه‌ای زیر انتخاب کنید.",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\nهمه موتورهای سیگنال در یک موتور متحد بازار با هم کار می‌کنند.",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data=="engines": await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n"+_engine_status_lines(),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت",callback_data="home")]]),parse_mode="Markdown")
             elif data=="controls": await q.edit_message_text("🎛 **کنترل سریع موتورها**\n\nهر موتور مستقل کنترل می‌شود.",reply_markup=_control_keyboard(),parse_mode="Markdown") if is_admin else await q.edit_message_text("⛔ این بخش فقط برای ادمین است.",reply_markup=_main_keyboard(False))
             elif data=="wallet":
@@ -2193,7 +2360,13 @@ def start_telegram_bot():
                     await q.edit_message_text(_admin_free_panel_text(), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]), parse_mode="Markdown")
             elif data.startswith("toggle_"):
                 if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.",reply_markup=_main_keyboard(False)); return
-                mapping={"toggle_fire":"IS_RUNNING","toggle_trend":"TREND_ALERT_RUNNING","toggle_combo":"COMBO_RUNNING","toggle_golden":"GOLDEN_OPTION","toggle_tech":"TECHNICAL_RUNNING","toggle_mempool":"MEMPOOL_SMART_MONEY_ENABLED","toggle_whale":"BOTTOM_WHALE_RUNNING","toggle_copy":"COPY_TRADING_ENABLED"}; name=mapping[data]; globals()[name]=not bool(globals()[name]); await q.edit_message_text("🎛 **کنترل موتورها**\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
+                mapping={"toggle_unified":"SYNCHRONIZED_MODE","toggle_copy":"COPY_TRADING_ENABLED"}; name=mapping.get(data);
+                if not name: return
+                globals()[name]=not bool(globals()[name]);
+                if name == "SYNCHRONIZED_MODE":
+                    # حالت متحد، همه موتورهای تحلیلی را برای رأی‌دهی نگه می‌دارد.
+                    pass
+                await q.edit_message_text("🎛 **کنترل موتورها**\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
         app.add_handler(CommandHandler("start",start_cmd))
         app.add_handler(CommandHandler("free",free_cmd))
         app.add_handler(CommandHandler("setvipchannel",setvipchannel_cmd))
@@ -2209,12 +2382,10 @@ if __name__ == "__main__":
 
     threads = [
         Thread(target=self_learning_ai_optimizer_loop, daemon=True, name="AILearning"),
-        Thread(target=ultra_accuracy_scanner_loop, args=(None,), daemon=True, name="UltraScanner"),
-        Thread(target=mempool_smart_money_scanner_loop, args=(None,), daemon=True, name="MempoolScanner"),
+        # فقط رادار متحد سیگنال می‌فرستد؛ موتورهای دیگر داخل آن رأی‌دهنده هستند و سیگنال جداگانه تولید نمی‌کنند.
         Thread(target=subscription_monitor_loop, daemon=True, name="SubMonitor"),
         Thread(target=check_positions_loop, daemon=True, name="PositionsCheck"),
-        Thread(target=technical_analysis_scanner_loop, args=(None,), daemon=True, name="TechScanner"),
-        Thread(target=unified_market_scanner_loop, args=(None,), daemon=True, name="UnifiedScanner"),
+        Thread(target=unified_market_scanner_loop, args=(None,), daemon=True, name="UnifiedHulkAI"),
     ]
     for t in threads:
         t.start()
