@@ -2540,6 +2540,29 @@ def _audit_signal_decision(reason):
         V12_REAL_AUDIT[key] += 1
 
 # ==========================================================
+# PRO_MAX_V12_REAL_SIGNAL_AUDIT
+# Persistent in-memory counters for the real live signal pipeline.
+# ==========================================================
+V12_REAL_AUDIT = {
+    "last_scan": 0.0,
+    "last_candidate": 0.0,
+    "last_signal": 0.0,
+    "scans": 0,
+    "tokens_seen": 0,
+    "pairs_seen": 0,
+    "fusion_candidates": 0,
+    "quality_rejected": 0,
+    "duplicate_rejected": 0,
+    "daily_cap_rejected": 0,
+    "cooldown_rejected": 0,
+    "circuit_rejected": 0,
+    "real_buy_success": 0,
+    "real_buy_failed": 0,
+    "channel_sent": 0,
+    "channel_failed": 0,
+}
+
+# ==========================================================
 # PRO_MAX_V10_VALIDATION
 # Real historical backtest + walk-forward validation +
 # A/B engine evaluation
@@ -3824,7 +3847,7 @@ def start_telegram_bot():
                 try:
                     st = await _tg_bg(learning_stats)
                 except Exception:
-                    st = {"trades": 0, "win_rate": 0.0, "net_pnl_pct_sum": 0.0, "loss_streak": 0}
+                    st = {"trades": 0, "win_rate": 0.0, "net_pnl_pct_sum": 0.0}
                 try:
                     ps = await _tg_bg(v7_paper_stats)
                 except Exception:
@@ -3833,36 +3856,39 @@ def start_telegram_bot():
                     bt = await _tg_bg(v7_backtest_from_learning_history)
                 except Exception:
                     bt = {"trades": 0, "win_rate": 0.0, "profit_factor": 0.0}
+
                 rg = v7_state.get("regime", {}) or {}
-
                 msg = (
-                    "📊 **PRO MAX Dashboard**\n\n"
-                    f"🧠 معاملات یادگیری: `{st.get('trades', 0)}`\n"
-                    f"✅ Win Rate: `{st.get('win_rate', 0):.1f}%`\n"
-                    f"💰 PnL ثبت‌شده: `{st.get('net_pnl_pct_sum', 0):.2f}%`\n\n"
-                    f"🧪 Paper Trading: `{ps.get('trades', 0)}` معامله\n"
-                    f"   └ Win Rate: `{ps.get('win_rate', 0):.1f}%`\n"
-                    f"   └ Profit Factor: `{ps.get('profit_factor', 0):.2f}`\n\n"
-                    f"🔬 Backtest Check: `{bt.get('trades', 0)}` معامله\n"
-                    f"   └ Win Rate: `{bt.get('win_rate', 0):.1f}%`\n"
-                    f"   └ Profit Factor: `{bt.get('profit_factor', 0):.2f}`\n\n"
-                    f"🌐 وضعیت بازار: `{rg.get('name', 'RANGE')}`\n"
-                    f"🎯 اطمینان: `{float(rg.get('confidence', 0))*100:.0f}%`\n"
-                    f"🛡️ ضریب ریسک: `{learning_risk_multiplier():.2f}x`\n"
-                    f"🧹 حافظه: پاک‌سازی/فشرده‌سازی خودکار فعال\n"
-                    f"   └ جزئیات قدیمی‌تر از {V7_MEMORY_MAX_AGE_DAYS} روز حذف/فشرده می‌شوند."
+                    "📈 **PRO MAX Dashboard**\n\n"
+                    "🧠 **یادگیری واقعی**\n"
+                    f"• معاملات: `{st.get('trades', 0)}`\n"
+                    f"• Win Rate: `{st.get('win_rate', 0):.1f}%`\n"
+                    f"• PnL ثبت‌شده: `{st.get('net_pnl_pct_sum', 0):+.2f}%`\n\n"
+                    "🧪 **Paper Trading**\n"
+                    f"• معاملات: `{ps.get('trades', 0)}`\n"
+                    f"• Win Rate: `{ps.get('win_rate', 0):.1f}%`\n"
+                    f"• Profit Factor: `{ps.get('profit_factor', 0):.2f}`\n\n"
+                    "🔬 **Backtest واقعی از تاریخچه**\n"
+                    f"• معاملات: `{bt.get('trades', 0)}`\n"
+                    f"• Win Rate: `{bt.get('win_rate', 0):.1f}%`\n"
+                    f"• Profit Factor: `{bt.get('profit_factor', 0):.2f}`\n\n"
+                    "🌐 **وضعیت بازار**\n"
+                    f"• رژیم: `{rg.get('name', 'RANGE')}`\n"
+                    f"• اطمینان: `{float(rg.get('confidence', 0))*100:.0f}%`\n"
+                    f"• ضریب ریسک: `{learning_risk_multiplier():.2f}x`\n\n"
+                    "🧹 **حافظه**\n"
+                    "• پاک‌سازی و فشرده‌سازی خودکار فعال است.\n"
+                    f"• داده‌های قدیمی‌تر از `{V7_MEMORY_MAX_AGE_DAYS}` روز حذف/فشرده می‌شوند."
                 )
-
                 await q.edit_message_text(
                     msg,
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="v7_dashboard")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                        [InlineKeyboardButton("🔙 بازگشت به مرکز تحلیل", callback_data="analytics_center")]
                     ])
                 )
                 return
-
 
             elif data == "v10_validation":
                 if not is_admin:
@@ -3876,52 +3902,48 @@ def start_telegram_bot():
                 wf = await _tg_bg(v10_walk_forward)
                 ab = await _tg_bg(v10_ab_engine_test)
 
-                top = sorted(
-                    ab.items(),
-                    key=lambda kv: (kv[1].get("win_rate", 0), kv[1].get("net_pnl_pct", 0)),
-                    reverse=True
-                )[:5]
-
                 lines = [
-                    "🧪 **V10 Validation Lab**",
+                    "🧪 **V10 — آزمایشگاه اعتبارسنجی**",
                     "",
-                    f"🔬 Backtest: `{bt.get('sample',0)}` معامله",
-                    f"   └ WR: `{bt.get('win_rate',0):.1f}%` | PF: `{bt.get('profit_factor',0):.2f}`",
-                    f"   └ Net PnL: `{bt.get('net_pnl_pct',0):.2f}%`",
+                    "🔬 **Backtest واقعی**",
+                    f"• معاملات بسته: `{bt.get('sample', 0)}`",
+                    f"• Win Rate: `{bt.get('win_rate', 0):.1f}%`",
+                    f"• Profit Factor: `{bt.get('profit_factor', 0):.2f}`",
+                    f"• Net PnL: `{bt.get('net_pnl_pct', 0):+.2f}%`",
                     "",
+                    "🚶 **Walk-Forward / Out-of-Sample**",
                 ]
 
                 if wf.get("ready"):
                     lines += [
-                        "🚶 **Walk-Forward / Out-of-Sample**",
-                        f"   └ Train: `{wf.get('train_sample',0)}`",
-                        f"   └ Test: `{wf.get('test_sample',0)}`",
-                        f"   └ OOS WR: `{wf.get('out_of_sample_win_rate',0):.1f}%`",
-                        f"   └ OOS PF: `{wf.get('out_of_sample_profit_factor',0):.2f}`",
-                        f"   └ OOS Net: `{wf.get('out_of_sample_net_pnl_pct',0):.2f}%`",
-                        "",
+                        f"• Train: `{wf.get('train_sample', 0)}`",
+                        f"• Test: `{wf.get('test_sample', 0)}`",
+                        f"• OOS Win Rate: `{wf.get('out_of_sample_win_rate', 0):.1f}%`",
+                        f"• OOS Profit Factor: `{wf.get('out_of_sample_profit_factor', 0):.2f}`",
+                        f"• OOS Net PnL: `{wf.get('out_of_sample_net_pnl_pct', 0):+.2f}%`",
                     ]
                 else:
-                    lines += [
-                        "🚶 **Walk-Forward**",
-                        f"   └ ⏳ `{wf.get('reason','داده کافی نیست')}`",
-                        "",
-                    ]
+                    lines.append(f"• ⏳ `{wf.get('reason', 'داده کافی نیست')}`")
 
-                lines.append("⚖️ **A/B موتورهای واقعی ثبت‌شده**")
-                if top:
-                    for name, s in top:
+                lines += ["", "⚖️ **A/B موتورهای واقعی ثبت‌شده**"]
+                if ab:
+                    for name, s in sorted(
+                        ab.items(),
+                        key=lambda kv: kv[1].get("trades", 0),
+                        reverse=True
+                    )[:8]:
                         lines.append(
-                            f"• {name}: `{s.get('trades',0)}` معامله | "
-                            f"WR `{s.get('win_rate',0):.1f}%` | "
-                            f"PnL `{s.get('net_pnl_pct',0):.2f}%`"
+                            f"• `{name}` — معاملات: `{s.get('trades',0)}` | "
+                            f"WR: `{s.get('win_rate',0):.1f}%` | "
+                            f"PnL: `{s.get('net_pnl_pct',0):+.2f}%`"
                         )
                 else:
-                    lines.append("• هنوز داده کافی برای مقایسه وجود ندارد.")
+                    lines.append("• ⏳ هنوز داده واقعی کافی برای مقایسه وجود ندارد.")
 
                 lines += [
                     "",
-                    "ℹ️ این بخش فقط ارزیابی آماری است و برای بالا بردن مصنوعی Win Rate معامله‌ای را دستکاری نمی‌کند."
+                    "ℹ️ این بخش فقط داده‌های واقعی ثبت‌شده را اعتبارسنجی می‌کند؛ "
+                    "Win Rate مصنوعی تولید نمی‌کند."
                 ]
 
                 await q.edit_message_text(
@@ -3929,44 +3951,97 @@ def start_telegram_bot():
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 اجرای مجدد", callback_data="v10_validation")],
-                        [InlineKeyboardButton("📊 داشبورد PRO MAX", callback_data="v7_dashboard")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                        [InlineKeyboardButton("🔙 بازگشت به مرکز تحلیل", callback_data="analytics_center")]
                     ])
                 )
                 return
 
             elif data == "v11_data":
                 if not is_admin:
-                    await q.edit_message_text("⛔ این بخش فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    await q.edit_message_text(
+                        "⛔ این بخش فقط برای ادمین است.",
+                        reply_markup=_main_keyboard(False)
+                    )
                     return
-                report=v11_data_report()
-                if time.time()-float(v11_state.get("last_tuning",0) or 0)>=V11_TUNING_INTERVAL:
-                    v11_tune_weights(); report=v11_data_report()
-                lines=["🧠 **V11 — سیستم داده‌محور**","","📈 **چک‌پوینت‌های واقعی**"]
+
+                report = v11_data_report()
+                if time.time() - float(v11_state.get("last_tuning", 0) or 0) >= V11_TUNING_INTERVAL:
+                    v11_tune_weights()
+                    report = v11_data_report()
+
+                lines = [
+                    "🧠 **V11 — تحلیل داده‌محور**",
+                    "",
+                    "📈 **چک‌پوینت‌های واقعی**",
+                ]
                 for n in V11_CHECKPOINTS:
-                    s=report.get("checkpoints",{}).get(str(n))
-                    lines.append(f"• {n}: WR `{s['win_rate']:.1f}%` | PF `{s['profit_factor']:.2f}` | PnL `{s['net_pnl_pct']:.2f}%`" if s else f"• {n}: ⏳ داده کافی نیست")
-                lines += ["","⚙️ **عملکرد موتورهای کافی‌داده**"]
-                engines=sorted(report.get("engines",{}).items(),key=lambda x:(x[1].get("win_rate",0),x[1].get("net_pnl_pct",0)),reverse=True)
+                    s = report.get("checkpoints", {}).get(str(n))
+                    if s:
+                        lines.append(
+                            f"• `{n}` معامله — WR: `{s['win_rate']:.1f}%` | "
+                            f"PF: `{s['profit_factor']:.2f}` | "
+                            f"PnL: `{s['net_pnl_pct']:+.2f}%`"
+                        )
+                    else:
+                        lines.append(f"• `{n}` معامله — ⏳ داده کافی نیست")
+
+                lines += ["", "⚙️ **عملکرد موتورهای دارای داده کافی**"]
+                engines = report.get("engines", {})
                 if engines:
-                    for name,s in engines[:8]:
-                        w=learning_state.get("engines",{}).get(name,{}).get("weight",1.0)
-                        lines.append(f"• {name}: `{s['trades']}` | WR `{s['win_rate']:.1f}%` | PnL `{s['net_pnl_pct']:.2f}%` | وزن `{w:.2f}`")
-                else: lines.append("• هنوز داده کافی نیست.")
-                lines += ["","🌐 **عملکرد بر اساس رژیم بازار**"]
-                regimes=report.get("regimes",{})
+                    for name, s in sorted(
+                        engines.items(),
+                        key=lambda x: x[1].get("trades", 0),
+                        reverse=True
+                    )[:8]:
+                        w = learning_state.get("engines", {}).get(name, {}).get("weight", 1.0)
+                        lines.append(
+                            f"• `{name}` — `{s['trades']}` معامله | "
+                            f"WR `{s['win_rate']:.1f}%` | "
+                            f"PnL `{s['net_pnl_pct']:+.2f}%` | وزن `{w:.2f}`"
+                        )
+                else:
+                    lines.append("• ⏳ هنوز داده کافی نیست.")
+
+                lines += ["", "🌐 **عملکرد بر اساس رژیم بازار**"]
+                regimes = report.get("regimes", {})
                 if regimes:
-                    for name,s in sorted(regimes.items(),key=lambda x:x[1].get("trades",0),reverse=True):
-                        lines.append(f"• {name}: `{s['trades']}` | WR `{s['win_rate']:.1f}%` | PnL `{s['net_pnl_pct']:.2f}%`")
-                else: lines.append("• هنوز داده رژیم کافی نیست.")
-                lines += ["",f"🔧 تغییر وزن‌های این دوره: `{len(v11_state.get('last_changes',[]))}`","⚠️ تنظیمات فقط با داده کافی و تغییرات محدود انجام می‌شود؛ هدف، یادگیری است نه ساختن Win Rate مصنوعی."]
-                await q.edit_message_text("\n".join(lines),parse_mode="Markdown",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحلیل مجدد",callback_data="v11_data")],[InlineKeyboardButton("🧪 V10 Validation",callback_data="v10_validation")],[InlineKeyboardButton("🔙 بازگشت",callback_data="controls")]]))
+                    for name, s in sorted(
+                        regimes.items(),
+                        key=lambda x: x[1].get("trades", 0),
+                        reverse=True
+                    ):
+                        lines.append(
+                            f"• `{name}` — `{s['trades']}` معامله | "
+                            f"WR `{s['win_rate']:.1f}%` | "
+                            f"PnL `{s['net_pnl_pct']:+.2f}%`"
+                        )
+                else:
+                    lines.append("• ⏳ هنوز داده رژیم کافی نیست.")
+
+                lines += [
+                    "",
+                    f"🔧 تغییر وزن این دوره: `{len(v11_state.get('last_changes', []))}`",
+                    "ℹ️ وزن‌ها فقط با داده کافی و تغییرات محدود تنظیم می‌شوند."
+                ]
+
+                await q.edit_message_text(
+                    "\n".join(lines),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تحلیل مجدد", callback_data="v11_data")],
+                        [InlineKeyboardButton("🔙 بازگشت به مرکز تحلیل", callback_data="analytics_center")]
+                    ])
+                )
                 return
 
             elif data == "v12_real_audit":
                 if not is_admin:
-                    await q.edit_message_text("⛔ این بخش فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    await q.edit_message_text(
+                        "⛔ این بخش فقط برای ادمین است.",
+                        reply_markup=_main_keyboard(False)
+                    )
                     return
+
                 h = V12_REAL_AUDIT
                 now = time.time()
 
@@ -3981,37 +4056,41 @@ def start_telegram_bot():
                     return f"{sec//3600} ساعت"
 
                 msg = (
-                    "🩺 **REAL SIGNAL AUDIT — V12**\n\n"
-                    f"🔄 آخرین اسکن: `{ago(h['last_scan'])} پیش`\n"
-                    f"🔎 آخرین کاندیدای Fusion: `{ago(h['last_candidate'])} پیش`\n"
-                    f"📡 آخرین سیگنال صادرشده: `{ago(h['last_signal'])} پیش`\n\n"
-                    f"🔄 تعداد چرخه اسکن: `{h['scans']}`\n"
-                    f"🪙 توکن‌های دیده‌شده: `{h['tokens_seen']}`\n"
-                    f"📊 Pairهای واقعی بررسی‌شده: `{h['pairs_seen']}`\n"
-                    f"🎯 کاندیداهای Fusion: `{h['fusion_candidates']}`\n\n"
-                    f"🚫 کیفیت: `{h['quality_rejected']}`\n"
-                    f"🚫 تکراری: `{h['duplicate_rejected']}`\n"
-                    f"🚫 سقف روزانه: `{h['daily_cap_rejected']}`\n"
-                    f"🚫 Cooldown: `{h['cooldown_rejected']}`\n"
-                    f"🚫 Circuit Breaker: `{h['circuit_rejected']}`\n\n"
-                    f"⛓️ خرید واقعی موفق: `{h['real_buy_success']}`\n"
-                    f"⛓️ خرید واقعی ناموفق: `{h['real_buy_failed']}`\n"
-                    f"📢 ارسال واقعی کانال: `{h['channel_sent']}`\n"
-                    f"⚠️ شکست ارسال کانال: `{h['channel_failed']}`\n\n"
-                    f"📈 سقف امروز: `{daily_signal_status_text()}`\n"
-                    f"🛑 Emergency Stop: `{EMERGENCY_STOP}`\n"
-                    f"👑 MAX Fusion: `{MAX_FUSION_ENABLED}`\n"
-                    f"🤝 اتحاد: `{SYNCHRONIZED_MODE}`\n\n"
-                    "این پنل فقط آمار واقعی Pipeline را می‌خواند؛ "
-                    "هیچ سیگنال، معامله یا Win Rate ساختگی تولید نمی‌کند."
+                    "🩺 **V12 — عیب‌یابی واقعی سیگنال**\n\n"
+                    "🔄 **Pipeline**\n"
+                    f"• آخرین اسکن: `{ago(h.get('last_scan', 0))}` پیش\n"
+                    f"• آخرین کاندیدا: `{ago(h.get('last_candidate', 0))}` پیش\n"
+                    f"• آخرین سیگنال: `{ago(h.get('last_signal', 0))}` پیش\n"
+                    f"• چرخه‌های اسکن: `{h.get('scans', 0)}`\n"
+                    f"• توکن‌ها: `{h.get('tokens_seen', 0)}`\n"
+                    f"• Pairهای واقعی: `{h.get('pairs_seen', 0)}`\n"
+                    f"• کاندیداهای Fusion: `{h.get('fusion_candidates', 0)}`\n\n"
+                    "🚫 **دلایل رد شدن**\n"
+                    f"• کیفیت: `{h.get('quality_rejected', 0)}`\n"
+                    f"• تکراری: `{h.get('duplicate_rejected', 0)}`\n"
+                    f"• سقف روزانه: `{h.get('daily_cap_rejected', 0)}`\n"
+                    f"• Cooldown: `{h.get('cooldown_rejected', 0)}`\n"
+                    f"• Circuit Breaker: `{h.get('circuit_rejected', 0)}`\n\n"
+                    "⛓️ **اجرای واقعی**\n"
+                    f"• خرید موفق: `{h.get('real_buy_success', 0)}`\n"
+                    f"• خرید ناموفق: `{h.get('real_buy_failed', 0)}`\n"
+                    f"• ارسال کانال موفق: `{h.get('channel_sent', 0)}`\n"
+                    f"• ارسال کانال ناموفق: `{h.get('channel_failed', 0)}`\n\n"
+                    "⚙️ **وضعیت فعلی**\n"
+                    f"• سقف امروز: `{daily_signal_status_text()}`\n"
+                    f"• Emergency Stop: `{EMERGENCY_STOP}`\n"
+                    f"• MAX Fusion: `{MAX_FUSION_ENABLED}`\n"
+                    f"• اتحاد: `{SYNCHRONIZED_MODE}`\n\n"
+                    "ℹ️ این صفحه فقط Pipeline واقعی را گزارش می‌کند؛ "
+                    "هیچ سیگنال یا Win Rate ساختگی تولید نمی‌کند."
                 )
+
                 await q.edit_message_text(
                     msg,
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="v12_real_audit")],
-                        [InlineKeyboardButton("🧠 V11", callback_data="v11_data")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                        [InlineKeyboardButton("🔙 بازگشت به مرکز تحلیل", callback_data="analytics_center")]
                     ])
                 )
                 return
@@ -4024,16 +4103,16 @@ def start_telegram_bot():
                     )
                     return
                 await q.edit_message_text(
-                    "📊 **مرکز آمار، تحلیل و عیب‌یابی**\n\n"
-                    "همه ابزارهای تحلیلی در این بخش قرار دارند و از مدیریت موتورهای مستقل جدا هستند.",
+                    "📊 **مرکز آمار و تحلیل سیستم**\n\n"
+                    "ابزارهای تحلیل، اعتبارسنجی و عیب‌یابی در این بخش جدا از کنترل موتورها قرار دارند.",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="engine_stats")],
                         [InlineKeyboardButton("📈 داشبورد PRO MAX", callback_data="v7_dashboard")],
-                        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
+                        [InlineKeyboardButton("🧪 آزمایشگاه اعتبارسنجی V10", callback_data="v10_validation")],
                         [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
-                        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
-                        [InlineKeyboardButton("🔙 بازگشت به پنل کنترل", callback_data="controls")]
+                        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال V12", callback_data="v12_real_audit")],
+                        [InlineKeyboardButton("🔙 بازگشت به پنل اصلی", callback_data="home")]
                     ])
                 )
                 return
@@ -4044,7 +4123,7 @@ def start_telegram_bot():
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="engine_stats")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                        [InlineKeyboardButton("🔙 بازگشت به مرکز تحلیل", callback_data="analytics_center")]
                     ])
                 )
                 return
