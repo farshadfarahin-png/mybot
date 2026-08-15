@@ -270,6 +270,65 @@ def init_db():
 
 init_db()
 
+def _update_adaptive_learning(conn=None):
+    """Learn only from CLOSED real/recorded trades. No fabricated outcomes."""
+    own = conn is None
+    if own:
+        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT pnl_percent, entry_reason FROM trades ORDER BY id DESC LIMIT ?", (ADAPTIVE_LOOKBACK,))
+        rows = cur.fetchall()
+        if not rows:
+            return {"sample": 0, "win_rate": 0.0, "score_bonus": 0, "ratio_bonus": 0.0}
+        wins = sum(1 for pnl, _ in rows if float(pnl or 0) > 0)
+        wr = wins / len(rows) * 100.0
+        # Adaptive gate: 80% is a target, never a fake guarantee.
+        bonus = 0
+        ratio_bonus = 0.0
+        if len(rows) >= ADAPTIVE_MIN_SAMPLE:
+            if wr < 60:
+                bonus, ratio_bonus = 2, 0.10
+            elif wr < 70:
+                bonus, ratio_bonus = 1, 0.05
+            elif wr < ADAPTIVE_TARGET_WIN_RATE:
+                bonus, ratio_bonus = 1, 0.02
+            elif wr >= 90:
+                bonus, ratio_bonus = 0, 0.0
+        cur.execute("INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_win_rate',?)", (wr,))
+        cur.execute("INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_score_bonus',?)", (bonus,))
+        cur.execute("INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_ratio_bonus',?)", (ratio_bonus,))
+
+        # Learn per-engine reliability from the actual engines recorded in entry_reason.
+        engines = ["Fire","Trend","Combo","Golden","Technical","UltimateAI","Mempool/SmartMoney","Whale","Social/Hype","Anti-Wash","SmartFilter"]
+        for eng in engines:
+            tagged = [float(pnl or 0) for pnl, reason in rows if eng in (reason or "")]
+            if tagged:
+                ewr = sum(1 for x in tagged if x > 0) / len(tagged) * 100.0
+                cur.execute("INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES(?,?)", (f"engine_wr:{eng}", ewr))
+        conn.commit()
+        return {"sample": len(rows), "win_rate": wr, "score_bonus": bonus, "ratio_bonus": ratio_bonus}
+    finally:
+        if own:
+            conn.close()
+
+def get_adaptive_consensus_settings(enabled_count):
+    """Return live thresholds learned from recent closed trades."""
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            state = _update_adaptive_learning(conn)
+            cur = conn.cursor()
+            cur.execute("SELECT param_name,param_value FROM ai_learning_params WHERE param_name LIKE 'engine_wr:%'")
+            engine_wr = {r[0].split(':',1)[1]: float(r[1]) for r in cur.fetchall()}
+            conn.close()
+        score_min = max(CONSENSUS_MIN_SCORE, min(enabled_count, CONSENSUS_MIN_SCORE + int(state.get("score_bonus",0))))
+        ratio = min(0.90, CONSENSUS_MIN_RATIO + float(state.get("ratio_bonus",0)))
+        return score_min, ratio, engine_wr, state
+    except Exception as e:
+        logger.debug(f"Adaptive learning read error: {e}")
+        return CONSENSUS_MIN_SCORE, CONSENSUS_MIN_RATIO, {}, {"sample":0,"win_rate":0.0}
+
 def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason):
     with db_lock:
         try:
@@ -279,6 +338,8 @@ def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason)
                 INSERT INTO trades (token_address, symbol, entry_price, exit_price, pnl_percent, pnl_usd, entry_reason, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+            _update_adaptive_learning(conn)
             conn.commit()
             conn.close()
         except Exception as e:
@@ -322,31 +383,20 @@ def get_advanced_trade_analytics():
             return {"total_trades": 0, "total_pct": 0.0, "total_usd": 0.0, "avg_pct": 0.0, "win_rate": 0.0, "win_count": 0, "best_trade": None, "worst_trade": None}
 
 def self_learning_ai_optimizer_loop():
-    global FIRE_MIN_LIQUIDITY, COMBO_MIN_LIQUIDITY, GOLDEN_MIN_LIQUIDITY
-    logger.info("🧠 موتور هوش مصنوعی یادگیرنده (Self-Learning AI) فعال شد.")
+    """Continuous closed-trade learning. It never invents results and never changes security secrets."""
+    logger.info("🧠 موتور یادگیری تطبیقی MAX FUSION فعال شد.")
     while True:
         if SELF_LEARNING_AI_ENABLED:
-            with db_lock:
-                try:
+            try:
+                with db_lock:
                     conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT AVG(pnl_percent), COUNT(*) FROM trades")
-                    row = cursor.fetchone()
-                    if row and row[1] and row[1] >= 5:
-                        avg_pnl = row[0] or 0.0
-                        total_t = row[1]
-                        logger.info(f"🧠 [AI Learning]: آنالیز {total_t} معامله گذشته. میانگین سود: {avg_pnl:.2f}%")
-                        if avg_pnl < 2.0:
-                            FIRE_MIN_LIQUIDITY += 500
-                            GOLDEN_MIN_LIQUIDITY += 1000
-                            logger.info("🧠 [AI Adjustment]: فیلتر نقدینگی بهینه‌تر شد.")
-                        elif avg_pnl > 10.0:
-                            FIRE_MIN_LIQUIDITY = max(15000, FIRE_MIN_LIQUIDITY - 500)
-                            logger.info("🧠 [AI Adjustment]: الگوریتم در حالت بهینه حداکثری قرار گرفت.")
+                    state = _update_adaptive_learning(conn)
                     conn.close()
-                except Exception as e:
-                    logger.error(f"⚠️ خطای موتور هوش مصنوعی یادگیرنده: {e}")
-        time.sleep(300)
+                if state.get("sample", 0) >= ADAPTIVE_MIN_SAMPLE:
+                    logger.info(f"🧠 Adaptive Learning: {state['sample']} معاملات اخیر | Win Rate={state['win_rate']:.1f}% | score_bonus={state['score_bonus']}")
+            except Exception as e:
+                logger.error(f"⚠️ خطای موتور یادگیری تطبیقی: {e}")
+        time.sleep(180)
 
 def check_social_sentiment_and_hype(pair):
     if not SOCIAL_SENTIMENT_ENABLED:
@@ -1755,14 +1805,20 @@ def advanced_filter_enabled():
 
 # حالت شکار سخت‌گیر: سیگنال کمتر، کیفیت فیلتر بالاتر.
 # این اعداد «تلاش برای win-rate بالا» هستند و تضمین ۹۰٪ سود نیستند.
-CONSENSUS_MIN_SCORE = 9
-CONSENSUS_MIN_RATIO = 0.82
-CONSENSUS_COOLDOWN_SECONDS = 180
-CONSENSUS_MIN_LIQUIDITY = 30000.0
-CONSENSUS_MIN_VOLUME_5M = 15000.0
-CONSENSUS_MIN_CHANGE_5M = 6.0
-CONSENSUS_MAX_CHANGE_5M = 25.0
-CONSENSUS_MIN_BUY_RATIO = 1.40
+# MAX FUSION adaptive thresholds: quality-first without starving the scanner.
+CONSENSUS_MIN_SCORE = 6
+CONSENSUS_MIN_RATIO = 0.70
+CONSENSUS_COOLDOWN_SECONDS = 120
+CONSENSUS_MIN_LIQUIDITY = 15000.0
+CONSENSUS_MIN_VOLUME_5M = 5000.0
+CONSENSUS_MIN_CHANGE_5M = 2.0
+CONSENSUS_MAX_CHANGE_5M = 35.0
+CONSENSUS_MIN_BUY_RATIO = 1.15
+ADAPTIVE_TARGET_WIN_RATE = 80.0
+ADAPTIVE_LOOKBACK = 20
+ADAPTIVE_MIN_SAMPLE = 10
+ADAPTIVE_MAX_SCORE_BONUS = 2
+ADAPTIVE_MAX_RATIO_BONUS = 0.10
 consensus_last_signal = {}
 
 
@@ -1784,13 +1840,13 @@ def build_consensus_signal(token_addr, pair):
         if buys <= 0 or sells > 0 and buys < max(1, sells * CONSENSUS_MIN_BUY_RATIO):
             return None
 
-        # سیستم پیشرفته/Max Fusion: فقط فرصت‌های با کیفیت بسیار بالاتر وارد مرحله رأی‌گیری می‌شوند.
+        # Advanced/Max keeps safety filters, but lets the learning layer decide how much consensus is enough.
         if advanced_filter_enabled():
-            if liq < 50000.0 or vol < 25000.0:
+            if liq < 15000.0 or vol < 5000.0:
                 return None
-            if chg < 8.0 or chg > 20.0:
+            if chg < 2.0 or chg > 35.0:
                 return None
-            if sells > 0 and buys < sells * 1.70:
+            if sells > 0 and buys < sells * 1.15:
                 return None
 
         votes = []
@@ -1843,11 +1899,17 @@ def build_consensus_signal(token_addr, pair):
             enabled += 1
             if is_token_worthy(pair): votes.append("SmartFilter")
 
-        # اجماع بسیار سخت‌گیرانه؛ Max Fusion سخت‌ترین آستانه را دارد.
+        # Adaptive consensus: learn from closed trades while preventing signal spam.
+        minimum_base, ratio_base, engine_wr, learning = get_adaptive_consensus_settings(enabled)
+        minimum = max(minimum_base, int(enabled * ratio_base + 0.9999))
         if advanced_filter_enabled():
-            minimum = max(10, int(enabled * 0.90 + 0.9999))
-        else:
-            minimum = max(CONSENSUS_MIN_SCORE, int(enabled * CONSENSUS_MIN_RATIO + 0.9999))
+            minimum = max(minimum_base, int(enabled * max(0.70, ratio_base) + 0.9999))
+        # Reward engines that have actually produced profitable closed trades, without letting one engine dominate.
+        weights = {e: max(0.75, min(1.25, (engine_wr.get(e, 80.0) / 80.0))) for e in ["Fire","Trend","Combo","Golden","Technical","UltimateAI","Mempool/SmartMoney","Whale","Social/Hype","Anti-Wash","SmartFilter"]}
+        weighted_score = sum(weights.get(v, 1.0) for v in votes)
+        required_weight = minimum * 0.95
+        if len(votes) < minimum and weighted_score < required_weight:
+            return None
         if len(votes) < minimum:
             return None
 
