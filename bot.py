@@ -925,7 +925,7 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         result_line = f"📊 سود/ضرر نهایی: {pnl_icon} {pnl:+.2f}%"
         price_label = "🔴 نقطه فروش"
     else:
-        result_line = "🎯 وضعیت: سیگنال خرید"
+        result_line = "📌 وضعیت: سیگنال خرید"
         price_label = "🎯 نقطه ورود"
 
     graphic_text = (
@@ -942,17 +942,27 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         f"📈 تغییر ۵ دقیقه: {p_change:+.2f}%\n"
         f"🎯 TP: +{tp:.1f}%\n"
         f"🛑 SL: {sl:.1f}%\n"
+        f"📊 حجم ۵ دقیقه: ${volume:,.0f}\n"
+        f"💧 نقدینگی: ${liquidity:,.0f}\n"
+        f"📈 تغییر ۵ دقیقه: {m5_change:+.2f}%\n"
+        f"⚖️ خرید/فروش ۵ دقیقه: {buys_m5}/{sells_m5}\n"
         f"{result_line}\n"
         f"━━━━━━━━━━━━━━━━━━"
     )
 
+    # لینک‌ها فقط روی دکمه‌های کانال قرار می‌گیرند؛ متن کانال لینک خام ندارد.
+    # چهار دکمه ثابت: DexScreener / Solscan / Mini App / Copy-Trade
     buttons = [
-        [InlineKeyboardButton("📈 DexScreener", url=dex_link)],
-        [InlineKeyboardButton("🔎 Solscan", url=safe_solscan)],
+        [
+            InlineKeyboardButton("📈 DexScreener", url=dex_link),
+            InlineKeyboardButton("🔎 Solscan", url=safe_solscan),
+        ]
     ]
     if WEBAPP_URL:
-        buttons.append([InlineKeyboardButton("🚀 ورود به Mini App", web_app=WebAppInfo(url=WEBAPP_URL))])
-        buttons.append([InlineKeyboardButton("🤖 کپی‌ترید", web_app=WebAppInfo(url=WEBAPP_URL))])
+        buttons.append([
+            InlineKeyboardButton("📱 ورود به Mini App", web_app=WebAppInfo(url=WEBAPP_URL)),
+            InlineKeyboardButton("🤖 کپی‌ترید", web_app=WebAppInfo(url=WEBAPP_URL)),
+        ])
 
     try:
         return send_telegram_msg(
@@ -1445,6 +1455,11 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     locked = float(pos.get("locked_floor", sl) or sl)
     highest = float(pos.get("highest_pnl", pnl_percent) or pnl_percent)
     reason = pos.get("reason", "سیگنال متحد موتورها")
+    volume = float(pos.get("volume", 0.0) or 0.0)
+    liquidity = float(pos.get("liquidity", 0.0) or 0.0)
+    m5_change = float(pos.get("m5_change", pos.get("p_change", 0.0)) or 0.0)
+    buys_m5 = int(pos.get("buys_m5", 0) or 0)
+    sells_m5 = int(pos.get("sells_m5", 0) or 0)
     solscan, dex = _signal_links(token_addr, tx_signature)
 
     if outcome == "SELL_SUCCESS":
@@ -1627,6 +1642,9 @@ def check_positions_loop():
 
                     pnl_percent = ((current_price - entry_price) / entry_price) * 100.0
                     locked_floor, weakness = _update_trailing_state(pos, current_price, pnl_percent, pair)
+                    pos["volume"] = float((pair.get("volume") or {}).get("m5") or 0.0)
+                    pos["liquidity"] = float((pair.get("liquidity") or {}).get("usd") or 0.0)
+                    pos["p_change"] = float(pair.get("priceChange", {}).get("m5") or 0.0)
                     highest_pnl = float(pos.get("highest_pnl", pnl_percent))
 
                     # اگر به سقف‌های بسیار بزرگ رسید، حدضرر نیز همراه آن بالا می‌رود.
@@ -1670,24 +1688,28 @@ def check_positions_loop():
                         log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
 
                     tx_link = f"https://solscan.io/tx/{sell_res_info}" if success else f"https://solscan.io/token/{token_addr}"
-                    exit_msg = (
-                        f"🔴 {reason}\n\n"
-                        f"🪙 توکن: {symbol}\n"
-                        f"📌 وضعیت فروش: {sell_status}\n"
-                        f"📍 آدرس:\n{token_addr}\n\n"
-                        f"💵 قیمت ورود: ${entry_price:.8f}\n"
-                        f"📉 قیمت خروج: ${current_price:.8f}\n"
-                        f"📊 سود/زیان نهایی: {pnl_percent:+.2f}%\n"
-                        f"📈 بیشترین سود: {highest_pnl:+.2f}%\n"
-                        f"🔒 حدضرر نهایی: {locked_floor:+.2f}%\n"
-                        f"🧠 ضعف بازار: {'تأیید شد' if weakness else 'خیر'}\n\n"
-                        f"🔗 Solscan: {tx_link}\n"
-                        f"📈 DexScreener: https://dexscreener.com/solana/{token_addr}"
-                    )
-                    send_telegram_msg(exit_msg)
-                    _load_channel_config()
-                    if CHANNEL_ID:
-                        send_telegram_msg(exit_msg, target_chat=CHANNEL_ID)
+                    # خروج نهایی از یک مسیر واحد ارسال می‌شود:
+                    # داخل ربات = جزئیات کامل؛ کانال = کارت تمیز + دکمه‌ها.
+                    if success:
+                        send_signal_outcome(
+                            token_addr, pos, current_price, "SELL_SUCCESS", pnl_percent,
+                            tx_signature=sell_res_info,
+                            extra_text=(
+                                f"🧠 ضعف بازار: {'تأیید شد' if weakness else 'خیر'}\n"
+                                f"📌 دلیل خروج: {reason}"
+                            )
+                        )
+                    else:
+                        # شکست اجرای فروش فقط داخل ربات/لاگ می‌ماند؛ کانال پیام «موجودی ناکافی»
+                        # یا خطای اجرایی دریافت نمی‌کند. پوزیشن برای تلاش مجدد حفظ می‌شود.
+                        send_telegram_msg(
+                            f"⚠️ تلاش فروش انجام نشد\n"
+                            f"🪙 {symbol}\n"
+                            f"📍 آدرس: {token_addr}\n"
+                            f"📊 وضعیت فعلی: {pnl_percent:+.2f}%\n"
+                            f"📌 علت داخلی: {sell_res_info}\n"
+                            f"🔄 پوزیشن همچنان تحت مدیریت است."
+                        )
 
                     # اگر فروش ناموفق بود پوزیشن را حذف نکن؛ در دور بعد دوباره تلاش می‌شود.
                     if success:
@@ -1987,7 +2009,12 @@ def send_fused_signal(token_addr, fusion):
                 "tp": tp, "sl": sl, "highest_price": price,
                 "highest_pnl": 0.0, "locked_floor": sl,
                 "trailing_active": DYNAMIC_TRAILING_TP_ENABLED,
-                "side": "BUY", "reason": reason, "buy_amt": amount
+                "side": "BUY", "reason": reason, "buy_amt": amount,
+                "volume": float(fusion.get("vol", 0.0) or 0.0),
+                "liquidity": float(fusion.get("liq", 0.0) or 0.0),
+                "p_change": float(fusion.get("chg", 0.0) or 0.0),
+                "buys_m5": int(fusion.get("buys", 0) or 0),
+                "sells_m5": int(fusion.get("sells", 0) or 0)
             }
         # کپی‌ترید فقط بعد از خرید واقعی مرجع فعال می‌شود.
         trigger_copy_trading_for_subscribers(token_addr, amount, side="BUY", tx_signature=result)
