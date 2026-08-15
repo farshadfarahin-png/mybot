@@ -1765,6 +1765,7 @@ def check_positions_loop():
             if tokens_to_close:
                 with state_lock:
                     for t_addr in tokens_to_close:
+                        learning_record_exit(t_addr, None, active_positions.get(t_addr, None), price, "POSITION_CLOSED")
                         active_positions.pop(t_addr, None)
                         # قفل همان توکن فقط پس از فروش کامل آزاد می‌شود.
                         _mark_token_closed(t_addr)
@@ -1882,6 +1883,9 @@ CONSENSUS_COOLDOWN_SECONDS = 300
 DAILY_SIGNAL_LIMIT = 15
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
 GLOBAL_SIGNAL_COOLDOWN_SECONDS = 15 * 60
+# Signal budget is capacity only; quality thresholds never depend on this value.
+SIGNAL_BUDGET_MIN = 1
+SIGNAL_BUDGET_MAX = 50
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
 CONSENSUS_MIN_LIQUIDITY = 15000.0
@@ -2004,6 +2008,31 @@ def build_consensus_signal(token_addr, pair):
         logger.debug(f"Consensus error {token_addr}: {e}")
         return None
 
+
+# ADAPTIVE_LEARNING_TARGET_NOTE:
+# Learning may update engine weights from real closed-trade outcomes,
+# but it must not lower the fixed quality gate just to consume the daily budget.
+def fusion_quality_gate(fusion):
+    """Fixed market-quality gate. Daily budget is never used as a quality knob."""
+    try:
+        liq = float(fusion.get("liq", 0) or 0)
+        vol = float(fusion.get("vol", 0) or 0)
+        chg = float(fusion.get("chg", 0) or 0)
+        score = float(fusion.get("score", 0) or 0)
+
+        if liq < CONSENSUS_MIN_LIQUIDITY:
+            return False
+        if vol < CONSENSUS_MIN_VOLUME:
+            return False
+        if chg < CONSENSUS_MIN_5M_CHANGE:
+            return False
+        if score < CONSENSUS_MIN_SCORE:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
     if _token_lock_is_open(token_addr):
@@ -2011,6 +2040,15 @@ def send_fused_signal(token_addr, fusion):
         return False, "DUPLICATE_OPEN_POSITION"
     if daily_signal_cap_reached():
         return False, "DAILY_SIGNAL_CAP_REACHED"
+
+    if learning_is_in_circuit_breaker():
+        logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
+        return False, "LEARNING_CIRCUIT_BREAKER"
+
+    # IMPORTANT: changing the daily budget never relaxes signal quality.
+    if not fusion_quality_gate(fusion):
+        logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
+        return False, "QUALITY_GATE_REJECTED"
     now_global = time.time()
     if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
         return False, "GLOBAL_SIGNAL_COOLDOWN"
@@ -2646,7 +2684,7 @@ def _main_keyboard(is_admin=False):
     if is_admin:
         rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
         rows.append([InlineKeyboardButton(
-            f"🎯 تنظیم دستی سهم روزانه: {daily_signal_status_text()}",
+            f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}",
             callback_data="daily_signal_limit"
         )])
         rows.append([InlineKeyboardButton("🎁 عضویت رایگان کاربر",callback_data="free_users")])
@@ -2719,7 +2757,7 @@ def _control_keyboard():
             f"💰 سقف هر معامله: {MAX_TRADE_SOL:g} SOL", callback_data="trade_limit"
         )],
         [InlineKeyboardButton(
-            f"🎯 سهم روزانه سیگنال: {daily_signal_status_text()}",
+            f"🎯 سقف روزانه سیگنال: {daily_signal_status_text()}",
             callback_data="daily_signal_limit"
         )],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
@@ -2904,6 +2942,26 @@ def start_telegram_bot():
                     parse_mode="Markdown"
                 )
                 return
+            elif data == "learning_stats":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                st = learning_stats()
+                await q.edit_message_text(
+                    "📚 **یادگیری و عملکرد واقعی**\n\n"
+                    f"📊 معاملات ثبت‌شده: `{st['trades']}`\n"
+                    f"✅ Win Rate: `{st['win_rate']:.1f}%`\n"
+                    f"💰 مجموع PnL معاملات ثبت‌شده: `{st['net_pnl_pct_sum']:.2f}%`\n"
+                    f"🔥 باخت متوالی: `{st['loss_streak']}`\n"
+                    f"🛡️ ضریب ریسک فعلی: `{learning_risk_multiplier():.2f}x`\n\n"
+                    "یادگیری فقط از معاملات بسته‌شده انجام می‌شود و برای پر کردن سهمیه، "
+                    "فیلتر کیفیت را ضعیف نمی‌کند.",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                    ])
+                )
+                return
             elif data == "trade_limit":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
@@ -3073,3 +3131,27 @@ if __name__ == "__main__":
     flask_thread.start()
 
     start_telegram_bot()
+def learning_record_exit(token_addr, position, exit_price, reason=""):
+    """Best-effort bridge from an existing position object to the learning DB."""
+    try:
+        if not position:
+            return
+        entry = float(position.get("entry_price") or position.get("price") or 0)
+        if entry <= 0 or float(exit_price or 0) <= 0:
+            return
+        pnl = (float(exit_price) - entry) / entry * 100.0
+        record_closed_trade(
+            token_addr=token_addr,
+            symbol=position.get("symbol", ""),
+            side=position.get("side", "BUY"),
+            entry=entry,
+            exit_price=exit_price,
+            pnl_pct=pnl,
+            reason=reason,
+            engine_names=position.get("engines") or position.get("engine_names") or [],
+            hold_seconds=max(0, int(time.time() - float(position.get("opened_at", time.time()))))
+        )
+    except Exception as e:
+        logger.warning(f"Learning exit bridge failed: {e}")
+
+
