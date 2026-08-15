@@ -2163,6 +2163,149 @@ def learning_stats():
 
 _load_learning_state()
 
+
+# ==========================================================
+# PRO_MAX_V10_VALIDATION
+# Real historical backtest + walk-forward validation +
+# A/B engine evaluation
+# ==========================================================
+V10_VALIDATION_FILE = "fusion_v10_validation.json"
+V10_LOOKBACK = 1000
+V10_MIN_WALK_FORWARD = 100
+V10_A_B_MIN_TRADES = 30
+
+v10_validation = {
+    "backtest": {},
+    "walk_forward": {},
+    "ab_test": {},
+    "updated_at": 0.0,
+}
+
+def _v10_save():
+    try:
+        Path(V10_VALIDATION_FILE).write_text(
+            json.dumps(v10_validation, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning(f"V10 validation save failed: {e}")
+
+def _v10_trade_rows():
+    try:
+        return list(learning_state.get("trades", []))[-V10_LOOKBACK:]
+    except Exception:
+        return []
+
+def v10_real_backtest():
+    """
+    Historical evaluation over actually recorded closed trades.
+    This is deliberately separated from live execution: it cannot place trades.
+    """
+    rows = _v10_trade_rows()
+    wins = sum(1 for r in rows if float(r.get("pnl_pct", 0) or 0) > 0)
+    gp = sum(max(0.0, float(r.get("pnl_pct", 0) or 0)) for r in rows)
+    gl = sum(abs(min(0.0, float(r.get("pnl_pct", 0) or 0))) for r in rows)
+    result = {
+        "sample": len(rows),
+        "wins": wins,
+        "losses": len(rows) - wins,
+        "win_rate": wins / len(rows) * 100.0 if rows else 0.0,
+        "gross_profit_pct": gp,
+        "gross_loss_pct": gl,
+        "profit_factor": gp / gl if gl else (999.0 if gp else 0.0),
+        "net_pnl_pct": gp - gl,
+    }
+    v10_validation["backtest"] = result
+    v10_validation["updated_at"] = time.time()
+    _v10_save()
+    return result
+
+def v10_walk_forward():
+    """
+    Walk-forward validation:
+    train on the first segment, evaluate the subsequent segment.
+    Engine weights are read from the training segment only.
+    """
+    rows = _v10_trade_rows()
+    n = len(rows)
+    if n < V10_MIN_WALK_FORWARD * 2:
+        result = {
+            "ready": False,
+            "reason": f"حداقل {V10_MIN_WALK_FORWARD*2} معامله بسته لازم است.",
+            "sample": n,
+        }
+        v10_validation["walk_forward"] = result
+        _v10_save()
+        return result
+
+    split = int(n * 0.70)
+    train = rows[:split]
+    test = rows[split:]
+
+    # Training metrics.
+    train_wins = sum(1 for r in train if float(r.get("pnl_pct", 0) or 0) > 0)
+    train_wr = train_wins / len(train) * 100.0 if train else 0.0
+
+    # Out-of-sample test metrics.
+    test_wins = sum(1 for r in test if float(r.get("pnl_pct", 0) or 0) > 0)
+    test_gp = sum(max(0.0, float(r.get("pnl_pct", 0) or 0)) for r in test)
+    test_gl = sum(abs(min(0.0, float(r.get("pnl_pct", 0) or 0))) for r in test)
+
+    result = {
+        "ready": True,
+        "train_sample": len(train),
+        "test_sample": len(test),
+        "train_win_rate": train_wr,
+        "out_of_sample_win_rate": test_wins / len(test) * 100.0 if test else 0.0,
+        "out_of_sample_profit_factor":
+            test_gp / test_gl if test_gl else (999.0 if test_gp else 0.0),
+        "out_of_sample_net_pnl_pct": test_gp - test_gl,
+    }
+    v10_validation["walk_forward"] = result
+    v10_validation["updated_at"] = time.time()
+    _v10_save()
+    return result
+
+def v10_ab_engine_test():
+    """
+    A/B comparison of engine groups from closed-trade outcomes.
+    No live execution and no artificial win-rate boosting.
+    """
+    rows = _v10_trade_rows()
+    groups = {}
+
+    for r in rows:
+        pnl = float(r.get("pnl_pct", 0) or 0)
+        engines = r.get("engines") or []
+        if isinstance(engines, str):
+            engines = [x.strip() for x in engines.split(",") if x.strip()]
+        for engine in engines:
+            s = groups.setdefault(engine, {"trades": 0, "wins": 0, "pnl": 0.0})
+            s["trades"] += 1
+            s["wins"] += int(pnl > 0)
+            s["pnl"] += pnl
+
+    result = {}
+    for engine, s in groups.items():
+        result[engine] = {
+            "trades": s["trades"],
+            "win_rate": s["wins"] / s["trades"] * 100.0 if s["trades"] else 0.0,
+            "net_pnl_pct": s["pnl"],
+            "qualified": s["trades"] >= V10_A_B_MIN_TRADES,
+        }
+
+    v10_validation["ab_test"] = result
+    v10_validation["updated_at"] = time.time()
+    _v10_save()
+    return result
+
+def v10_validation_summary():
+    return {
+        "backtest": v10_real_backtest(),
+        "walk_forward": v10_walk_forward(),
+        "ab_test": v10_ab_engine_test(),
+    }
+
 # ==========================================================
 # PRO_MAX_V7_SYSTEMS
 # Backtest / Paper Trading / Market Regime / Dynamic Risk /
@@ -3058,6 +3201,7 @@ def _control_keyboard():
             callback_data="daily_signal_limit"
         )],
         [InlineKeyboardButton("📊 داشبورد PRO MAX", callback_data="v7_dashboard")],
+                        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ]
     return InlineKeyboardMarkup(rows)
@@ -3311,6 +3455,77 @@ def start_telegram_bot():
                 )
                 return
 
+
+            elif data == "v10_validation":
+                if not is_admin:
+                    await q.edit_message_text(
+                        "⛔ این بخش فقط برای ادمین است.",
+                        reply_markup=_main_keyboard(False)
+                    )
+                    return
+
+                bt = v10_real_backtest()
+                wf = v10_walk_forward()
+                ab = v10_ab_engine_test()
+
+                top = sorted(
+                    ab.items(),
+                    key=lambda kv: (kv[1].get("win_rate", 0), kv[1].get("net_pnl_pct", 0)),
+                    reverse=True
+                )[:5]
+
+                lines = [
+                    "🧪 **V10 Validation Lab**",
+                    "",
+                    f"🔬 Backtest: `{bt.get('sample',0)}` معامله",
+                    f"   └ WR: `{bt.get('win_rate',0):.1f}%` | PF: `{bt.get('profit_factor',0):.2f}`",
+                    f"   └ Net PnL: `{bt.get('net_pnl_pct',0):.2f}%`",
+                    "",
+                ]
+
+                if wf.get("ready"):
+                    lines += [
+                        "🚶 **Walk-Forward / Out-of-Sample**",
+                        f"   └ Train: `{wf.get('train_sample',0)}`",
+                        f"   └ Test: `{wf.get('test_sample',0)}`",
+                        f"   └ OOS WR: `{wf.get('out_of_sample_win_rate',0):.1f}%`",
+                        f"   └ OOS PF: `{wf.get('out_of_sample_profit_factor',0):.2f}`",
+                        f"   └ OOS Net: `{wf.get('out_of_sample_net_pnl_pct',0):.2f}%`",
+                        "",
+                    ]
+                else:
+                    lines += [
+                        "🚶 **Walk-Forward**",
+                        f"   └ ⏳ `{wf.get('reason','داده کافی نیست')}`",
+                        "",
+                    ]
+
+                lines.append("⚖️ **A/B موتورهای واقعی ثبت‌شده**")
+                if top:
+                    for name, s in top:
+                        lines.append(
+                            f"• {name}: `{s.get('trades',0)}` معامله | "
+                            f"WR `{s.get('win_rate',0):.1f}%` | "
+                            f"PnL `{s.get('net_pnl_pct',0):.2f}%`"
+                        )
+                else:
+                    lines.append("• هنوز داده کافی برای مقایسه وجود ندارد.")
+
+                lines += [
+                    "",
+                    "ℹ️ این بخش فقط ارزیابی آماری است و برای بالا بردن مصنوعی Win Rate معامله‌ای را دستکاری نمی‌کند."
+                ]
+
+                await q.edit_message_text(
+                    "\n".join(lines),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 اجرای مجدد", callback_data="v10_validation")],
+                        [InlineKeyboardButton("📊 داشبورد PRO MAX", callback_data="v7_dashboard")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                    ])
+                )
+                return
 
             elif data == "trade_limit":
                 if not is_admin:
