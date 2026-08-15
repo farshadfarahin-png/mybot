@@ -2033,6 +2033,173 @@ def fusion_quality_gate(fusion):
         return False
 
 
+
+# ==========================================================
+# PRO_MAX_V7_SYSTEMS
+# Backtest / Paper Trading / Market Regime / Dynamic Risk /
+# Memory Decay & Compaction / Statistical Dashboard
+# ==========================================================
+V7_MEMORY_MAX_RECORDS = 5000
+V7_MEMORY_MAX_AGE_DAYS = 90
+V7_MEMORY_DECAY_HALF_LIFE_DAYS = 30
+V7_BACKTEST_LOOKBACK = 500
+V7_COMPACTION_INTERVAL_SECONDS = 24 * 3600
+V7_STATE_FILE = "fusion_v7_state.json"
+v7_last_compaction = 0.0
+v7_state = {
+    "paper": {"trades": []},
+    "regime": {"name": "RANGE", "confidence": 0.0},
+    "backtest": {},
+    "last_compaction": 0.0,
+}
+
+def _v7_load():
+    global v7_state, v7_last_compaction
+    try:
+        p = Path(V7_STATE_FILE)
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                v7_state.update(d)
+            v7_last_compaction = float(v7_state.get("last_compaction", 0) or 0)
+    except Exception as e:
+        logger.warning(f"V7 state load failed: {e}")
+
+def _v7_save():
+    try:
+        v7_state["last_compaction"] = v7_last_compaction
+        Path(V7_STATE_FILE).write_text(json.dumps(v7_state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"V7 state save failed: {e}")
+
+def v7_decay_weight(age_days):
+    return 0.5 ** (float(age_days) / V7_MEMORY_DECAY_HALF_LIFE_DAYS)
+
+def v7_compact_learning_memory(force=False):
+    global v7_last_compaction
+    now = time.time()
+    if not force and now - v7_last_compaction < V7_COMPACTION_INTERVAL_SECONDS:
+        return
+    try:
+        trades = learning_state.get("trades", [])
+        cutoff = now - V7_MEMORY_MAX_AGE_DAYS * 86400
+        recent = [t for t in trades if float(t.get("ts", now) or now) >= cutoff]
+        # Hard cap protects the file even if a large burst occurs.
+        learning_state["trades"] = recent[-V7_MEMORY_MAX_RECORDS:]
+        # Old records are represented only through decayed engine aggregates.
+        compact = {}
+        for t in trades:
+            ts = float(t.get("ts", now) or now)
+            age = max(0.0, (now - ts) / 86400.0)
+            w = v7_decay_weight(age)
+            pnl = float(t.get("pnl_pct", 0) or 0)
+            for name in (t.get("engines") or []):
+                s = compact.setdefault(name, [0.0, 0.0])
+                s[0] += w
+                s[1] += pnl * w
+        for name, (weight_sum, pnl_sum) in compact.items():
+            if weight_sum <= 0:
+                continue
+            st = learning_state.setdefault("engines", {}).setdefault(
+                name, {"trades": 0, "wins": 0, "losses": 0, "avg_pnl": 0.0, "weight": 1.0}
+            )
+            old_avg = float(st.get("avg_pnl", 0.0))
+            st["avg_pnl"] = 0.85 * old_avg + 0.15 * (pnl_sum / weight_sum)
+        _save_learning_state()
+        v7_last_compaction = now
+        _v7_save()
+    except Exception as e:
+        logger.warning(f"V7 memory compaction failed: {e}")
+
+def v7_detect_market_regime(liquidity, volume_5m, change_5m, volatility=None):
+    try:
+        liq = float(liquidity or 0)
+        chg = float(change_5m or 0)
+        vola = abs(float(volatility or 0))
+        if liq < CONSENSUS_MIN_LIQUIDITY:
+            name = "LOW_LIQ"
+        elif vola >= 15:
+            name = "HIGH_VOL"
+        elif chg >= 3:
+            name = "BULL"
+        elif chg <= -3:
+            name = "BEAR"
+        else:
+            name = "RANGE"
+        confidence = min(1.0, 0.5 + min(0.5, abs(chg) / 10.0))
+        v7_state["regime"] = {"name": name, "confidence": confidence}
+        return name, confidence
+    except Exception:
+        return "RANGE", 0.0
+
+def v7_dynamic_risk_multiplier(fusion):
+    try:
+        mult = learning_risk_multiplier()
+        regime, conf = v7_detect_market_regime(
+            fusion.get("liq", 0), fusion.get("vol", 0),
+            fusion.get("chg", 0), fusion.get("volatility", 0)
+        )
+        if regime == "LOW_LIQ":
+            mult *= 0.55
+        elif regime == "HIGH_VOL":
+            mult *= 0.70
+        elif regime == "BEAR":
+            mult *= 0.60
+        else:
+            mult *= 0.85 + 0.15 * conf
+        return max(RISK_MIN_MULTIPLIER, min(RISK_MAX_MULTIPLIER, mult))
+    except Exception:
+        return learning_risk_multiplier()
+
+def v7_paper_trade_open(token_addr, symbol, entry_price, fusion):
+    try:
+        rows = v7_state.setdefault("paper", {}).setdefault("trades", [])
+        rows.append({
+            "token": token_addr, "symbol": symbol, "entry": float(entry_price or 0),
+            "opened_at": time.time(), "engines": _engine_names_from_fusion(fusion),
+            "status": "OPEN"
+        })
+        v7_state["paper"]["trades"] = rows[-V7_MEMORY_MAX_RECORDS:]
+        _v7_save()
+    except Exception as e:
+        logger.warning(f"Paper open failed: {e}")
+
+def v7_paper_trade_close(token_addr, exit_price, pnl_pct, reason=""):
+    try:
+        for p in reversed(v7_state.setdefault("paper", {}).setdefault("trades", [])):
+            if p.get("token") == token_addr and p.get("status") == "OPEN":
+                p.update({
+                    "exit": float(exit_price or 0), "pnl_pct": float(pnl_pct or 0),
+                    "reason": reason, "closed_at": time.time(), "status": "CLOSED"
+                })
+                break
+        _v7_save()
+    except Exception as e:
+        logger.warning(f"Paper close failed: {e}")
+
+def v7_paper_stats():
+    rows = [x for x in v7_state.get("paper", {}).get("trades", []) if x.get("status") == "CLOSED"]
+    wins = sum(1 for x in rows if float(x.get("pnl_pct", 0) or 0) > 0)
+    gp = sum(max(0.0, float(x.get("pnl_pct", 0) or 0)) for x in rows)
+    gl = sum(abs(min(0.0, float(x.get("pnl_pct", 0) or 0))) for x in rows)
+    return {"trades": len(rows), "win_rate": wins / len(rows) * 100 if rows else 0.0,
+            "profit_factor": gp / gl if gl else (999.0 if gp else 0.0)}
+
+def v7_backtest_from_learning_history():
+    rows = learning_state.get("trades", [])[-V7_BACKTEST_LOOKBACK:]
+    wins = sum(1 for x in rows if float(x.get("pnl_pct", 0) or 0) > 0)
+    gp = sum(max(0.0, float(x.get("pnl_pct", 0) or 0)) for x in rows)
+    gl = sum(abs(min(0.0, float(x.get("pnl_pct", 0) or 0))) for x in rows)
+    result = {"trades": len(rows), "win_rate": wins / len(rows) * 100 if rows else 0.0,
+              "profit_factor": gp / gl if gl else (999.0 if gp else 0.0)}
+    v7_state["backtest"] = result
+    _v7_save()
+    return result
+
+_v7_load()
+v7_compact_learning_memory(force=False)
+
+
 def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
     if _token_lock_is_open(token_addr):
@@ -2254,6 +2421,7 @@ def unified_market_scanner_loop(app):
             # در حالت خاموش، هیچ ورود جدیدی صادر نمی‌شود؛ مدیریت پوزیشن‌های باز در حلقه جدا ادامه دارد.
             time.sleep(3); continue
         try:
+            v7_compact_learning_memory(force=False)
             if daily_signal_cap_reached():
                 # سقف روزانه پر شده؛ فقط مدیریت فروش/پوزیشن‌های باز ادامه دارد.
                 time.sleep(10)
@@ -2760,6 +2928,7 @@ def _control_keyboard():
             f"🎯 سقف روزانه سیگنال: {daily_signal_status_text()}",
             callback_data="daily_signal_limit"
         )],
+        [InlineKeyboardButton("📊 داشبورد PRO MAX", callback_data="v7_dashboard")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ]
     return InlineKeyboardMarkup(rows)
@@ -2958,6 +3127,31 @@ def start_telegram_bot():
                     "فیلتر کیفیت را ضعیف نمی‌کند.",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                    ])
+                )
+                return
+            elif data == "v7_dashboard":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                st = learning_stats()
+                ps = v7_paper_stats()
+                bt = v7_backtest_from_learning_history()
+                rg = v7_state.get("regime", {})
+                await q.edit_message_text(
+                    "📊 **PRO MAX Dashboard**\n\n"
+                    f"🧠 معاملات یادگیری: `{st.get('trades',0)}`\n"
+                    f"✅ Win Rate: `{st.get('win_rate',0):.1f}%`\n"
+                    f"💰 PnL ثبت‌شده: `{st.get('net_pnl_pct_sum',0):.2f}%`\n"
+                    f"🧪 Paper: `{ps.get('trades',0)}` | WR `{ps.get('win_rate',0):.1f}%` | PF `{ps.get('profit_factor',0):.2f}`\n"
+                    f"🔬 Backtest Check: `{bt.get('trades',0)}` | WR `{bt.get('win_rate',0):.1f}%` | PF `{bt.get('profit_factor',0):.2f}`\n"
+                    f"🌐 Regime: `{rg.get('name','RANGE')}` ({float(rg.get('confidence',0))*100:.0f}%)\n"
+                    f"🛡️ Risk: `{learning_risk_multiplier():.2f}x`\n"
+                    f"🧹 حافظه: جزئیات بیش از {V7_MEMORY_MAX_AGE_DAYS} روز به‌تدریج فشرده/حذف می‌شوند.",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="v7_dashboard")],
                         [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
                     ])
                 )
