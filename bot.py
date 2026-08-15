@@ -2399,19 +2399,22 @@ def _engine_control_keyboard():
     return InlineKeyboardMarkup(rows)
 
 def _control_keyboard():
+    # در MAX FUSION هر دو سیستم زیر آن روشن و قفل هستند؛
+    # فقط خود MAX FUSION و توقف اضطراری/تنظیمات جانبی قابل تغییرند.
+    if MAX_FUSION_ENABLED:
+        hulk_label = "🔒 اتحاد هالک AI: 🟢 ON"
+        advanced_label = "🔒 سیستم پیشرفته AI: 🟢 ON"
+    else:
+        hulk_label = f"🤖⚡ اتحاد هالک AI: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}"
+        advanced_label = f"🧠 سیستم پیشرفته AI: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}"
+
     rows = [
         [InlineKeyboardButton(
             f"👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}",
             callback_data="toggle_max_fusion"
         )],
-        [InlineKeyboardButton(
-            f"🤖⚡ اتحاد هالک AI: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}",
-            callback_data="toggle_unified"
-        )],
-        [InlineKeyboardButton(
-            f"🧠 سیستم پیشرفته AI: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}",
-            callback_data="toggle_advanced"
-        )],
+        [InlineKeyboardButton(hulk_label, callback_data="toggle_unified")],
+        [InlineKeyboardButton(advanced_label, callback_data="toggle_advanced")],
         [InlineKeyboardButton(
             f"🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}",
             callback_data="toggle_emergency"
@@ -2534,7 +2537,7 @@ def start_telegram_bot():
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,_MAX_FUSION_PREV,MAX_TRADE_SOL
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
-            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF", "🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF", "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data=="engines": await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n"+_engine_status_lines(),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت",callback_data="home")]]),parse_mode="Markdown")
             elif data=="controls": await q.edit_message_text(("🎛 **کنترل موتورها**\n\n🤖 اتحاد هالک روشن است.\nهمه موتورهای تحلیلی با هم رأی می‌دهند و فقط یک سیگنال واحد منتشر می‌شود.\n\nبرای کنترل تک‌تک موتورها، اتحاد را خاموش کنید." if SYNCHRONIZED_MODE else "🎛 **کنترل موتورها**\n\n🔴 اتحاد خاموش است.\nحالا هر موتور کلید مستقل خودش را دارد و می‌توانید هرکدام را جداگانه روشن/خاموش کنید."),reply_markup=_control_keyboard(),parse_mode="Markdown") if is_admin else await q.edit_message_text("⛔ این بخش فقط برای ادمین است.",reply_markup=_main_keyboard(False))
             elif data=="wallet":
@@ -2624,6 +2627,12 @@ def start_telegram_bot():
                     return
 
                 if data == "toggle_advanced":
+                    if MAX_FUSION_ENABLED:
+                        await q.edit_message_text(
+                            "🔒 **سیستم پیشرفته AI قفل است**\n\n👑 MAX FUSION فعال است؛ اتحاد هالک و سیستم پیشرفته هم‌زمان روشن و قفل هستند.",
+                            reply_markup=_control_keyboard(), parse_mode="Markdown"
+                        )
+                        return
                     ADVANCED_AI_ENABLED = not ADVANCED_AI_ENABLED
                     await q.edit_message_text(
                         ("🟢 **سیستم پیشرفته AI روشن شد**\n\nتمام فیلترهای پیشرفته در مسیر تصمیم‌گیری فعال شدند و سیگنال‌ها سخت‌گیرانه‌تر می‌شوند." if ADVANCED_AI_ENABLED else "🔴 **سیستم پیشرفته AI خاموش شد**\n\nاتحاد هالک، در صورت روشن بودن، مستقل ادامه می‌دهد."),
@@ -2645,12 +2654,12 @@ def start_telegram_bot():
                     if MAX_FUSION_ENABLED:
                         await q.edit_message_text("👑 **MAX FUSION فعال است**\n\nکنترل تک‌تک موتورها تا زمان خاموش‌شدن MAX FUSION قفل است.", reply_markup=_control_keyboard(), parse_mode="Markdown")
                     else:
-                        await q.edit_message_text("⚙️ **مدیریت موتورهای مستقل**\n\nهر موتور را جداگانه روشن/خاموش کن. این بخش فقط وقتی MAX FUSION خاموش باشد قابل کنترل است.", reply_markup=_engine_control_keyboard(), parse_mode="Markdown")
+                        await q.edit_message_text("⚙️ **مدیریت موتورهای مستقل**\n\nاتحاد هالک خاموش است؛ کلیدهای واقعی ON/OFF هر موتور در اختیار شماست. سیستم پیشرفته AI در صورت روشن بودن می‌تواند جداگانه فعال بماند.", reply_markup=_engine_control_keyboard(), parse_mode="Markdown")
                     return
 
                 if data == "toggle_unified":
                     if MAX_FUSION_ENABLED:
-                        await q.edit_message_text("👑 MAX FUSION فعال است؛ اتحاد هالک همراه با سیستم پیشرفته قفل شده است.", reply_markup=_control_keyboard(), parse_mode="Markdown")
+                        await q.edit_message_text("🔒 **اتحاد هالک AI قفل است**\n\n👑 MAX FUSION فعال است؛ اتحاد هالک و سیستم پیشرفته هم‌زمان روشن هستند.", reply_markup=_control_keyboard(), parse_mode="Markdown")
                         return
                     # روشن‌شدن اتحاد یعنی همه موتورهای تحلیلی فوراً برای اجماع فعال شوند.
                     SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
@@ -2662,7 +2671,16 @@ def start_telegram_bot():
                         if SYNCHRONIZED_MODE else
                         "🔴 **اتحاد هالک AI خاموش شد**\n\nحالا کلیدهای تک‌تک موتورهای پایین آزاد هستند و می‌توانید هرکدام را جداگانه روشن/خاموش کنید."
                     )
-                    await q.edit_message_text(message+"\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
+                    if SYNCHRONIZED_MODE:
+                        await q.edit_message_text(
+                            message+"\n\n"+_engine_status_lines(),
+                            reply_markup=_control_keyboard(), parse_mode="Markdown"
+                        )
+                    else:
+                        await q.edit_message_text(
+                            message,
+                            reply_markup=_engine_control_keyboard(), parse_mode="Markdown"
+                        )
                     return
 
                 if data == "toggle_copy":
@@ -2672,8 +2690,11 @@ def start_telegram_bot():
                     name = engine_map.get(data)
                     if not name:
                         return
-                    if MAX_FUSION_ENABLED or SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED:
-                        await q.edit_message_text("🔒 کنترل تکی موتورها در حالت اتحاد/سیستم پیشرفته قفل است.", reply_markup=_control_keyboard(), parse_mode="Markdown")
+                    if MAX_FUSION_ENABLED or SYNCHRONIZED_MODE:
+                        await q.edit_message_text(
+                            "🔒 کنترل تکی موتورها در حالت MAX FUSION یا اتحاد هالک قفل است.",
+                            reply_markup=_control_keyboard(), parse_mode="Markdown"
+                        )
                         return
                     globals()[name] = not bool(globals()[name])
 
