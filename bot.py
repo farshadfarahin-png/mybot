@@ -187,6 +187,8 @@ GOLDEN_MIN_LIQUIDITY = 25000
 GOLDEN_MIN_VOLUME_5M = 12000
 GOLDEN_MIN_CHANGE_5M = 12.0
 
+# سقف حجم SOL برای هر معامله واقعی؛ از پنل ادمین قابل تغییر است.
+MAX_TRADE_SOL = float(os.environ.get("MAX_TRADE_SOL", "0.01"))
 TECH_BUY_AMOUNT_SOL = 0.01
 TECH_TAKE_PROFIT = 20.0
 TECH_STOP_LOSS = -8.0
@@ -406,9 +408,12 @@ def get_real_market_trending_tokens():
 
 def ultra_accuracy_scanner_loop(app):
     global SMART_MONEY_COPY_ENABLED, SOCIAL_SENTIMENT_ENABLED, DYNAMIC_TRAILING_TP_ENABLED
-    logger.info("💎🚀 موتور پایش فوق‌پیشرفته (۹۹٪ سود تضمینی) فعال شد.")
+    logger.info("💎🚀 موتور پایش فوق‌پیشرفته (فیلتر بسیار سخت‌گیر) فعال شد.")
 
     while True:
+        if SYNCHRONIZED_MODE:
+            time.sleep(3)
+            continue
         if not (SMART_MONEY_COPY_ENABLED or SOCIAL_SENTIMENT_ENABLED):
             time.sleep(3)
             continue
@@ -466,7 +471,7 @@ def ultra_accuracy_scanner_loop(app):
                             }
 
                     ultra_msg = (
-                        f"💎✨ [سیگنال هوش مصنوعی پیش‌رو - دقت ۹۹٪]\n"
+                        f"💎✨ [سیگنال هوش مصنوعی پیش‌رو - فیلتر سخت‌گیر]\n"
                         f"🎯 وضعیت: {social_msg}\n"
                         f"📌 تاییدیه اسمارت‌مانی و والدهای انسایدر ✅\n\n"
                         f"🪙 توکن: {symbol}\n"
@@ -480,7 +485,7 @@ def ultra_accuracy_scanner_loop(app):
                     send_graphic_signal_to_vip_channel(
                         token_addr=token_addr, symbol=symbol, price=price, tp=init_tp, sl=init_sl,
                         buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
-                        p_change=price_change_5m, solscan_link=solscan_link, signal_title="💎✨ سیگنال تضمینی ۹۹٪ (Smart Money + Hype)", execution_status=execution_status, execution_tx=result_info if success else ""
+                        p_change=price_change_5m, solscan_link=solscan_link, signal_title="💎✨ سیگنال سخت‌گیر Smart Money + Hype", execution_status=execution_status, execution_tx=result_info if success else ""
                     )
         except Exception as e:
             logger.error(f"⚠️ خطای موتور فوق‌پیشرفته: {e}")
@@ -490,6 +495,9 @@ def mempool_smart_money_scanner_loop(app):
     global MEMPOOL_SMART_MONEY_ENABLED
     logger.info("⚡🕵️ موتور اسکنر ممپول و اسمارت‌مانی فعال شد.")
     while True:
+        if SYNCHRONIZED_MODE:
+            time.sleep(3)
+            continue
         if not MEMPOOL_SMART_MONEY_ENABLED:
             time.sleep(3)
             continue
@@ -778,6 +786,27 @@ def _load_channel_config():
         CHANNEL_INVITE_LINK = _get_bot_setting("vip_channel_invite", "").strip()
     return CHANNEL_ID, CHANNEL_INVITE_LINK
 
+def _load_trade_limit():
+    global MAX_TRADE_SOL
+    try:
+        saved = _get_bot_setting("max_trade_sol", "")
+        if saved:
+            value = float(saved)
+            if value > 0:
+                MAX_TRADE_SOL = min(value, 1000.0)
+    except Exception as e:
+        logger.warning(f"⚠️ خطا در بارگذاری سقف معامله SOL: {e}")
+    return MAX_TRADE_SOL
+
+def _set_trade_limit(value):
+    global MAX_TRADE_SOL
+    value = float(value)
+    if value <= 0 or value > 1000:
+        raise ValueError("سقف SOL باید بیشتر از 0 و حداکثر 1000 باشد.")
+    MAX_TRADE_SOL = round(value, 6)
+    _set_bot_setting("max_trade_sol", MAX_TRADE_SOL)
+    return MAX_TRADE_SOL
+
 def ensure_channel_invite_link():
     global CHANNEL_ID, CHANNEL_INVITE_LINK
     _load_channel_config()
@@ -813,47 +842,50 @@ def ensure_channel_invite_link():
 
 def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="⏳ در انتظار اجرای معامله", execution_tx=""):
     global CHANNEL_ID
-    """ارسال سیگنال گرافیکی؛ در خرید موفق لینک تراکنش Solscan و همیشه لینک DexScreener را نشان می‌دهد."""
+    """کارت سیگنال خوانا برای موبایل؛ آدرس و هر دو لینک همیشه وجود دارند."""
     _load_channel_config()
     if not CHANNEL_ID and CHANNEL_INVITE_LINK.startswith("https://t.me/"):
         tail = CHANNEL_INVITE_LINK.split("https://t.me/", 1)[1].strip("/")
         if tail and not tail.startswith("+"):
             CHANNEL_ID = "@" + tail
     if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
-        logger.error("❌ CHANNEL_ID/لینک کانال VIP تنظیم نشده است.")
         return False
 
-    side_icon = "🟢 خرید" if str(side).upper() == "BUY" else "🔴 فروش"
+    side = str(side).upper()
+    side_icon = "🟢 خرید" if side == "BUY" else "🔴 فروش"
     if execution_tx and not str(execution_tx).startswith("http"):
         safe_solscan = f"https://solscan.io/tx/{execution_tx}"
     elif str(solscan_link).startswith("https://solscan.io/"):
         safe_solscan = solscan_link
     else:
         safe_solscan = f"https://solscan.io/token/{token_addr}"
-    graphic_text = (
-        f"╔══════════════════════════╗\n  {signal_title}\n  {side_icon}\n╚══════════════════════════╝\n\n"
-        f"🪙 نام توکن: #{symbol}\n📍 آدرس قرارداد:\n{token_addr}\n\n"
-        f"💵 قیمت: ${price:.8f}\n💰 حجم معامله: SOL {buy_amt:g}\n🎯 حد سود اولیه: +{tp:.1f}%\n🛑 حد ضرر اولیه: {sl:.1f}%\n\n"
-        f"📊 آمار زنده بازار:\n▪️ روند ۵ دقیقه: {p_change:+.2f}%\n▪️ حجم معاملات: ${volume:,.0f}\n▪️ نقدینگی کل: ${liquidity:,.0f}\n\n"
-        f"📌 وضعیت اجرا: {execution_status}\n"
-        f"⚡️ مدیریت سود: Trailing پله‌ای هوشمند\n\n"
-        f"🔗 Solscan: {safe_solscan}\n"
-        f"📈 DexScreener: https://dexscreener.com/solana/{token_addr}\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
-    )
+    dex_link = f"https://dexscreener.com/solana/{token_addr}"
 
-    buttons = [[
-        InlineKeyboardButton("🔍 Solscan", url=safe_solscan),
-        InlineKeyboardButton("📈 DexScreener", url=f"https://dexscreener.com/solana/{token_addr}")
-    ]]
-    if WEBAPP_URL:
-        buttons.append([InlineKeyboardButton("🤖 ورود به Mini App و کپی‌ترید", url=WEBAPP_URL)])
-    return send_telegram_msg(
-        graphic_text,
-        target_chat=CHANNEL_ID,
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode=None
+    graphic_text = (
+        f"🤖⚡ {signal_title}\n"
+        f"{side_icon}  |  {execution_status}\n\n"
+        f"🪙 {symbol}\n"
+        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+        f"💵 قیمت: ${price:.8f}\n"
+        f"💰 حجم: {buy_amt:g} SOL\n"
+        f"🎯 TP اولیه: +{tp:.1f}%   🛑 SL: {sl:.1f}%\n"
+        f"📊 5m: {p_change:+.2f}% | حجم: ${volume:,.0f} | نقدینگی: ${liquidity:,.0f}\n\n"
+        f"📌 مدیریت: Trailing پله‌ای + خروج با ضعف بازار"
     )
+    buttons = [
+        [InlineKeyboardButton("🔍 Solscan", url=safe_solscan)],
+        [InlineKeyboardButton("📈 DexScreener", url=dex_link)]
+    ]
+    if WEBAPP_URL:
+        buttons.append([InlineKeyboardButton("🤖 Mini App / کپی‌ترید", url=WEBAPP_URL)])
+    try:
+        return send_telegram_msg(
+            graphic_text, target_chat=CHANNEL_ID,
+            reply_markup=InlineKeyboardMarkup(buttons), parse_mode=None
+        )
+    except Exception as e:
+        logger.error(f"❌ خطای ارسال کارت سیگنال: {e}")
+        return False
 
 def register_subscription(telegram_id, wallet_addr, tx_sig, currency="USDC"):
     with db_lock:
@@ -967,24 +999,25 @@ def get_sol_balance():
     return lamports / 1_000_000_000
 
 def get_dynamic_buy_amount(base_amount):
+    # MAX_TRADE_SOL سقف نهایی است و حتی ریسک پویا حق عبور از آن را ندارد.
+    safe_base = min(float(base_amount), float(MAX_TRADE_SOL))
     if not DYNAMIC_RISK_ENABLED:
-        return base_amount
+        return round(safe_base, 6)
 
     try:
         sol_bal = get_sol_balance()
+        calculated = safe_base
         if ULTIMATE_21_ENGINE_ENABLED and sol_bal > 0:
             kelly_factor = 0.025 if sol_bal > 1.0 else 0.01
-            calculated = sol_bal * kelly_factor
-            return max(base_amount, round(calculated, 4))
-        
-        if sol_bal > 1.0:
-            calculated = sol_bal * 0.02
-            return max(base_amount, round(calculated, 4))
+            calculated = max(safe_base, round(sol_bal * kelly_factor, 4))
+        elif sol_bal > 1.0:
+            calculated = max(safe_base, round(sol_bal * 0.02, 4))
         elif sol_bal < 0.1:
-            return max(0.005, round(base_amount * 0.5, 4))
+            calculated = max(0.005, round(safe_base * 0.5, 4))
+        return round(min(calculated, MAX_TRADE_SOL), 6)
     except Exception as e:
         logger.debug(f"Dynamic amount calc exception: {e}")
-    return base_amount
+    return round(min(safe_base, MAX_TRADE_SOL), 6)
 
 def get_token_balance(token_mint):
     payload = {
@@ -1364,7 +1397,13 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     send_telegram_msg(msg)
     _load_channel_config()
     if CHANNEL_ID:
-        send_telegram_msg(msg, target_chat=CHANNEL_ID)
+        send_graphic_signal_to_vip_channel(
+            token_addr=token_addr, symbol=symbol, price=current_price, tp=tp, sl=locked,
+            buy_amt=float(pos.get("buy_amt", 0.0) or 0.0), volume=float(pos.get("volume", 0.0) or 0.0),
+            liquidity=float(pos.get("liquidity", 0.0) or 0.0), p_change=float(pos.get("m5_change", 0.0) or 0.0),
+            solscan_link=solscan, signal_title=title, side="SELL",
+            execution_status=status, execution_tx=tx_signature
+        )
 
 def _adaptive_locked_floor(highest_pnl, current_floor):
     """حدضرر پله‌ای؛ فقط رو به بالا حرکت می‌کند."""
@@ -1591,6 +1630,9 @@ def technical_analysis_scanner_loop(app):
     send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای (مجهز به AI & Mempool & Hulk Mode) فعال شد.")
 
     while True:
+        if SYNCHRONIZED_MODE:
+            time.sleep(3)
+            continue
         if not TECHNICAL_RUNNING:
             time.sleep(2)
             continue
@@ -1673,9 +1715,20 @@ def technical_analysis_scanner_loop(app):
 # موتورهای موجود نقش مکمل دارند و امتیازهای مستقل را برای یک
 # تصمیم واحد جمع می‌کنند؛ خطای یک موتور، بقیه را متوقف نمی‌کند.
 # ==========================================================
-CONSENSUS_MIN_SCORE = 4
-CONSENSUS_COOLDOWN_SECONDS = 45
+# اجماع عمداً کمی سخت‌گیرتر شده تا فقط گزینه‌های باکیفیت‌تر منتشر شوند.
+# حداقل 82٪ موتورهای روشن باید رأی مثبت بدهند و در حالت معمول حداقل 7 رأی لازم است.
+# حالت شکار سخت‌گیر: سیگنال کمتر، کیفیت فیلتر بالاتر.
+# این اعداد «تلاش برای win-rate بالا» هستند و تضمین ۹۰٪ سود نیستند.
+CONSENSUS_MIN_SCORE = 9
+CONSENSUS_MIN_RATIO = 0.82
+CONSENSUS_COOLDOWN_SECONDS = 180
+CONSENSUS_MIN_LIQUIDITY = 30000.0
+CONSENSUS_MIN_VOLUME_5M = 15000.0
+CONSENSUS_MIN_CHANGE_5M = 6.0
+CONSENSUS_MAX_CHANGE_5M = 25.0
+CONSENSUS_MIN_BUY_RATIO = 1.40
 consensus_last_signal = {}
+
 
 def build_consensus_signal(token_addr, pair):
     """One decision from all enabled engines; individual engines do not emit separate signals."""
@@ -1687,7 +1740,12 @@ def build_consensus_signal(token_addr, pair):
         txns = (pair.get("txns") or {}).get("m5", {}) or {}
         buys = int(txns.get("buys", 0) or 0)
         sells = int(txns.get("sells", 0) or 0)
-        if price <= 0 or liq < 12000 or vol < 3000:
+        # فیلتر کیفیت پایه: بازارهای کم‌عمق و کم‌حجم اصلاً وارد اجماع نمی‌شوند.
+        if price <= 0 or liq < CONSENSUS_MIN_LIQUIDITY or vol < CONSENSUS_MIN_VOLUME_5M:
+            return None
+        if chg < CONSENSUS_MIN_CHANGE_5M or chg > CONSENSUS_MAX_CHANGE_5M:
+            return None
+        if buys <= 0 or sells > 0 and buys < max(1, sells * CONSENSUS_MIN_BUY_RATIO):
             return None
 
         votes = []
@@ -1740,10 +1798,8 @@ def build_consensus_signal(token_addr, pair):
             enabled += 1
             if is_token_worthy(pair): votes.append("SmartFilter")
 
-        # اجماع پویاست: حداقل 4 رأی و تقریباً نیمی از موتورهای فعال باید تأیید کنند.
-        minimum = max(4, (enabled + 1) // 2)
-        if chg >= 12 and vol >= 15000 and buys >= sells * 1.2:
-            minimum = max(4, minimum - 1)
+        # اجماع بسیار سخت‌گیرانه: حداقل 9 رأی و حداقل 82٪ موتورهای روشن.
+        minimum = max(CONSENSUS_MIN_SCORE, int(enabled * CONSENSUS_MIN_RATIO + 0.9999))
         if len(votes) < minimum:
             return None
 
@@ -1847,6 +1903,7 @@ def unified_market_scanner_loop(app):
     send_telegram_msg(f"{UNIFIED_ENGINE_NAME} فعال شد؛ DexScreener در حال رصد بازار است.")
     while True:
         if not SYNCHRONIZED_MODE:
+            # در حالت مستقل، این رادار متحد سیگنال نمی‌دهد؛ کلیدهای موتورهای قدیمی فقط برای کنترل/آماده‌به‌کار باقی می‌مانند.
             time.sleep(3); continue
         try:
             tokens=get_real_market_trending_tokens()
@@ -2239,10 +2296,11 @@ def _engine_status_lines():
     detail = " | ".join(f"{name}:{'🟢' if state else '🔴'}" for name, state in components)
     return (
         f"🤖⚡ **{UNIFIED_ENGINE_NAME}**\n\n"
-        f"وضعیت: {'🟢 فعال' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
-        f"موتورهای تحلیلی فعال: `{active}/{len(components)}`\n\n"
+        f"وضعیت اتحاد: {'🟢 فعال — همه موتورها با هم رأی می‌دهند' if SYNCHRONIZED_MODE else '🔴 خاموش — کنترل تک‌تک موتورها آزاد است'}\n"
+        f"موتورهای تحلیلی روشن: `{active}/{len(components)}`\n\n"
         f"{detail}\n\n"
-        f"🤖 کپی‌ترید: {'🟢' if COPY_TRADING_ENABLED else '🔴'}"
+        f"🤖 کپی‌ترید: {'🟢' if COPY_TRADING_ENABLED else '🔴'}\n"
+        f"🎯 فیلتر اتحاد سخت‌گیر: حداقل {CONSENSUS_MIN_SCORE} رأی و {CONSENSUS_MIN_RATIO*100:.0f}% موتورهای روشن + نقدینگی/حجم/فشار خرید"
     )
 
 def _admin_free_panel_text():
@@ -2276,13 +2334,55 @@ def _main_keyboard(is_admin=False):
         rows.append([InlineKeyboardButton("🎁 عضویت رایگان کاربر",callback_data="free_users")])
     return InlineKeyboardMarkup(rows)
 
+ENGINE_SWITCHES = [
+    ("Fire", "IS_RUNNING", "toggle_engine_fire"),
+    ("Trend", "TREND_ALERT_RUNNING", "toggle_engine_trend"),
+    ("Combo", "COMBO_RUNNING", "toggle_engine_combo"),
+    ("Golden", "GOLDEN_OPTION", "toggle_engine_golden"),
+    ("Technical", "TECHNICAL_RUNNING", "toggle_engine_technical"),
+    ("UltimateAI/21", "ULTIMATE_21_ENGINE_ENABLED", "toggle_engine_ultimate"),
+    ("Mempool/SmartMoney", "MEMPOOL_SMART_MONEY_ENABLED", "toggle_engine_mempool"),
+    ("Whale", "BOTTOM_WHALE_RUNNING", "toggle_engine_whale"),
+    ("Social/Hype", "SOCIAL_SENTIMENT_ENABLED", "toggle_engine_social"),
+    ("Anti-Wash", "ANTI_WASH_TRADING_ENABLED", "toggle_engine_antiwash"),
+    ("SmartFilter", "SMART_FILTER_ENABLED", "toggle_engine_smartfilter"),
+]
+
+def _trade_limit_keyboard():
+    # مقدار معامله کاملاً دستی است؛ هیچ Preset اجباری وجود ندارد.
+    rows = [
+        [InlineKeyboardButton("✏️ وارد کردن مقدار دلخواه SOL", callback_data="trade_limit_manual")],
+        [InlineKeyboardButton("🔙 بازگشت به کنترل موتورها", callback_data="controls")]
+    ]
+    return InlineKeyboardMarkup(rows)
+
 def _control_keyboard():
-    unified_on = bool(SYNCHRONIZED_MODE)
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🤖⚡ موتور متحد هالک AI: {'ON' if unified_on else 'OFF'}", callback_data="toggle_unified")],
-        [InlineKeyboardButton(f"🤖 کپی‌ترید: {'ON' if COPY_TRADING_ENABLED else 'OFF'}", callback_data="toggle_copy")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
-    ])
+    rows = [[InlineKeyboardButton(
+        f"🤖⚡ اتحاد هالک AI: {'ON' if SYNCHRONIZED_MODE else 'OFF'}",
+        callback_data="toggle_unified"
+    )]]
+    rows.append([InlineKeyboardButton(
+        f"🤖 کپی‌ترید: {'ON' if COPY_TRADING_ENABLED else 'OFF'}",
+        callback_data="toggle_copy"
+    )])
+    rows.append([InlineKeyboardButton(
+        f"💰 سقف هر معامله: {MAX_TRADE_SOL:g} SOL",
+        callback_data="trade_limit"
+    )])
+
+    # در حالت اتحاد، پنل خلوت است و فقط کلید اتحاد دیده می‌شود.
+    # با خاموش‌کردن اتحاد، کلیدهای تک‌تک موتورها دوباره نمایش داده می‌شوند.
+    if not SYNCHRONIZED_MODE:
+        engine_buttons = []
+        for label, var_name, callback_name in ENGINE_SWITCHES:
+            engine_buttons.append(InlineKeyboardButton(
+                f"{label}: {'🟢 ON' if globals().get(var_name) else '🔴 OFF'}",
+                callback_data=callback_name
+            ))
+        for i in range(0, len(engine_buttons), 2):
+            rows.append(engine_buttons[i:i+2])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
 
 def start_telegram_bot():
     try:
@@ -2336,12 +2436,61 @@ def start_telegram_bot():
             else:
                 await update.message.reply_text("⚠️ کانال ذخیره شد ولی لینک ساخته نشد. ربات باید داخل کانال ادمین باشد و اجازه دعوت داشته باشد.")
 
+        async def settradesol_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+            cid = str(update.effective_user.id)
+            if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
+                await update.message.reply_text("⛔ فقط ادمین دسترسی دارد.")
+                return
+            if not context.args:
+                await update.message.reply_text(f"💰 سقف فعلی: {MAX_TRADE_SOL:g} SOL\nنمونه: /settradesol 0.05")
+                return
+            try:
+                value = _set_trade_limit(float(context.args[0]))
+                await update.message.reply_text(f"✅ سقف هر معامله روی {value:g} SOL تنظیم شد.\nحتی ریسک پویا هم از این سقف عبور نمی‌کند.")
+            except Exception as e:
+                await update.message.reply_text(f"❌ {e}")
+
+        async def cancel_trade_limit_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
+            context.user_data.pop("awaiting_trade_limit_sol", None)
+            await update.message.reply_text(
+                f"↩️ لغو شد. سقف فعلی هر معامله: {MAX_TRADE_SOL:g} SOL",
+                reply_markup=_control_keyboard() if str(update.effective_user.id) == str(TELEGRAM_CHAT_ID) else _main_keyboard(False)
+            )
+
+        async def manual_trade_limit_message(update:Update, context:ContextTypes.DEFAULT_TYPE):
+            global MAX_TRADE_SOL
+            cid = str(update.effective_user.id)
+            if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
+                return
+            if not context.user_data.get("awaiting_trade_limit_sol"):
+                return
+            raw = (update.message.text or "").strip().replace(",", ".")
+            try:
+                value = float(raw)
+                if value <= 0:
+                    raise ValueError("مقدار باید بیشتر از صفر باشد.")
+                if value > 1000000:
+                    raise ValueError("مقدار بیش از حد بزرگ است.")
+                value = _set_trade_limit(value)
+                context.user_data.pop("awaiting_trade_limit_sol", None)
+                await update.message.reply_text(
+                    f"✅ **سقف معامله تنظیم شد**\n\n💰 حداکثر هر معامله: `{value:g} SOL`\n\n"
+                    "از این به بعد هر موتور/سیگنال هرچقدر هم حجم پیشنهادی داشته باشد، بیشتر از این مقدار SOL وارد معامله نمی‌شود.",
+                    parse_mode="Markdown",
+                    reply_markup=_control_keyboard()
+                )
+            except Exception as e:
+                await update.message.reply_text(
+                    f"❌ مقدار نامعتبر است: {e}\n\nیک عدد دلخواه مثل `0.0175` یا `0.25` SOL بفرست.",
+                    parse_mode="Markdown"
+                )
+
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,MAX_TRADE_SOL
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\nهمه موتورهای سیگنال در یک موتور متحد بازار با هم کار می‌کنند.",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data=="engines": await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n"+_engine_status_lines(),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت",callback_data="home")]]),parse_mode="Markdown")
-            elif data=="controls": await q.edit_message_text("🎛 **کنترل سریع موتورها**\n\nهر موتور مستقل کنترل می‌شود.",reply_markup=_control_keyboard(),parse_mode="Markdown") if is_admin else await q.edit_message_text("⛔ این بخش فقط برای ادمین است.",reply_markup=_main_keyboard(False))
+            elif data=="controls": await q.edit_message_text(("🎛 **کنترل موتورها**\n\n🤖 اتحاد هالک روشن است.\nهمه موتورهای تحلیلی با هم رأی می‌دهند و فقط یک سیگنال واحد منتشر می‌شود.\n\nبرای کنترل تک‌تک موتورها، اتحاد را خاموش کنید." if SYNCHRONIZED_MODE else "🎛 **کنترل موتورها**\n\n🔴 اتحاد خاموش است.\nحالا هر موتور کلید مستقل خودش را دارد و می‌توانید هرکدام را جداگانه روشن/خاموش کنید."),reply_markup=_control_keyboard(),parse_mode="Markdown") if is_admin else await q.edit_message_text("⛔ این بخش فقط برای ادمین است.",reply_markup=_main_keyboard(False))
             elif data=="wallet":
                 if not is_admin: await q.edit_message_text("⛔ اطلاعات ولت اصلی خصوصی است.",reply_markup=_main_keyboard(False))
                 else: await q.edit_message_text(f"💼 **ولت اصلی**\n\n💰 موجودی: `{get_sol_balance():.6f} SOL`\n\n📍 `{WALLET_PUBKEY or '-'} `",reply_markup=_main_keyboard(True),parse_mode="Markdown")
@@ -2358,18 +2507,86 @@ def start_telegram_bot():
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
                 else:
                     await q.edit_message_text(_admin_free_panel_text(), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]), parse_mode="Markdown")
+            elif data == "trade_limit":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                await q.edit_message_text(
+                    f"💰 **سقف SOL هر معامله**\n\n"
+                    f"مقدار فعلی: `{MAX_TRADE_SOL:g} SOL`\n\n"
+                    "مقدار را کاملاً دستی وارد کن؛ مثلاً `0.003` یا `0.0175` یا `2.5` SOL.\n"
+                    "این مقدار سقف نهایی هر معامله است و مدیریت ریسک پویا نمی‌تواند از آن عبور کند.",
+                    reply_markup=_trade_limit_keyboard(), parse_mode="Markdown"
+                )
+                return
+            elif data == "trade_limit_manual":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                context.user_data["awaiting_trade_limit_sol"] = True
+                await q.edit_message_text(
+                    "✏️ **مقدار دلخواه معامله را بفرست**\n\n"
+                    "فقط عدد SOL را ارسال کن.\n"
+                    "مثال: `0.0175` یا `0.5` یا `2`\n\n"
+                    "برای لغو: /cancel",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="trade_limit")]])
+                )
+                return
+            elif data.startswith("set_trade_limit:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                try:
+                    value = float(data.split(":", 1)[1])
+                    _set_trade_limit(value)
+                    await q.edit_message_text(
+                        f"✅ **سقف معامله تغییر کرد**\n\n💰 حداکثر هر معامله: `{MAX_TRADE_SOL:g} SOL`\n\n"
+                        "از این به بعد هیچ خرید خودکاری از این مقدار بیشتر نمی‌شود.",
+                        reply_markup=_control_keyboard(), parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    await q.edit_message_text(f"❌ مقدار نامعتبر: {e}", reply_markup=_trade_limit_keyboard())
+                return
             elif data.startswith("toggle_"):
-                if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.",reply_markup=_main_keyboard(False)); return
-                mapping={"toggle_unified":"SYNCHRONIZED_MODE","toggle_copy":"COPY_TRADING_ENABLED"}; name=mapping.get(data);
-                if not name: return
-                globals()[name]=not bool(globals()[name]);
-                if name == "SYNCHRONIZED_MODE":
-                    # حالت متحد، همه موتورهای تحلیلی را برای رأی‌دهی نگه می‌دارد.
-                    pass
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.",reply_markup=_main_keyboard(False)); return
+
+                if data == "toggle_unified":
+                    # روشن‌شدن اتحاد یعنی همه موتورهای تحلیلی فوراً برای اجماع فعال شوند.
+                    SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
+                    if SYNCHRONIZED_MODE:
+                        for _, var_name, _ in ENGINE_SWITCHES:
+                            globals()[var_name] = True
+                    message = (
+                        "🟢 **اتحاد هالک AI روشن شد**\n\nهمه موتورهای تحلیلی هم‌زمان فعال شدند و فقط یک سیگنال با نام واحد «هالک AI — موتور متحد بازار» منتشر می‌شود."
+                        if SYNCHRONIZED_MODE else
+                        "🔴 **اتحاد هالک AI خاموش شد**\n\nحالا کلیدهای تک‌تک موتورهای پایین آزاد هستند و می‌توانید هرکدام را جداگانه روشن/خاموش کنید."
+                    )
+                    await q.edit_message_text(message+"\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
+                    return
+
+                if data == "toggle_copy":
+                    COPY_TRADING_ENABLED = not COPY_TRADING_ENABLED
+                else:
+                    engine_map = {callback: var_name for _, var_name, callback in ENGINE_SWITCHES}
+                    name = engine_map.get(data)
+                    if not name:
+                        return
+                    # وقتی اتحاد روشن است، تغییر تکی ممنوع نیست اما دوباره با روشن‌بودن اتحاد همه باید روشن بمانند.
+                    if SYNCHRONIZED_MODE:
+                        for _, var_name, _ in ENGINE_SWITCHES:
+                            globals()[var_name] = True
+                    else:
+                        globals()[name] = not bool(globals()[name])
+
                 await q.edit_message_text("🎛 **کنترل موتورها**\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
         app.add_handler(CommandHandler("start",start_cmd))
         app.add_handler(CommandHandler("free",free_cmd))
         app.add_handler(CommandHandler("setvipchannel",setvipchannel_cmd))
+        app.add_handler(CommandHandler("settradesol",settradesol_cmd))
+        app.add_handler(CommandHandler("cancel",cancel_trade_limit_cmd))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
         app.run_polling(drop_pending_updates=False)
@@ -2378,6 +2595,7 @@ def start_telegram_bot():
 if __name__ == "__main__":
     logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
     _load_channel_config()
+    _load_trade_limit()
     ensure_channel_invite_link()
 
     threads = [
