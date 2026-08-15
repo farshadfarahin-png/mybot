@@ -1646,6 +1646,7 @@ def evaluate_signal_only_positions():
             for token_addr in finished:
                 signal_positions.pop(token_addr, None)
 
+            _mark_token_closed(token_addr, None)
 # سیو سود پله‌ای برای معامله واقعی: ۳۰٪ در TP، ۳۰٪ در 2×TP و مابقی با تریلینگ/SL.
 PARTIAL_TP_LEVELS = ((1.0, 0.30), (2.0, 0.30))
 
@@ -1760,6 +1761,7 @@ def check_positions_loop():
                 with state_lock:
                     for t_addr in tokens_to_close:
                         active_positions.pop(t_addr, None)
+            _mark_token_closed(t_addr, None)
         except Exception as e:
             logger.error(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(2)
@@ -1869,6 +1871,9 @@ def advanced_filter_enabled():
 CONSENSUS_MIN_SCORE = 6
 CONSENSUS_MIN_RATIO = 0.70
 CONSENSUS_COOLDOWN_SECONDS = 120
+
+# Daily signal cap: editable from the management panel, 1..50. Default: 15.
+DAILY_SIGNAL_LIMIT = max(1, min(50, 15))
 CONSENSUS_MIN_LIQUIDITY = 15000.0
 CONSENSUS_MIN_VOLUME_5M = 5000.0
 CONSENSUS_MIN_CHANGE_5M = 2.0
@@ -1990,6 +1995,9 @@ def build_consensus_signal(token_addr, pair):
         return None
 
 def send_fused_signal(token_addr, fusion):
+    if _token_lock_is_open(token_addr):
+        logger.info(f"Duplicate BUY blocked for open token: {token_addr}")
+        return False, "DUPLICATE_OPEN_POSITION"
     """Emit one unified signal after the enabled engines vote together.
     A failed real buy is still published and tracked as a signal-only position.
     """
@@ -2005,6 +2013,7 @@ def send_fused_signal(token_addr, fusion):
     dex_link = f"https://dexscreener.com/solana/{token_addr}"
     token_link = f"https://solscan.io/token/{token_addr}"
 
+    _lock_token_entry(token_addr, "OPEN_PENDING")
     success, result = execute_real_buy(token_addr, amount)
     execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result}"
     solscan_link = f"https://solscan.io/tx/{result}" if success else token_link
@@ -2048,6 +2057,7 @@ def send_fused_signal(token_addr, fusion):
                 "highest_pnl": 0.0, "locked_floor": sl,
                 "trailing_active": DYNAMIC_TRAILING_TP_ENABLED,
                 "side": "BUY", "reason": reason, "buy_amt": amount,
+                "entry_lock": True,
                 "volume": float(fusion.get("vol", 0.0) or 0.0),
                 "liquidity": float(fusion.get("liq", 0.0) or 0.0),
                 "p_change": float(fusion.get("chg", 0.0) or 0.0),
@@ -2074,6 +2084,60 @@ def send_fused_signal(token_addr, fusion):
             f"🔗 Solscan: {token_link}\n📈 DexScreener: {dex_link}"
         )
     return success, result
+
+
+# ==========================================================
+# Persistent token entry lock
+# A token cannot generate another BUY while it has an open
+# real or signal-only position. The lock is released only
+# after a complete SELL/exit is recorded.
+# ==========================================================
+TOKEN_ENTRY_LOCKS = {}
+
+def _token_lock_is_open(token_addr):
+    try:
+        with state_lock:
+            pos = TOKEN_ENTRY_LOCKS.get(token_addr)
+            if pos:
+                return True
+            if token_addr in active_positions:
+                return True
+            if token_addr in signal_positions:
+                return True
+        return False
+    except Exception:
+        return True
+
+def _lock_token_entry(token_addr, kind="OPEN"):
+    if not token_addr:
+        return
+    with state_lock:
+        TOKEN_ENTRY_LOCKS[token_addr] = {
+            "status": kind,
+            "opened_at": time.time()
+        }
+
+def _unlock_token_entry(token_addr):
+    if not token_addr:
+        return
+    with state_lock:
+        TOKEN_ENTRY_LOCKS.pop(token_addr, None)
+
+def _mark_token_closed(token_addr):
+    # Release only after a complete exit.
+    _unlock_token_entry(token_addr)
+
+
+def daily_signal_cap_reached():
+    """Return True when today's emitted BUY-signal cap is reached."""
+    try:
+        # Prefer an existing daily counter if the bot already has one.
+        for name in ("daily_signal_count", "signals_today", "today_signal_count"):
+            if name in globals():
+                return int(globals()[name]) >= int(max(1, min(50, DAILY_SIGNAL_LIMIT)))
+        return False
+    except Exception:
+        return False
 
 def unified_market_scanner_loop(app):
     logger.info(f"{UNIFIED_ENGINE_NAME} فعال شد؛ تمام موتورهای تحلیلی فقط از مسیر Fusion سیگنال می‌دهند.")
