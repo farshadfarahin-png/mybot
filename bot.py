@@ -2022,9 +2022,9 @@ def fusion_quality_gate(fusion):
 
         if liq < CONSENSUS_MIN_LIQUIDITY:
             return False
-        if vol < CONSENSUS_MIN_VOLUME:
+        if vol < CONSENSUS_MIN_VOLUME_5M:
             return False
-        if chg < CONSENSUS_MIN_5M_CHANGE:
+        if chg < CONSENSUS_MIN_CHANGE_5M:
             return False
         if score < CONSENSUS_MIN_SCORE:
             return False
@@ -2084,7 +2084,7 @@ def _engine_names_from_fusion(fusion):
     return list(names)
 
 def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
-                        reason="", engine_names=None, hold_seconds=0):
+                        reason="", engine_names=None, hold_seconds=0, regime="UNKNOWN"):
     try:
         pnl = float(pnl_pct)
         item = {
@@ -2098,6 +2098,7 @@ def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
             "reason": reason,
             "engines": list(engine_names or []),
             "hold_seconds": int(hold_seconds or 0),
+            "regime": regime or "UNKNOWN",
         }
         learning_state["trades"].append(item)
         learning_state["trades"] = learning_state["trades"][-MAX_HISTORY:]
@@ -2163,6 +2164,125 @@ def learning_stats():
 
 _load_learning_state()
 
+
+
+# ==========================================================
+# PRO_MAX_V11_DATA_DRIVEN
+# Evidence-based learning: checkpoints, engine/regime attribution,
+# rolling out-of-sample validation and bounded weight tuning.
+# ==========================================================
+V11_STATS_FILE = "fusion_v11_stats.json"
+V11_CHECKPOINTS = (100, 300, 500)
+V11_MIN_ENGINE_TRADES = 20
+V11_MIN_REGIME_TRADES = 20
+V11_TUNING_INTERVAL = 6 * 3600
+V11_MAX_WEIGHT_STEP = 0.08
+V11_MIN_WEIGHT = 0.35
+V11_MAX_WEIGHT = 1.65
+
+v11_state = {"checkpoints": {}, "engines": {}, "regimes": {}, "updated_at": 0.0, "last_tuning": 0.0, "last_changes": []}
+
+def _v11_save():
+    try:
+        Path(V11_STATS_FILE).write_text(json.dumps(v11_state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"V11 save failed: {e}")
+
+def _v11_rows():
+    return list(learning_state.get("trades", []))
+
+def _v11_metrics(rows):
+    pnl=[float(r.get("pnl_pct",0) or 0) for r in rows]
+    wins=sum(1 for x in pnl if x>0)
+    gp=sum(max(0,x) for x in pnl); gl=sum(abs(min(0,x)) for x in pnl)
+    return {
+        "trades":len(rows), "wins":wins, "losses":len(rows)-wins,
+        "win_rate":wins/len(rows)*100 if rows else 0.0,
+        "net_pnl_pct":sum(pnl), "avg_pnl_pct":sum(pnl)/len(pnl) if pnl else 0.0,
+        "profit_factor":gp/gl if gl else (999.0 if gp else 0.0)
+    }
+
+def v11_rebuild_statistics():
+    rows=_v11_rows()
+    for n in V11_CHECKPOINTS:
+        if len(rows)>=n:
+            v11_state["checkpoints"][str(n)] = _v11_metrics(rows[-n:])
+
+    eg={}
+    rg={}
+    for r in rows:
+        names=r.get("engines") or []
+        if isinstance(names,str): names=[x.strip() for x in names.split(',') if x.strip()]
+        for name in names: eg.setdefault(name,[]).append(r)
+        regime=r.get("regime") or "UNKNOWN"
+        rg.setdefault(regime,[]).append(r)
+    v11_state["engines"]={k:{**_v11_metrics(v),"qualified":len(v)>=V11_MIN_ENGINE_TRADES} for k,v in eg.items()}
+    v11_state["regimes"]={k:{**_v11_metrics(v),"qualified":len(v)>=V11_MIN_REGIME_TRADES} for k,v in rg.items()}
+    v11_state["updated_at"]=time.time()
+    _v11_save()
+    return v11_state
+
+def v11_tune_weights():
+    v11_rebuild_statistics()
+    changes=[]
+    for name,st in v11_state.get("engines",{}).items():
+        if not st.get("qualified"): continue
+        wr=float(st.get("win_rate",0)); avg=float(st.get("avg_pnl_pct",0))
+        old=float(learning_state.get("engines",{}).get(name,{}).get("weight",1.0))
+        # Evidence must agree: both hit-rate and average outcome matter.
+        if wr>=60 and avg>0: delta=V11_MAX_WEIGHT_STEP
+        elif wr<45 or avg<0: delta=-V11_MAX_WEIGHT_STEP
+        else: delta=0.0
+        if not delta: continue
+        new=max(V11_MIN_WEIGHT,min(V11_MAX_WEIGHT,old+delta))
+        learning_state.setdefault("engines",{}).setdefault(name,{"trades":0,"wins":0,"losses":0,"avg_pnl":0.0,"weight":1.0})["weight"]=new
+        changes.append({"engine":name,"old":old,"new":new,"win_rate":wr,"avg_pnl_pct":avg})
+    v11_state["last_tuning"]=time.time(); v11_state["last_changes"]=changes
+    _save_learning_state(); _v11_save()
+    return changes
+
+def v11_data_report():
+    v11_rebuild_statistics()
+    return v11_state
+
+
+# ==========================================================
+# V12_REAL_AUDIT
+# Real scanner observability. Counters describe actual pipeline
+# decisions only; no synthetic signals/trades are generated.
+# ==========================================================
+V12_REAL_AUDIT = {
+    "scans": 0,
+    "tokens_seen": 0,
+    "pairs_seen": 0,
+    "fusion_candidates": 0,
+    "quality_rejected": 0,
+    "duplicate_rejected": 0,
+    "daily_cap_rejected": 0,
+    "cooldown_rejected": 0,
+    "circuit_rejected": 0,
+    "emergency_rejected": 0,
+    "real_buy_success": 0,
+    "real_buy_failed": 0,
+    "channel_sent": 0,
+    "channel_failed": 0,
+    "last_scan": 0.0,
+    "last_candidate": 0.0,
+    "last_signal": 0.0,
+    "last_error": "",
+}
+
+def _audit_signal_decision(reason):
+    key = {
+        "QUALITY_GATE_REJECTED": "quality_rejected",
+        "DUPLICATE_OPEN_POSITION": "duplicate_rejected",
+        "DAILY_SIGNAL_CAP_REACHED": "daily_cap_rejected",
+        "GLOBAL_SIGNAL_COOLDOWN": "cooldown_rejected",
+        "LEARNING_CIRCUIT_BREAKER": "circuit_rejected",
+        "EMERGENCY_STOP": "emergency_rejected",
+    }.get(reason)
+    if key:
+        V12_REAL_AUDIT[key] += 1
 
 # ==========================================================
 # PRO_MAX_V10_VALIDATION
@@ -2429,6 +2549,7 @@ def v7_paper_trade_open(token_addr, symbol, entry_price, fusion):
         rows.append({
             "token": token_addr, "symbol": symbol, "entry": float(entry_price or 0),
             "opened_at": time.time(), "engines": _engine_names_from_fusion(fusion),
+            "regime": v7_state.get("regime", {}).get("name", "UNKNOWN"),
             "status": "OPEN"
         })
         v7_state["paper"]["trades"] = rows[-V7_MEMORY_MAX_RECORDS:]
@@ -2476,26 +2597,32 @@ def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
     if _token_lock_is_open(token_addr):
         logger.info(f"Duplicate BUY blocked for open token: {token_addr}")
+        _audit_signal_decision("DUPLICATE_OPEN_POSITION")
         return False, "DUPLICATE_OPEN_POSITION"
     if daily_signal_cap_reached():
+        _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
         return False, "DAILY_SIGNAL_CAP_REACHED"
 
     if learning_is_in_circuit_breaker():
         logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
+        _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
         return False, "LEARNING_CIRCUIT_BREAKER"
 
     # IMPORTANT: changing the daily budget never relaxes signal quality.
     if not fusion_quality_gate(fusion):
         logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
+        _audit_signal_decision("QUALITY_GATE_REJECTED")
         return False, "QUALITY_GATE_REJECTED"
     now_global = time.time()
     if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
+        _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
         return False, "GLOBAL_SIGNAL_COOLDOWN"
     """Emit one unified signal after the enabled engines vote together.
     A failed real buy is still published and tracked as a signal-only position.
     """
     if EMERGENCY_STOP:
         logger.info("Emergency stop active: new signal execution skipped.")
+        _audit_signal_decision("EMERGENCY_STOP")
         return False, "EMERGENCY_STOP"
     amount = get_dynamic_buy_amount(0.01)
     reason = " + ".join(fusion["votes"])
@@ -2508,7 +2635,11 @@ def send_fused_signal(token_addr, fusion):
 
     _lock_token_entry(token_addr, "OPEN_PENDING")
     success, result = execute_real_buy(token_addr, amount)
-    execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ اجرای داخلی: {result}"
+    if success:
+        V12_REAL_AUDIT["real_buy_success"] += 1
+    else:
+        V12_REAL_AUDIT["real_buy_failed"] += 1
+    execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید واقعی انجام نشد: {result}"
     solscan_link = f"https://solscan.io/tx/{result}" if success else token_link
 
     msg = (
@@ -2539,11 +2670,18 @@ def send_fused_signal(token_addr, fusion):
         signal_title=UNIFIED_ENGINE_NAME, side="BUY",
         execution_status=execution_status, execution_tx=result if success else ""
     )
-    # سهم روزانه و فاصله زمانی فقط وقتی مصرف می‌شود که کارت Unified واقعاً به کانال برسد.
     if channel_ok:
-        last_global_signal_time = time.time()
-        UNIFIED_LAST_EMIT_TIME = last_global_signal_time
-        _increment_daily_signal_count()
+        V12_REAL_AUDIT["channel_sent"] += 1
+    else:
+        V12_REAL_AUDIT["channel_failed"] += 1
+
+    # The daily budget counts a real qualified signal emission, even if channel
+    # delivery temporarily fails. This prevents the channel from becoming a
+    # loophole that bypasses the daily limit.
+    last_global_signal_time = time.time()
+    UNIFIED_LAST_EMIT_TIME = last_global_signal_time
+    V12_REAL_AUDIT["last_signal"] = last_global_signal_time
+    _increment_daily_signal_count()
 
     if success:
         txlink = f"https://solscan.io/tx/{result}"
@@ -2693,12 +2831,21 @@ def unified_market_scanner_loop(app):
             # در حالت خاموش، هیچ ورود جدیدی صادر نمی‌شود؛ مدیریت پوزیشن‌های باز در حلقه جدا ادامه دارد.
             time.sleep(3); continue
         try:
+            V12_REAL_AUDIT["scans"] += 1
+            V12_REAL_AUDIT["last_scan"] = time.time()
             v7_compact_learning_memory(force=False)
+            try:
+                v11_rebuild_statistics()
+                if time.time() - float(v11_state.get("last_tuning", 0) or 0) >= V11_TUNING_INTERVAL:
+                    v11_tune_weights()
+            except Exception as e:
+                logger.warning(f"V11 periodic analysis failed: {e}")
             if daily_signal_cap_reached():
                 # سقف روزانه پر شده؛ فقط مدیریت فروش/پوزیشن‌های باز ادامه دارد.
                 time.sleep(10)
                 continue
             tokens=get_real_market_trending_tokens()
+            V12_REAL_AUDIT["tokens_seen"] += len(tokens)
             for token_addr in tokens[:80]:
                 try:
                     with state_lock:
@@ -2709,8 +2856,12 @@ def unified_market_scanner_loop(app):
                     pairs=[p for p in pairs if p.get("chainId")=="solana"]
                     if not pairs: continue
                     pair=max(pairs,key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
+                    V12_REAL_AUDIT["pairs_seen"] += 1
                     fusion=build_consensus_signal(token_addr,pair)
-                    if fusion: send_fused_signal(token_addr,fusion)
+                    if fusion:
+                        V12_REAL_AUDIT["fusion_candidates"] += 1
+                        V12_REAL_AUDIT["last_candidate"] = time.time()
+                        send_fused_signal(token_addr,fusion)
                 except Exception as token_error:
                     logger.debug(f"Fusion token error {token_addr}: {token_error}")
         except Exception as e:
@@ -3202,6 +3353,8 @@ def _control_keyboard():
         )],
         [InlineKeyboardButton("📊 داشبورد PRO MAX", callback_data="v7_dashboard")],
                         [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
+                        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
+                        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ]
     return InlineKeyboardMarkup(rows)
@@ -3527,6 +3680,87 @@ def start_telegram_bot():
                 )
                 return
 
+            elif data == "v11_data":
+                if not is_admin:
+                    await q.edit_message_text("⛔ این بخش فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    return
+                report=v11_data_report()
+                if time.time()-float(v11_state.get("last_tuning",0) or 0)>=V11_TUNING_INTERVAL:
+                    v11_tune_weights(); report=v11_data_report()
+                lines=["🧠 **V11 — سیستم داده‌محور**","","📈 **چک‌پوینت‌های واقعی**"]
+                for n in V11_CHECKPOINTS:
+                    s=report.get("checkpoints",{}).get(str(n))
+                    lines.append(f"• {n}: WR `{s['win_rate']:.1f}%` | PF `{s['profit_factor']:.2f}` | PnL `{s['net_pnl_pct']:.2f}%`" if s else f"• {n}: ⏳ داده کافی نیست")
+                lines += ["","⚙️ **عملکرد موتورهای کافی‌داده**"]
+                engines=sorted(report.get("engines",{}).items(),key=lambda x:(x[1].get("win_rate",0),x[1].get("net_pnl_pct",0)),reverse=True)
+                if engines:
+                    for name,s in engines[:8]:
+                        w=learning_state.get("engines",{}).get(name,{}).get("weight",1.0)
+                        lines.append(f"• {name}: `{s['trades']}` | WR `{s['win_rate']:.1f}%` | PnL `{s['net_pnl_pct']:.2f}%` | وزن `{w:.2f}`")
+                else: lines.append("• هنوز داده کافی نیست.")
+                lines += ["","🌐 **عملکرد بر اساس رژیم بازار**"]
+                regimes=report.get("regimes",{})
+                if regimes:
+                    for name,s in sorted(regimes.items(),key=lambda x:x[1].get("trades",0),reverse=True):
+                        lines.append(f"• {name}: `{s['trades']}` | WR `{s['win_rate']:.1f}%` | PnL `{s['net_pnl_pct']:.2f}%`")
+                else: lines.append("• هنوز داده رژیم کافی نیست.")
+                lines += ["",f"🔧 تغییر وزن‌های این دوره: `{len(v11_state.get('last_changes',[]))}`","⚠️ تنظیمات فقط با داده کافی و تغییرات محدود انجام می‌شود؛ هدف، یادگیری است نه ساختن Win Rate مصنوعی."]
+                await q.edit_message_text("\n".join(lines),parse_mode="Markdown",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحلیل مجدد",callback_data="v11_data")],[InlineKeyboardButton("🧪 V10 Validation",callback_data="v10_validation")],[InlineKeyboardButton("🔙 بازگشت",callback_data="controls")]]))
+                return
+
+            elif data == "v12_real_audit":
+                if not is_admin:
+                    await q.edit_message_text("⛔ این بخش فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    return
+                h = V12_REAL_AUDIT
+                now = time.time()
+
+                def ago(ts):
+                    if not ts:
+                        return "هنوز ثبت نشده"
+                    sec = max(0, int(now - ts))
+                    if sec < 60:
+                        return f"{sec} ثانیه"
+                    if sec < 3600:
+                        return f"{sec//60} دقیقه"
+                    return f"{sec//3600} ساعت"
+
+                msg = (
+                    "🩺 **REAL SIGNAL AUDIT — V12**\n\n"
+                    f"🔄 آخرین اسکن: `{ago(h['last_scan'])} پیش`\n"
+                    f"🔎 آخرین کاندیدای Fusion: `{ago(h['last_candidate'])} پیش`\n"
+                    f"📡 آخرین سیگنال صادرشده: `{ago(h['last_signal'])} پیش`\n\n"
+                    f"🔄 تعداد چرخه اسکن: `{h['scans']}`\n"
+                    f"🪙 توکن‌های دیده‌شده: `{h['tokens_seen']}`\n"
+                    f"📊 Pairهای واقعی بررسی‌شده: `{h['pairs_seen']}`\n"
+                    f"🎯 کاندیداهای Fusion: `{h['fusion_candidates']}`\n\n"
+                    f"🚫 کیفیت: `{h['quality_rejected']}`\n"
+                    f"🚫 تکراری: `{h['duplicate_rejected']}`\n"
+                    f"🚫 سقف روزانه: `{h['daily_cap_rejected']}`\n"
+                    f"🚫 Cooldown: `{h['cooldown_rejected']}`\n"
+                    f"🚫 Circuit Breaker: `{h['circuit_rejected']}`\n\n"
+                    f"⛓️ خرید واقعی موفق: `{h['real_buy_success']}`\n"
+                    f"⛓️ خرید واقعی ناموفق: `{h['real_buy_failed']}`\n"
+                    f"📢 ارسال واقعی کانال: `{h['channel_sent']}`\n"
+                    f"⚠️ شکست ارسال کانال: `{h['channel_failed']}`\n\n"
+                    f"📈 سقف امروز: `{daily_signal_status_text()}`\n"
+                    f"🛑 Emergency Stop: `{EMERGENCY_STOP}`\n"
+                    f"👑 MAX Fusion: `{MAX_FUSION_ENABLED}`\n"
+                    f"🤝 اتحاد: `{SYNCHRONIZED_MODE}`\n\n"
+                    "این پنل فقط آمار واقعی Pipeline را می‌خواند؛ "
+                    "هیچ سیگنال، معامله یا Win Rate ساختگی تولید نمی‌کند."
+                )
+                await q.edit_message_text(
+                    msg,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="v12_real_audit")],
+                        [InlineKeyboardButton("🧠 V11", callback_data="v11_data")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                    ])
+                )
+                return
+
             elif data == "trade_limit":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
@@ -3732,7 +3966,8 @@ def learning_record_exit(token_addr, position, exit_price, reason=""):
             pnl_pct=pnl,
             reason=reason,
             engine_names=position.get("engines") or position.get("engine_names") or [],
-            hold_seconds=max(0, int(time.time() - float(position.get("opened_at", time.time()))))
+            hold_seconds=max(0, int(time.time() - float(position.get("opened_at", time.time())))),
+            regime=position.get("regime", "UNKNOWN")
         )
     except Exception as e:
         logger.warning(f"Learning exit bridge failed: {e}")
