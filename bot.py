@@ -3020,7 +3020,7 @@ def start_telegram_bot():
                     context.user_data.pop("awaiting_daily_signal_limit", None)
                     await update.message.reply_text(
                         f"✅ **سقف روزانه تغییر کرد**\n\n🎯 حداکثر سیگنال ورود در روز: `{value}`\n"
-                        f"📊 امروز: `{daily_signal_status_text()}`\n\n"
+                        f"📊 امروز / سقف جدید: `{daily_signal_status_text()}`\n\n"
                         "بعد از رسیدن به این عدد، ورود جدید متوقف می‌شود ولی فروش/مدیریت پوزیشن‌های باز ادامه دارد.",
                         parse_mode="Markdown",
                         reply_markup=_control_keyboard()
@@ -3083,7 +3083,7 @@ def start_telegram_bot():
                     return
                 await q.edit_message_text(
                     f"🎯 **سهم روزانه سیگنال**\n\n"
-                    f"📊 امروز: `{daily_signal_status_text()}`\n"
+                    f"📊 امروز / سقف انتخابی: `{daily_signal_status_text()}`\n"
                     f"🔧 سقف فعلی: `{DAILY_SIGNAL_LIMIT}` سیگنال\n\n"
                     "عدد دلخواه را بین **1 تا 50** بفرست.\n"
                     "پیش‌فرض: **15**\n\n"
@@ -3160,7 +3160,6 @@ def start_telegram_bot():
                     f"   └ جزئیات قدیمی‌تر از {V7_MEMORY_MAX_AGE_DAYS} روز حذف/فشرده می‌شوند."
                 )
 
-                await q.answer()
                 await q.edit_message_text(
                     msg,
                     parse_mode="Markdown",
@@ -3213,6 +3212,31 @@ def start_telegram_bot():
                 except Exception as e:
                     await q.edit_message_text(f"❌ مقدار نامعتبر: {e}", reply_markup=_trade_limit_keyboard())
                 return
+            elif data == "engine_manage":
+                if not is_admin:
+                    await q.edit_message_text(
+                        "⛔ این بخش فقط برای ادمین است.",
+                        reply_markup=_main_keyboard(False)
+                    )
+                    return
+                if MAX_FUSION_ENABLED:
+                    await q.edit_message_text(
+                        "🔒 **مدیریت موتورهای مستقل قفل است**\n\n"
+                        "👑 MAX FUSION فعال است.\n"
+                        "برای تغییر موتورهای جداگانه ابتدا MAX FUSION را خاموش کن.",
+                        reply_markup=_control_keyboard(),
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await q.edit_message_text(
+                        "⚙️ **مدیریت موتورهای مستقل**\n\n"
+                        "هر موتور کلید مستقل خودش را دارد و می‌توانی جداگانه ON/OFF کنی.\n"
+                        "خاموش کردن یک موتور، اتحاد را خاموش نمی‌کند.",
+                        reply_markup=_engine_control_keyboard(),
+                        parse_mode="Markdown"
+                    )
+                return
+
             elif data.startswith("toggle_"):
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.",reply_markup=_main_keyboard(False)); return
@@ -3263,13 +3287,6 @@ def start_telegram_bot():
                         "🟢 **توقف اضطراری برداشته شد**\n\nسیستم‌های فعال دوباره اجازه جست‌وجوی معامله جدید دارند."
                     )
                     await q.edit_message_text(message, reply_markup=_control_keyboard(), parse_mode="Markdown")
-                    return
-
-                if data == "engine_manage":
-                    if MAX_FUSION_ENABLED:
-                        await q.edit_message_text("🔒 **مدیریت موتورهای مستقل قفل است**\n\n👑 MAX FUSION فعال است. ابتدا MAX FUSION را خاموش کن.", reply_markup=_control_keyboard(), parse_mode="Markdown")
-                    else:
-                        await q.edit_message_text("⚙️ **مدیریت موتورهای مستقل**\n\nهر موتور را می‌توانی جداگانه ON/OFF کنی.\nاگر اتحاد هالک روشن باشد، فقط موتورهای ON در اتحاد رأی می‌دهند؛ خاموش‌کردن یک موتور اتحاد را خاموش نمی‌کند.", reply_markup=_engine_control_keyboard(), parse_mode="Markdown")
                     return
 
                 if data == "toggle_unified":
