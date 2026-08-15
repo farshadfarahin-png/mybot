@@ -178,6 +178,8 @@ tech_processed_tokens = set()
 mempool_processed_tokens = set()
 ultra_processed_tokens = set()
 active_positions = {}
+# سیگنال‌های صادرشده‌ای که خرید واقعی به هر دلیل اجرا نشده؛ فقط از نظر قیمت رصد می‌شوند.
+signal_positions = {}
 
 closed_trades_history = []
 total_realized_pnl_usd = 0.0
@@ -423,7 +425,7 @@ def ultra_accuracy_scanner_loop(app):
                         with state_lock:
                             ultra_processed_tokens.add(token_addr)
                             processed_tokens.add(token_addr)
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://dexscreener.com/solana/{token_addr}"
+                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://solscan.io/token/{token_addr}"
                     init_tp = 30.0
                     init_sl = -7.0
 
@@ -496,7 +498,7 @@ def mempool_smart_money_scanner_loop(app):
                         with state_lock:
                             mempool_processed_tokens.add(token_addr)
                             processed_tokens.add(token_addr)
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://dexscreener.com/solana/{token_addr}"
+                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://solscan.io/token/{token_addr}"
 
                     mempool_msg = (
                         f"⚡🕵️ [شکارچی ممپول & اسمارت مانی هالکی]\n"
@@ -805,7 +807,8 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         f"📌 وضعیت اجرا: {execution_status}\n"
         f"⚡️ سیستم هوشمند هالکی\n━━━━━━━━━━━━━━━━━━━━"
     )
-    buttons = [[InlineKeyboardButton("🔍 Solscan", url=solscan_link), InlineKeyboardButton("📈 DexScreener", url=f"https://dexscreener.com/solana/{token_addr}")]]
+    safe_solscan = solscan_link if str(solscan_link).startswith("https://solscan.io/") else f"https://solscan.io/token/{token_addr}"
+    buttons = [[InlineKeyboardButton("🔍 Solscan", url=safe_solscan), InlineKeyboardButton("📈 DexScreener", url=f"https://dexscreener.com/solana/{token_addr}")]]
     if WEBAPP_URL:
         buttons.append([InlineKeyboardButton("🤖 ورود به Mini App و کپی‌ترید", url=WEBAPP_URL)])
     return send_telegram_msg(graphic_text, target_chat=CHANNEL_ID, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=None)
@@ -1274,11 +1277,107 @@ def execute_real_sell(token_mint, token_amount):
     except Exception as e:
         return False, f"خطا: {e}"
 
+
+def _signal_links(token_addr, tx_signature=""):
+    solscan = f"https://solscan.io/tx/{tx_signature}" if tx_signature else f"https://solscan.io/token/{token_addr}"
+    dex = f"https://dexscreener.com/solana/{token_addr}"
+    return solscan, dex
+
+def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx_signature=""):
+    symbol = pos.get("symbol", "TOKEN")
+    entry = float(pos.get("entry_price", 0) or 0)
+    tp = float(pos.get("tp", 0) or 0)
+    sl = float(pos.get("sl", 0) or 0)
+    reason = pos.get("reason", "سیگنال متحد موتورها")
+    solscan, dex = _signal_links(token_addr, tx_signature)
+
+    if outcome == "SELL_SUCCESS":
+        title, status = "🔴 فروش خودکار موفق", "🟢 فروش موفق روی بلاکچین"
+    elif outcome == "SELL_FAILED":
+        title, status = "⚠️ سیگنال خروج / فروش ناموفق", "⚠️ فروش انجام نشد"
+    elif outcome == "SIGNAL_TP":
+        title, status = "🎯 حد سود سیگنال فعال شد", "🟢 سیگنال به تارگت سود رسید"
+    else:
+        title, status = "🛑 حد ضرر سیگنال فعال شد", "🔴 سیگنال به حد ضرر رسید"
+
+    msg = (
+        f"{title}\n\n"
+        f"🪙 توکن: {symbol}\n"
+        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+        f"💵 نقطه ورود: ${entry:.8f}\n"
+        f"📉 قیمت فعلی/خروج: ${current_price:.8f}\n"
+        f"📊 سود/زیان: {pnl_percent:+.2f}%\n"
+        f"🎯 تارگت سود: +{tp:.2f}%\n"
+        f"🛑 حد ضرر: {sl:.2f}%\n"
+        f"📌 وضعیت: {status}\n"
+        f"🤖 موتور: {reason}\n\n"
+        f"🔗 Solscan: {solscan}\n"
+        f"📈 DexScreener: {dex}"
+    )
+    send_telegram_msg(msg)
+    _load_channel_config()
+    if CHANNEL_ID:
+        send_telegram_msg(msg, target_chat=CHANNEL_ID)
+
+def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_change,
+                      reason, buy_amt, buy_status):
+    with state_lock:
+        signal_positions[token_addr] = {
+            "entry_price": price, "symbol": symbol, "tp": tp, "sl": sl,
+            "volume": volume, "liquidity": liquidity, "p_change": p_change,
+            "reason": reason, "buy_amt": buy_amt, "buy_status": buy_status,
+            "created_at": time.time(), "highest_pnl": 0.0
+        }
+
+def evaluate_signal_only_positions():
+    finished = []
+    with state_lock:
+        items = list(signal_positions.items())
+
+    for token_addr, pos in items:
+        try:
+            res = http_session.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4
+            )
+            if res.status_code != 200:
+                continue
+            pairs = (res.json() or {}).get("pairs") or []
+            pairs = [p for p in pairs if p.get("chainId") == "solana"]
+            if not pairs:
+                continue
+            pair = max(pairs, key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
+            current_price = float(pair.get("priceUsd", 0) or 0)
+            entry = float(pos.get("entry_price", 0) or 0)
+            if current_price <= 0 or entry <= 0:
+                continue
+            pnl = ((current_price - entry) / entry) * 100.0
+            pos["highest_pnl"] = max(float(pos.get("highest_pnl", pnl)), pnl)
+            tp = float(pos.get("tp", 0) or 0)
+            sl = float(pos.get("sl", 0) or 0)
+
+            if pnl >= tp:
+                send_signal_outcome(token_addr, pos, current_price, "SIGNAL_TP", pnl)
+                finished.append(token_addr)
+            elif pnl <= sl:
+                send_signal_outcome(token_addr, pos, current_price, "SIGNAL_SL", pnl)
+                finished.append(token_addr)
+        except Exception as e:
+            logger.debug(f"Signal-only monitor error {token_addr}: {e}")
+
+    if finished:
+        with state_lock:
+            for token_addr in finished:
+                signal_positions.pop(token_addr, None)
+
+# سیو سود پله‌ای برای معامله واقعی: ۳۰٪ در TP، ۳۰٪ در 2×TP و مابقی با تریلینگ/SL.
+PARTIAL_TP_LEVELS = ((1.0, 0.30), (2.0, 0.30))
+
 def check_positions_loop():
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
 
     while True:
         try:
+            evaluate_signal_only_positions()
             tokens_to_close = []
             with state_lock:
                 current_positions = list(active_positions.items())
@@ -1341,6 +1440,32 @@ def check_positions_loop():
                             current_locked_floor = max(current_locked_floor, 0.0)
 
                         pos['locked_floor'] = current_locked_floor
+
+                        # سیو سود پله‌ای فقط روی پوزیشن واقعی اجرا می‌شود.
+                        for level_mult, sell_fraction in PARTIAL_TP_LEVELS:
+                            stage_key = f"partial_tp_{level_mult:g}"
+                            target_pct = initial_tp * level_mult
+                            if highest_pnl >= target_pct and not pos.get(stage_key, False):
+                                token_balance = get_token_balance(token_addr)
+                                if token_balance > 0:
+                                    partial_amount = int(token_balance * sell_fraction)
+                                    if partial_amount > 0:
+                                        partial_ok, partial_tx = execute_real_sell(token_addr, partial_amount)
+                                        if partial_ok:
+                                            pos[stage_key] = True
+                                            partial_msg = (
+                                                f"🎯💰 سیو سود پله‌ای فعال شد\n\n"
+                                                f"🪙 توکن: {symbol}\n"
+                                                f"📈 سود لحظه‌ای: {highest_pnl:+.2f}%\n"
+                                                f"💸 فروش مرحله: {sell_fraction*100:.0f}%\n"
+                                                f"📌 وضعیت: 🟢 فروش موفق روی بلاکچین\n"
+                                                f"🔗 Solscan: https://solscan.io/tx/{partial_tx}\n"
+                                                f"📈 DexScreener: https://dexscreener.com/solana/{token_addr}"
+                                            )
+                                            send_telegram_msg(partial_msg)
+                                            _load_channel_config()
+                                            if CHANNEL_ID:
+                                                send_telegram_msg(partial_msg, target_chat=CHANNEL_ID)
 
                         should_exit = False
                         exit_reason_text = ""
@@ -1454,7 +1579,7 @@ def technical_analysis_scanner_loop(app):
                     with state_lock:
                         tech_processed_tokens.add(token_addr)
                         processed_tokens.add(token_addr)
-                solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://dexscreener.com/solana/{token_addr}"
+                solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://solscan.io/token/{token_addr}"
 
                 target_tp_val = price * (1 + (TECH_TAKE_PROFIT / 100))
                 target_sl_val = price * (1 + (TECH_STOP_LOSS / 100))
@@ -1549,10 +1674,25 @@ def send_fused_signal(token_addr,fusion):
         txlink=f"https://solscan.io/tx/{result}"
         with state_lock:
             processed_tokens.add(token_addr)
-            active_positions[token_addr]={"entry_price":fusion["price"],"symbol":fusion["symbol"],"tp":fusion["tp"],"sl":fusion["sl"],"highest_price":fusion["price"],"highest_pnl":0.0,"locked_floor":fusion["sl"],"trailing_active":DYNAMIC_TRAILING_TP_ENABLED}
+            active_positions[token_addr]={
+                "entry_price":fusion["price"], "symbol":fusion["symbol"],
+                "tp":fusion["tp"], "sl":fusion["sl"],
+                "highest_price":fusion["price"], "highest_pnl":0.0,
+                "locked_floor":fusion["sl"], "trailing_active":DYNAMIC_TRAILING_TP_ENABLED,
+                "side":"BUY", "reason":reason
+            }
         send_telegram_msg(f"🟢 خرید خودکار انجام شد\n🪙 {fusion['symbol']}\n💰 {amount} SOL\n🔗 {txlink}")
     else:
-        send_telegram_msg(f"⚠️ سیگنال صادر شد ولی اجرای خودکار انجام نشد: {result}")
+        track_signal_only(
+            token_addr, fusion["symbol"], fusion["price"], fusion["tp"], fusion["sl"],
+            fusion["vol"], fusion["liq"], fusion["chg"], reason, amount, execution_status
+        )
+        send_telegram_msg(
+            f"⚠️ سیگنال ثبت و رصد شد؛ خرید واقعی انجام نشد.\n"
+            f"🪙 {fusion['symbol']}\n📌 علت: {result}\n"
+            f"🎯 TP: +{fusion['tp']:.1f}% | 🛑 SL: {fusion['sl']:.1f}%\n"
+            f"📈 نتیجه سیگنال تا TP/SL پایش می‌شود."
+        )
     return success,result
 
 def unified_market_scanner_loop(app):
