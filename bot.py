@@ -906,6 +906,11 @@ def ensure_channel_invite_link():
     return ""
 
 def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="", execution_tx="", pnl_percent=None):
+    # در MAX FUSION، پیام BUY فقط از مسیر Unified Fusion اجازه انتشار دارد.
+    # پیام SELL همیشه مجاز است تا خروج پوزیشن‌ها بدون مانع ادامه پیدا کند.
+    if str(side).upper() == "BUY" and MAX_FUSION_ENABLED and signal_title != UNIFIED_ENGINE_NAME:
+        logger.info(f"Blocked legacy BUY channel card while MAX FUSION is active: {signal_title}")
+        return False
     """کارت سیگنال VIP برای موبایل.
     نکته: وضعیت موجودی/اجرای کیف پول هرگز در کانال نمایش داده نمی‌شود.
     لینک‌ها فقط روی دکمه‌ها هستند؛ متن کانال لینک خام ندارد.
@@ -1643,10 +1648,10 @@ def evaluate_signal_only_positions():
 
     if finished:
         with state_lock:
-            for token_addr in finished:
-                signal_positions.pop(token_addr, None)
-
-            _mark_token_closed(token_addr, None)
+            for finished_addr in finished:
+                signal_positions.pop(finished_addr, None)
+                # فقط بعد از خروج کامل، اجازه ورود مجدد به همان توکن آزاد می‌شود.
+                _mark_token_closed(finished_addr)
 # سیو سود پله‌ای برای معامله واقعی: ۳۰٪ در TP، ۳۰٪ در 2×TP و مابقی با تریلینگ/SL.
 PARTIAL_TP_LEVELS = ((1.0, 0.30), (2.0, 0.30))
 
@@ -1761,7 +1766,8 @@ def check_positions_loop():
                 with state_lock:
                     for t_addr in tokens_to_close:
                         active_positions.pop(t_addr, None)
-            _mark_token_closed(t_addr, None)
+                        # قفل همان توکن فقط پس از فروش کامل آزاد می‌شود.
+                        _mark_token_closed(t_addr)
         except Exception as e:
             logger.error(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(2)
@@ -1870,10 +1876,14 @@ def advanced_filter_enabled():
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
 CONSENSUS_MIN_SCORE = 6
 CONSENSUS_MIN_RATIO = 0.70
-CONSENSUS_COOLDOWN_SECONDS = 120
+CONSENSUS_COOLDOWN_SECONDS = 300
 
 # Daily signal cap: editable from the management panel, 1..50. Default: 15.
-DAILY_SIGNAL_LIMIT = max(1, min(50, 15))
+DAILY_SIGNAL_LIMIT = 15
+# فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 15 * 60
+last_global_signal_time = 0.0
+UNIFIED_LAST_EMIT_TIME = 0.0
 CONSENSUS_MIN_LIQUIDITY = 15000.0
 CONSENSUS_MIN_VOLUME_5M = 5000.0
 CONSENSUS_MIN_CHANGE_5M = 2.0
@@ -1995,9 +2005,15 @@ def build_consensus_signal(token_addr, pair):
         return None
 
 def send_fused_signal(token_addr, fusion):
+    global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
     if _token_lock_is_open(token_addr):
         logger.info(f"Duplicate BUY blocked for open token: {token_addr}")
         return False, "DUPLICATE_OPEN_POSITION"
+    if daily_signal_cap_reached():
+        return False, "DAILY_SIGNAL_CAP_REACHED"
+    now_global = time.time()
+    if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
+        return False, "GLOBAL_SIGNAL_COOLDOWN"
     """Emit one unified signal after the enabled engines vote together.
     A failed real buy is still published and tracked as a signal-only position.
     """
@@ -2015,7 +2031,7 @@ def send_fused_signal(token_addr, fusion):
 
     _lock_token_entry(token_addr, "OPEN_PENDING")
     success, result = execute_real_buy(token_addr, amount)
-    execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result}"
+    execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ اجرای داخلی: {result}"
     solscan_link = f"https://solscan.io/tx/{result}" if success else token_link
 
     msg = (
@@ -2039,13 +2055,18 @@ def send_fused_signal(token_addr, fusion):
     )
     send_telegram_msg(msg)
 
-    send_graphic_signal_to_vip_channel(
+    channel_ok = send_graphic_signal_to_vip_channel(
         token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
         buy_amt=amount, volume=fusion['vol'], liquidity=fusion['liq'],
         p_change=fusion['chg'], solscan_link=solscan_link,
         signal_title=UNIFIED_ENGINE_NAME, side="BUY",
         execution_status=execution_status, execution_tx=result if success else ""
     )
+    # سهم روزانه و فاصله زمانی فقط وقتی مصرف می‌شود که کارت Unified واقعاً به کانال برسد.
+    if channel_ok:
+        last_global_signal_time = time.time()
+        UNIFIED_LAST_EMIT_TIME = last_global_signal_time
+        _increment_daily_signal_count()
 
     if success:
         txlink = f"https://solscan.io/tx/{result}"
@@ -2070,18 +2091,11 @@ def send_fused_signal(token_addr, fusion):
             f"🟢 خرید خودکار انجام شد\n🪙 {symbol}\n💰 {amount:g} SOL\n🔗 {txlink}"
         )
     else:
-        # حتی با سولانای ناکافی، سیگنال حذف نمی‌شود؛ از قیمت ورود تا خروج پایش می‌شود.
+        # خرید واقعی انجام نشد؛ فقط یک پوزیشن سیگنال-مجازی داخلی ساخته می‌شود.
+        # هیچ پیام «ثبت/رصد شد» یا «SOL ناکافی» برای کاربر ارسال نمی‌شود.
         track_signal_only(
             token_addr, symbol, price, tp, sl, fusion['vol'], fusion['liq'],
             fusion['chg'], reason, amount, execution_status
-        )
-        send_telegram_msg(
-            f"⚠️ سیگنال ثبت و رصد شد؛ خرید واقعی انجام نشد.\n"
-            f"🪙 {symbol}\n📍 آدرس: `{token_addr}`\n"
-            f"📌 علت: {result}\n"
-            f"🎯 TP: +{tp:.1f}% | 🛑 SL: {sl:.1f}%\n"
-            f"📈 نتیجه سیگنال تا تریلینگ/حدضرر پایش می‌شود.\n\n"
-            f"🔗 Solscan: {token_link}\n📈 DexScreener: {dex_link}"
         )
     return success, result
 
@@ -2128,16 +2142,71 @@ def _mark_token_closed(token_addr):
     _unlock_token_entry(token_addr)
 
 
-def daily_signal_cap_reached():
-    """Return True when today's emitted BUY-signal cap is reached."""
+def _load_daily_signal_state():
+    """Load today's signal count and cap from persistent bot settings."""
+    global DAILY_SIGNAL_LIMIT
+    today = time.strftime("%Y-%m-%d")
     try:
-        # Prefer an existing daily counter if the bot already has one.
-        for name in ("daily_signal_count", "signals_today", "today_signal_count"):
-            if name in globals():
-                return int(globals()[name]) >= int(max(1, min(50, DAILY_SIGNAL_LIMIT)))
-        return False
+        saved_limit = _get_bot_setting("daily_signal_limit", "")
+        if saved_limit:
+            DAILY_SIGNAL_LIMIT = max(1, min(50, int(saved_limit)))
+    except Exception:
+        DAILY_SIGNAL_LIMIT = max(1, min(50, int(DAILY_SIGNAL_LIMIT or 15)))
+
+    try:
+        saved_date = _get_bot_setting("daily_signal_date", "")
+        saved_count = int(_get_bot_setting("daily_signal_count", "0") or 0)
+        if saved_date != today:
+            _set_bot_setting("daily_signal_date", today)
+            _set_bot_setting("daily_signal_count", 0)
+            saved_count = 0
+        return saved_count
+    except Exception:
+        return 0
+
+
+def _set_daily_signal_limit(value):
+    global DAILY_SIGNAL_LIMIT
+    value = int(value)
+    if value < 1 or value > 50:
+        raise ValueError("سقف روزانه باید بین 1 تا 50 سیگنال باشد.")
+    DAILY_SIGNAL_LIMIT = value
+    _set_bot_setting("daily_signal_limit", value)
+    return value
+
+
+def _increment_daily_signal_count():
+    today = time.strftime("%Y-%m-%d")
+    try:
+        saved_date = _get_bot_setting("daily_signal_date", "")
+        count = int(_get_bot_setting("daily_signal_count", "0") or 0)
+        if saved_date != today:
+            count = 0
+            _set_bot_setting("daily_signal_date", today)
+        count += 1
+        _set_bot_setting("daily_signal_count", count)
+        return count
+    except Exception as e:
+        logger.warning(f"Daily signal counter error: {e}")
+        return 0
+
+
+def daily_signal_cap_reached():
+    """Stop NEW entries after the admin-selected daily cap."""
+    try:
+        count = _load_daily_signal_state()
+        return count >= max(1, min(50, int(DAILY_SIGNAL_LIMIT)))
     except Exception:
         return False
+
+
+def daily_signal_status_text():
+    try:
+        count = _load_daily_signal_state()
+        return f"{count}/{DAILY_SIGNAL_LIMIT}"
+    except Exception:
+        return f"0/{DAILY_SIGNAL_LIMIT}"
+
 
 def unified_market_scanner_loop(app):
     logger.info(f"{UNIFIED_ENGINE_NAME} فعال شد؛ تمام موتورهای تحلیلی فقط از مسیر Fusion سیگنال می‌دهند.")
@@ -2147,6 +2216,10 @@ def unified_market_scanner_loop(app):
             # در حالت خاموش، هیچ ورود جدیدی صادر نمی‌شود؛ مدیریت پوزیشن‌های باز در حلقه جدا ادامه دارد.
             time.sleep(3); continue
         try:
+            if daily_signal_cap_reached():
+                # سقف روزانه پر شده؛ فقط مدیریت فروش/پوزیشن‌های باز ادامه دارد.
+                time.sleep(10)
+                continue
             tokens=get_real_market_trending_tokens()
             for token_addr in tokens[:80]:
                 try:
@@ -2572,6 +2645,10 @@ def _main_keyboard(is_admin=False):
     elif CHANNEL_INVITE_LINK: rows.append([InlineKeyboardButton("📢 کانال VIP",url=CHANNEL_INVITE_LINK)])
     if is_admin:
         rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
+        rows.append([InlineKeyboardButton(
+            f"🎯 تنظیم دستی سهم روزانه: {daily_signal_status_text()}",
+            callback_data="daily_signal_limit"
+        )])
         rows.append([InlineKeyboardButton("🎁 عضویت رایگان کاربر",callback_data="free_users")])
     return InlineKeyboardMarkup(rows)
 
@@ -2641,6 +2718,10 @@ def _control_keyboard():
         [InlineKeyboardButton(
             f"💰 سقف هر معامله: {MAX_TRADE_SOL:g} SOL", callback_data="trade_limit"
         )],
+        [InlineKeyboardButton(
+            f"🎯 سهم روزانه سیگنال: {daily_signal_status_text()}",
+            callback_data="daily_signal_limit"
+        )],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ]
     return InlineKeyboardMarkup(rows)
@@ -2650,6 +2731,7 @@ def start_telegram_bot():
         if not TELEGRAM_BOT_TOKEN:
             logger.error("❌ TELEGRAM_BOT_TOKEN تنظیم نشده؛ ربات تلگرام اجرا نشد."); return
         app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        _load_daily_signal_state()
         async def start_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
@@ -2723,6 +2805,26 @@ def start_telegram_bot():
             cid = str(update.effective_user.id)
             if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
                 return
+
+            if context.user_data.get("awaiting_daily_signal_limit"):
+                raw = (update.message.text or "").strip()
+                try:
+                    value = _set_daily_signal_limit(int(raw))
+                    context.user_data.pop("awaiting_daily_signal_limit", None)
+                    await update.message.reply_text(
+                        f"✅ **سقف روزانه تغییر کرد**\n\n🎯 حداکثر سیگنال ورود در روز: `{value}`\n"
+                        f"📊 امروز: `{daily_signal_status_text()}`\n\n"
+                        "بعد از رسیدن به این عدد، ورود جدید متوقف می‌شود ولی فروش/مدیریت پوزیشن‌های باز ادامه دارد.",
+                        parse_mode="Markdown",
+                        reply_markup=_control_keyboard()
+                    )
+                except Exception as e:
+                    await update.message.reply_text(
+                        f"❌ {e}\n\nیک عدد بین `1` تا `50` بفرست.",
+                        parse_mode="Markdown"
+                    )
+                return
+
             if not context.user_data.get("awaiting_trade_limit_sol"):
                 return
             raw = (update.message.text or "").strip().replace(",", ".")
@@ -2768,6 +2870,40 @@ def start_telegram_bot():
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
                 else:
                     await q.edit_message_text(_admin_free_panel_text(), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]), parse_mode="Markdown")
+            elif data == "daily_signal_limit":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                await q.edit_message_text(
+                    f"🎯 **سهم روزانه سیگنال**\n\n"
+                    f"📊 امروز: `{daily_signal_status_text()}`\n"
+                    f"🔧 سقف فعلی: `{DAILY_SIGNAL_LIMIT}` سیگنال\n\n"
+                    "عدد دلخواه را بین **1 تا 50** بفرست.\n"
+                    "پیش‌فرض: **15**\n\n"
+                    "بعد از رسیدن به سقف، ورودهای جدید متوقف می‌شوند؛ "
+                    "پوزیشن‌های باز همچنان مدیریت و فروخته می‌شوند.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✏️ تغییر دستی سقف روزانه", callback_data="daily_signal_limit_manual")],
+                        [InlineKeyboardButton("🔙 بازگشت به کنترل موتورها", callback_data="controls")]
+                    ]),
+                    parse_mode="Markdown"
+                )
+                return
+            elif data == "daily_signal_limit_manual":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                context.user_data["awaiting_daily_signal_limit"] = True
+                await q.edit_message_text(
+                    "✏️ **سقف روزانه را بفرست**\n\n"
+                    "یک عدد بین `1` تا `50` ارسال کن.\n"
+                    "مثال: `12` یا `15` یا `30` یا `50`",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 انصراف", callback_data="daily_signal_limit")]
+                    ]),
+                    parse_mode="Markdown"
+                )
+                return
             elif data == "trade_limit":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
