@@ -844,9 +844,12 @@ def ensure_channel_invite_link():
         logger.error(f"❌ خطای ساخت لینک VIP: {e}")
     return ""
 
-def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="⏳ در انتظار اجرای معامله", execution_tx=""):
+def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="", execution_tx="", pnl_percent=None):
+    """کارت سیگنال VIP برای موبایل.
+    نکته: وضعیت موجودی/اجرای کیف پول هرگز در کانال نمایش داده نمی‌شود.
+    لینک‌ها فقط روی دکمه‌ها هستند؛ متن کانال لینک خام ندارد.
+    """
     global CHANNEL_ID
-    """کارت سیگنال خوانا برای موبایل؛ آدرس و هر دو لینک همیشه وجود دارند."""
     _load_channel_config()
     if not CHANNEL_ID and CHANNEL_INVITE_LINK.startswith("https://t.me/"):
         tail = CHANNEL_INVITE_LINK.split("https://t.me/", 1)[1].strip("/")
@@ -865,23 +868,42 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         safe_solscan = f"https://solscan.io/token/{token_addr}"
     dex_link = f"https://dexscreener.com/solana/{token_addr}"
 
+    # متن کانال عمداً از execution_status صرف‌نظر می‌کند.
+    if side == "SELL":
+        pnl = float(pnl_percent or 0.0)
+        pnl_icon = "🟢" if pnl >= 0 else "🔴"
+        result_line = f"📊 سود/ضرر نهایی: {pnl_icon} {pnl:+.2f}%"
+        price_label = "🔴 نقطه فروش"
+    else:
+        result_line = "🎯 وضعیت: سیگنال خرید"
+        price_label = "🎯 نقطه ورود"
+
     graphic_text = (
         f"🤖⚡ {signal_title}\n"
-        f"{side_icon}  |  {execution_status}\n\n"
-        f"🪙 {symbol}\n"
-        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-        f"💵 قیمت: ${price:.8f}\n"
-        f"💰 حجم: {buy_amt:g} SOL\n"
-        f"🎯 TP اولیه: +{tp:.1f}%   🛑 SL: {sl:.1f}%\n"
-        f"📊 5m: {p_change:+.2f}% | حجم: ${volume:,.0f} | نقدینگی: ${liquidity:,.0f}\n\n"
-        f"📌 مدیریت: Trailing پله‌ای + خروج با ضعف بازار"
+        f"{side_icon}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 نام توکن: {symbol}\n"
+        f"📍 آدرس قرارداد:\n{token_addr}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{price_label}: ${price:.8f}\n"
+        f"💰 حجم معامله: {buy_amt:g} SOL\n"
+        f"💧 نقدینگی: ${liquidity:,.0f}\n"
+        f"📊 حجم ۵ دقیقه: ${volume:,.0f}\n"
+        f"📈 تغییر ۵ دقیقه: {p_change:+.2f}%\n"
+        f"🎯 TP: +{tp:.1f}%\n"
+        f"🛑 SL: {sl:.1f}%\n"
+        f"{result_line}\n"
+        f"━━━━━━━━━━━━━━━━━━"
     )
+
     buttons = [
-        [InlineKeyboardButton("🔍 Solscan", url=safe_solscan)],
-        [InlineKeyboardButton("📈 DexScreener", url=dex_link)]
+        [InlineKeyboardButton("📈 DexScreener", url=dex_link)],
+        [InlineKeyboardButton("🔎 Solscan", url=safe_solscan)],
     ]
     if WEBAPP_URL:
-        buttons.append([InlineKeyboardButton("🤖 Mini App / کپی‌ترید", url=WEBAPP_URL)])
+        buttons.append([InlineKeyboardButton("🚀 ورود به Mini App", web_app=WebAppInfo(url=WEBAPP_URL))])
+        buttons.append([InlineKeyboardButton("🤖 کپی‌ترید", web_app=WebAppInfo(url=WEBAPP_URL))])
+
     try:
         return send_telegram_msg(
             graphic_text, target_chat=CHANNEL_ID,
@@ -1409,7 +1431,7 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
             buy_amt=float(pos.get("buy_amt", 0.0) or 0.0), volume=float(pos.get("volume", 0.0) or 0.0),
             liquidity=float(pos.get("liquidity", 0.0) or 0.0), p_change=float(pos.get("m5_change", 0.0) or 0.0),
             solscan_link=solscan, signal_title=title, side="SELL",
-            execution_status=status, execution_tx=tx_signature
+            execution_status="", execution_tx=tx_signature, pnl_percent=pnl_percent
         )
 
 def _adaptive_locked_floor(highest_pnl, current_floor):
@@ -1880,7 +1902,6 @@ def send_fused_signal(token_addr, fusion):
         f"🔹 حجم ۵ دقیقه: ${fusion['vol']:,.0f}\n"
         f"🔹 نقدینگی: ${fusion['liq']:,.0f}\n"
         f"🔹 خرید/فروش ۵ دقیقه: {fusion.get('buys', 0)}/{fusion.get('sells', 0)}\n\n"
-        f"📌 وضعیت خرید: {execution_status}\n"
         f"📈 مدیریت سود: تریلینگ پله‌ای هوشمند\n\n"
         f"🔗 Solscan: {solscan_link}\n"
         f"📈 DexScreener: {dex_link}"
@@ -2325,7 +2346,7 @@ def _engine_status_lines():
     detail = " | ".join(f"{name}:{'🟢' if state else '🔴'}" for name, state in components)
     return (
         f"🤖⚡ **{UNIFIED_ENGINE_NAME}**\n\n"
-        f"وضعیت اتحاد: {'🟢 فعال — همه موتورها با هم رأی می‌دهند' if SYNCHRONIZED_MODE else '🔴 خاموش — کنترل تک‌تک موتورها آزاد است'}\n"
+        f"وضعیت اتحاد: {'🟢 فعال — فقط موتورهای ON رأی می‌دهند' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
         f"موتورهای تحلیلی روشن: `{active}/{len(components)}`\n\n"
         f"{detail}\n\n"
         f"🤖 کپی‌ترید: {'🟢' if COPY_TRADING_ENABLED else '🔴'}\n"
@@ -2440,7 +2461,7 @@ def start_telegram_bot():
         app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         async def start_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
-            text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}\n\n📱 برای VIP و کپی‌ترید، Mini App را باز کنید." if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.\n📱 برای ثبت‌نام VIP و کپی‌ترید، Mini App را باز کنید.")
+            text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             cid = str(update.effective_user.id)
@@ -2611,9 +2632,8 @@ def start_telegram_bot():
                         MAX_FUSION_ENABLED = True
                         SYNCHRONIZED_MODE = True
                         ADVANCED_AI_ENABLED = True
-                        for _, var_name, _ in ENGINE_SWITCHES:
-                            globals()[var_name] = True
-                        message = "👑 **MAX FUSION روشن شد**\n\n⚡ اتحاد هالک + 🧠 سیستم پیشرفته هم‌زمان فعال شدند.\n🎯 فقط سخت‌گیرترین سیگنال نهایی منتشر می‌شود."
+                        # وضعیت دستی موتورها حفظ می‌شود؛ MAX FUSION موتور خاموش‌شده را خودکار روشن نمی‌کند.
+                        message = "👑 **MAX FUSION روشن شد**\n\n⚡ اتحاد هالک + 🧠 سیستم پیشرفته هم‌زمان فعال شدند.\n🔒 وضعیت دستی موتورهای زیرمجموعه حفظ شد.\n🎯 فقط سخت‌گیرترین سیگنال نهایی منتشر می‌شود."
                     else:
                         MAX_FUSION_ENABLED = False
                         if _MAX_FUSION_PREV:
@@ -2652,35 +2672,30 @@ def start_telegram_bot():
 
                 if data == "engine_manage":
                     if MAX_FUSION_ENABLED:
-                        await q.edit_message_text("👑 **MAX FUSION فعال است**\n\nکنترل تک‌تک موتورها تا زمان خاموش‌شدن MAX FUSION قفل است.", reply_markup=_control_keyboard(), parse_mode="Markdown")
+                        await q.edit_message_text("🔒 **مدیریت موتورهای مستقل قفل است**\n\n👑 MAX FUSION فعال است. ابتدا MAX FUSION را خاموش کن.", reply_markup=_control_keyboard(), parse_mode="Markdown")
                     else:
-                        await q.edit_message_text("⚙️ **مدیریت موتورهای مستقل**\n\nاتحاد هالک خاموش است؛ کلیدهای واقعی ON/OFF هر موتور در اختیار شماست. سیستم پیشرفته AI در صورت روشن بودن می‌تواند جداگانه فعال بماند.", reply_markup=_engine_control_keyboard(), parse_mode="Markdown")
+                        await q.edit_message_text("⚙️ **مدیریت موتورهای مستقل**\n\nهر موتور را می‌توانی جداگانه ON/OFF کنی.\nاگر اتحاد هالک روشن باشد، فقط موتورهای ON در اتحاد رأی می‌دهند؛ خاموش‌کردن یک موتور اتحاد را خاموش نمی‌کند.", reply_markup=_engine_control_keyboard(), parse_mode="Markdown")
                     return
 
                 if data == "toggle_unified":
                     if MAX_FUSION_ENABLED:
                         await q.edit_message_text("🔒 **اتحاد هالک AI قفل است**\n\n👑 MAX FUSION فعال است؛ اتحاد هالک و سیستم پیشرفته هم‌زمان روشن هستند.", reply_markup=_control_keyboard(), parse_mode="Markdown")
                         return
-                    # روشن‌شدن اتحاد یعنی همه موتورهای تحلیلی فوراً برای اجماع فعال شوند.
+                    # اتحاد فقط موتورهایی را به کار می‌گیرد که در تنظیمات دستی ON هستند.
+                    # روشن‌شدن اتحاد نباید وضعیت هیچ موتور را تغییر دهد.
                     SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
-                    if SYNCHRONIZED_MODE:
-                        for _, var_name, _ in ENGINE_SWITCHES:
-                            globals()[var_name] = True
+                    active_count = sum(1 for _, var_name, _ in ENGINE_SWITCHES if bool(globals().get(var_name)))
                     message = (
-                        "🟢 **اتحاد هالک AI روشن شد**\n\nهمه موتورهای تحلیلی هم‌زمان فعال شدند و فقط یک سیگنال با نام واحد «هالک AI — موتور متحد بازار» منتشر می‌شود."
+                        f"🟢 **اتحاد هالک AI روشن شد**\n\nموتورهای روشنِ فعلی ({active_count}) با هم یک تصمیم واحد می‌سازند.\n🔒 موتورهایی که دستی OFF هستند خاموش باقی می‌مانند."
                         if SYNCHRONIZED_MODE else
-                        "🔴 **اتحاد هالک AI خاموش شد**\n\nحالا کلیدهای تک‌تک موتورهای پایین آزاد هستند و می‌توانید هرکدام را جداگانه روشن/خاموش کنید."
+                        "🔴 **اتحاد هالک AI خاموش شد**\n\nوضعیت تک‌تک موتورها حفظ شد.\nبرای تغییر هر موتور از «⚙️ مدیریت موتورهای مستقل» استفاده کن."
                     )
-                    if SYNCHRONIZED_MODE:
-                        await q.edit_message_text(
-                            message+"\n\n"+_engine_status_lines(),
-                            reply_markup=_control_keyboard(), parse_mode="Markdown"
-                        )
-                    else:
-                        await q.edit_message_text(
-                            message,
-                            reply_markup=_engine_control_keyboard(), parse_mode="Markdown"
-                        )
+                    # در منوی اصلی، حتی بعد از خاموش شدن اتحاد، زیرمجموعه موتورها
+                    # نمایش داده نمی‌شوند؛ فقط دکمه «مدیریت موتورهای مستقل» فعال است.
+                    await q.edit_message_text(
+                        message,
+                        reply_markup=_control_keyboard(), parse_mode="Markdown"
+                    )
                     return
 
                 if data == "toggle_copy":
@@ -2690,9 +2705,9 @@ def start_telegram_bot():
                     name = engine_map.get(data)
                     if not name:
                         return
-                    if MAX_FUSION_ENABLED or SYNCHRONIZED_MODE:
+                    if MAX_FUSION_ENABLED:
                         await q.edit_message_text(
-                            "🔒 کنترل تکی موتورها در حالت MAX FUSION یا اتحاد هالک قفل است.",
+                            "🔒 کنترل تکی موتورها در حالت MAX FUSION قفل است. ابتدا MAX FUSION را خاموش کن.",
                             reply_markup=_control_keyboard(), parse_mode="Markdown"
                         )
                         return
