@@ -2034,6 +2034,135 @@ def fusion_quality_gate(fusion):
 
 
 
+
+# ==========================================================
+# PRO MAX LEARNING CORE
+# Persistent closed-trade learning + risk circuit breaker
+# ==========================================================
+LEARNING_FILE = "fusion_learning.json"
+MAX_HISTORY = 5000
+MAX_CONSECUTIVE_LOSSES = 4
+RISK_MIN_MULTIPLIER = 0.25
+RISK_MAX_MULTIPLIER = 1.25
+LEARNING_ALPHA = 0.12
+
+learning_state = {
+    "trades": [],
+    "engines": {},
+    "equity_peak": 0.0,
+    "equity_now": 0.0,
+    "consecutive_losses": 0,
+    "paused_until": 0.0,
+}
+
+def _load_learning_state():
+    global learning_state
+    try:
+        p = Path(LEARNING_FILE)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                learning_state.update(data)
+    except Exception as e:
+        logger.warning(f"Learning state load failed: {e}")
+
+def _save_learning_state():
+    try:
+        tmp = Path(LEARNING_FILE + ".tmp")
+        tmp.write_text(
+            json.dumps(learning_state, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        tmp.replace(LEARNING_FILE)
+    except Exception as e:
+        logger.warning(f"Learning state save failed: {e}")
+
+def _engine_names_from_fusion(fusion):
+    names = (fusion or {}).get("engines") or (fusion or {}).get("engine_names") or []
+    if isinstance(names, str):
+        names = [x.strip() for x in names.split(",") if x.strip()]
+    return list(names)
+
+def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
+                        reason="", engine_names=None, hold_seconds=0):
+    try:
+        pnl = float(pnl_pct)
+        item = {
+            "ts": time.time(),
+            "token": token_addr,
+            "symbol": symbol,
+            "side": side,
+            "entry": float(entry or 0),
+            "exit": float(exit_price or 0),
+            "pnl_pct": pnl,
+            "reason": reason,
+            "engines": list(engine_names or []),
+            "hold_seconds": int(hold_seconds or 0),
+        }
+        learning_state["trades"].append(item)
+        learning_state["trades"] = learning_state["trades"][-MAX_HISTORY:]
+
+        if pnl < 0:
+            learning_state["consecutive_losses"] = int(
+                learning_state.get("consecutive_losses", 0) or 0
+            ) + 1
+        else:
+            learning_state["consecutive_losses"] = 0
+
+        for name in item["engines"]:
+            st = learning_state["engines"].setdefault(
+                name,
+                {"trades": 0, "wins": 0, "losses": 0,
+                 "avg_pnl": 0.0, "weight": 1.0}
+            )
+            st["trades"] += 1
+            st["wins"] += int(pnl > 0)
+            st["losses"] += int(pnl <= 0)
+            n = st["trades"]
+            st["avg_pnl"] = ((st["avg_pnl"] * (n - 1)) + pnl) / n
+            target = max(0.35, min(1.65, 1.0 + st["avg_pnl"] / 100.0))
+            st["weight"] = (
+                (1.0 - LEARNING_ALPHA) * st["weight"]
+                + LEARNING_ALPHA * target
+            )
+        _save_learning_state()
+    except Exception as e:
+        logger.warning(f"Closed-trade learning update failed: {e}")
+
+def learning_is_in_circuit_breaker():
+    return (
+        time.time() < float(learning_state.get("paused_until", 0) or 0)
+        or int(learning_state.get("consecutive_losses", 0) or 0)
+        >= MAX_CONSECUTIVE_LOSSES
+    )
+
+def learning_risk_multiplier():
+    losses = int(learning_state.get("consecutive_losses", 0) or 0)
+    mult = 1.0 - min(0.75, losses * 0.12)
+    return max(RISK_MIN_MULTIPLIER, min(RISK_MAX_MULTIPLIER, mult))
+
+def learning_adjusted_engine_weight(name, base=1.0):
+    try:
+        return float(base) * float(
+            learning_state.get("engines", {}).get(name, {}).get("weight", 1.0)
+        )
+    except Exception:
+        return float(base)
+
+def learning_stats():
+    trades = learning_state.get("trades", [])
+    wins = sum(1 for t in trades if float(t.get("pnl_pct", 0) or 0) > 0)
+    pnl = sum(float(t.get("pnl_pct", 0) or 0) for t in trades)
+    return {
+        "trades": len(trades),
+        "wins": wins,
+        "win_rate": (wins / len(trades) * 100.0) if trades else 0.0,
+        "net_pnl_pct_sum": pnl,
+        "loss_streak": int(learning_state.get("consecutive_losses", 0) or 0),
+    }
+
+_load_learning_state()
+
 # ==========================================================
 # PRO_MAX_V7_SYSTEMS
 # Backtest / Paper Trading / Market Regime / Dynamic Risk /
@@ -3134,12 +3263,24 @@ def start_telegram_bot():
 
             elif data == "v7_dashboard":
                 if not is_admin:
-                    await q.answer("⛔ دسترسی غیرمجاز.", show_alert=True)
+                    await q.edit_message_text(
+                        "⛔ دسترسی غیرمجاز.",
+                        reply_markup=_main_keyboard(False)
+                    )
                     return
 
-                st = learning_stats()
-                ps = v7_paper_stats()
-                bt = v7_backtest_from_learning_history()
+                try:
+                    st = learning_stats()
+                except Exception:
+                    st = {"trades": 0, "win_rate": 0.0, "net_pnl_pct_sum": 0.0, "loss_streak": 0}
+                try:
+                    ps = v7_paper_stats()
+                except Exception:
+                    ps = {"trades": 0, "win_rate": 0.0, "profit_factor": 0.0}
+                try:
+                    bt = v7_backtest_from_learning_history()
+                except Exception:
+                    bt = {"trades": 0, "win_rate": 0.0, "profit_factor": 0.0}
                 rg = v7_state.get("regime", {}) or {}
 
                 msg = (
