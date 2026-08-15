@@ -122,8 +122,12 @@ TECHNICAL_RUNNING = True
 SMART_FILTER_ENABLED = True   
 DYNAMIC_RISK_ENABLED = True   
 MANUAL_SETTINGS_ENABLED = False 
-SYNCHRONIZED_MODE = True   
-COPY_TRADING_ENABLED = True   
+SYNCHRONIZED_MODE = True
+ADVANCED_AI_ENABLED = False
+MAX_FUSION_ENABLED = False
+EMERGENCY_STOP = False
+COPY_TRADING_ENABLED = True
+_MAX_FUSION_PREV = None
 
 BOTTOM_WHALE_RUNNING = True
 
@@ -411,7 +415,7 @@ def ultra_accuracy_scanner_loop(app):
     logger.info("💎🚀 موتور پایش فوق‌پیشرفته (فیلتر بسیار سخت‌گیر) فعال شد.")
 
     while True:
-        if SYNCHRONIZED_MODE:
+        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
             time.sleep(3)
             continue
         if not (SMART_MONEY_COPY_ENABLED or SOCIAL_SENTIMENT_ENABLED):
@@ -495,7 +499,7 @@ def mempool_smart_money_scanner_loop(app):
     global MEMPOOL_SMART_MONEY_ENABLED
     logger.info("⚡🕵️ موتور اسکنر ممپول و اسمارت‌مانی فعال شد.")
     while True:
-        if SYNCHRONIZED_MODE:
+        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
             time.sleep(3)
             continue
         if not MEMPOOL_SMART_MONEY_ENABLED:
@@ -1107,6 +1111,9 @@ def evaluate_ultimate_super_signal(token_addr, pair):
         return False, 0.0, 0.0, 0.0, f"خطا در پردازش: {e}"
 
 def trigger_copy_trading_for_subscribers(token_mint, amount_sol, side="BUY", tx_signature=""):
+    if EMERGENCY_STOP:
+        logger.info("Emergency stop: copy trading skipped for new trade.")
+        return
     if not COPY_TRADING_ENABLED:
         return
     for sub in get_active_subscribers():
@@ -1630,7 +1637,7 @@ def technical_analysis_scanner_loop(app):
     send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای (مجهز به AI & Mempool & Hulk Mode) فعال شد.")
 
     while True:
-        if SYNCHRONIZED_MODE:
+        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
             time.sleep(3)
             continue
         if not TECHNICAL_RUNNING:
@@ -1717,6 +1724,13 @@ def technical_analysis_scanner_loop(app):
 # ==========================================================
 # اجماع عمداً کمی سخت‌گیرتر شده تا فقط گزینه‌های باکیفیت‌تر منتشر شوند.
 # حداقل 82٪ موتورهای روشن باید رأی مثبت بدهند و در حالت معمول حداقل 7 رأی لازم است.
+def new_trade_system_enabled():
+    """Whether the unified signal pipeline is allowed to look for new trades."""
+    return (SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED) and not EMERGENCY_STOP
+
+def advanced_filter_enabled():
+    return ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED
+
 # حالت شکار سخت‌گیر: سیگنال کمتر، کیفیت فیلتر بالاتر.
 # این اعداد «تلاش برای win-rate بالا» هستند و تضمین ۹۰٪ سود نیستند.
 CONSENSUS_MIN_SCORE = 9
@@ -1747,6 +1761,15 @@ def build_consensus_signal(token_addr, pair):
             return None
         if buys <= 0 or sells > 0 and buys < max(1, sells * CONSENSUS_MIN_BUY_RATIO):
             return None
+
+        # سیستم پیشرفته/Max Fusion: فقط فرصت‌های با کیفیت بسیار بالاتر وارد مرحله رأی‌گیری می‌شوند.
+        if advanced_filter_enabled():
+            if liq < 50000.0 or vol < 25000.0:
+                return None
+            if chg < 8.0 or chg > 20.0:
+                return None
+            if sells > 0 and buys < sells * 1.70:
+                return None
 
         votes = []
         enabled = 0
@@ -1798,8 +1821,11 @@ def build_consensus_signal(token_addr, pair):
             enabled += 1
             if is_token_worthy(pair): votes.append("SmartFilter")
 
-        # اجماع بسیار سخت‌گیرانه: حداقل 9 رأی و حداقل 82٪ موتورهای روشن.
-        minimum = max(CONSENSUS_MIN_SCORE, int(enabled * CONSENSUS_MIN_RATIO + 0.9999))
+        # اجماع بسیار سخت‌گیرانه؛ Max Fusion سخت‌ترین آستانه را دارد.
+        if advanced_filter_enabled():
+            minimum = max(10, int(enabled * 0.90 + 0.9999))
+        else:
+            minimum = max(CONSENSUS_MIN_SCORE, int(enabled * CONSENSUS_MIN_RATIO + 0.9999))
         if len(votes) < minimum:
             return None
 
@@ -1823,6 +1849,9 @@ def send_fused_signal(token_addr, fusion):
     """Emit one unified signal after the enabled engines vote together.
     A failed real buy is still published and tracked as a signal-only position.
     """
+    if EMERGENCY_STOP:
+        logger.info("Emergency stop active: new signal execution skipped.")
+        return False, "EMERGENCY_STOP"
     amount = get_dynamic_buy_amount(0.01)
     reason = " + ".join(fusion["votes"])
     symbol = fusion["symbol"]
@@ -1902,8 +1931,8 @@ def unified_market_scanner_loop(app):
     logger.info(f"{UNIFIED_ENGINE_NAME} فعال شد؛ تمام موتورهای تحلیلی فقط از مسیر Fusion سیگنال می‌دهند.")
     send_telegram_msg(f"{UNIFIED_ENGINE_NAME} فعال شد؛ DexScreener در حال رصد بازار است.")
     while True:
-        if not SYNCHRONIZED_MODE:
-            # در حالت مستقل، این رادار متحد سیگنال نمی‌دهد؛ کلیدهای موتورهای قدیمی فقط برای کنترل/آماده‌به‌کار باقی می‌مانند.
+        if not new_trade_system_enabled():
+            # در حالت خاموش، هیچ ورود جدیدی صادر نمی‌شود؛ مدیریت پوزیشن‌های باز در حلقه جدا ادامه دارد.
             time.sleep(3); continue
         try:
             tokens=get_real_market_trending_tokens()
@@ -2356,32 +2385,49 @@ def _trade_limit_keyboard():
     ]
     return InlineKeyboardMarkup(rows)
 
-def _control_keyboard():
-    rows = [[InlineKeyboardButton(
-        f"🤖⚡ اتحاد هالک AI: {'ON' if SYNCHRONIZED_MODE else 'OFF'}",
-        callback_data="toggle_unified"
-    )]]
-    rows.append([InlineKeyboardButton(
-        f"🤖 کپی‌ترید: {'ON' if COPY_TRADING_ENABLED else 'OFF'}",
-        callback_data="toggle_copy"
-    )])
-    rows.append([InlineKeyboardButton(
-        f"💰 سقف هر معامله: {MAX_TRADE_SOL:g} SOL",
-        callback_data="trade_limit"
-    )])
+def _engine_control_keyboard():
+    rows = []
+    engine_buttons = []
+    for label, var_name, callback_name in ENGINE_SWITCHES:
+        engine_buttons.append(InlineKeyboardButton(
+            f"{label}: {'🟢 ON' if globals().get(var_name) else '🔴 OFF'}",
+            callback_data=callback_name
+        ))
+    for i in range(0, len(engine_buttons), 2):
+        rows.append(engine_buttons[i:i+2])
+    rows.append([InlineKeyboardButton("🔙 بازگشت به کنترل اصلی", callback_data="controls")])
+    return InlineKeyboardMarkup(rows)
 
-    # در حالت اتحاد، پنل خلوت است و فقط کلید اتحاد دیده می‌شود.
-    # با خاموش‌کردن اتحاد، کلیدهای تک‌تک موتورها دوباره نمایش داده می‌شوند.
-    if not SYNCHRONIZED_MODE:
-        engine_buttons = []
-        for label, var_name, callback_name in ENGINE_SWITCHES:
-            engine_buttons.append(InlineKeyboardButton(
-                f"{label}: {'🟢 ON' if globals().get(var_name) else '🔴 OFF'}",
-                callback_data=callback_name
-            ))
-        for i in range(0, len(engine_buttons), 2):
-            rows.append(engine_buttons[i:i+2])
-    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
+def _control_keyboard():
+    rows = [
+        [InlineKeyboardButton(
+            f"👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}",
+            callback_data="toggle_max_fusion"
+        )],
+        [InlineKeyboardButton(
+            f"🤖⚡ اتحاد هالک AI: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}",
+            callback_data="toggle_unified"
+        )],
+        [InlineKeyboardButton(
+            f"🧠 سیستم پیشرفته AI: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}",
+            callback_data="toggle_advanced"
+        )],
+        [InlineKeyboardButton(
+            f"🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}",
+            callback_data="toggle_emergency"
+        )],
+        [InlineKeyboardButton(
+            "⚙️ مدیریت موتورهای مستقل", callback_data="engine_manage"
+        )],
+        [InlineKeyboardButton(
+            f"🤖 کپی‌ترید: {'🟢 ON' if COPY_TRADING_ENABLED else '🔴 OFF'}",
+            callback_data="toggle_copy"
+        )],
+        [InlineKeyboardButton(
+            f"💰 سقف هر معامله: {MAX_TRADE_SOL:g} SOL", callback_data="trade_limit"
+        )],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
+    ]
     return InlineKeyboardMarkup(rows)
 
 def start_telegram_bot():
@@ -2391,7 +2437,7 @@ def start_telegram_bot():
         app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         async def start_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
-            text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🟢 موتور متحد بازار فعال است.\n📡 همه فیلترها و موتورهای سیگنال در یک اجماع واحد کار می‌کنند.\n📱 برای VIP و کپی‌ترید، Mini App را باز کنید." if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 موتور متحد بازار آماده رصد بازار است.\n📱 برای ثبت‌نام VIP و کپی‌ترید، Mini App را باز کنید.")
+            text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}\n\n📱 برای VIP و کپی‌ترید، Mini App را باز کنید." if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.\n📱 برای ثبت‌نام VIP و کپی‌ترید، Mini App را باز کنید.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             cid = str(update.effective_user.id)
@@ -2486,9 +2532,9 @@ def start_telegram_bot():
                 )
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,MAX_TRADE_SOL
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,_MAX_FUSION_PREV,MAX_TRADE_SOL
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
-            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\nهمه موتورهای سیگنال در یک موتور متحد بازار با هم کار می‌کنند.",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF", "🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF", "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data=="engines": await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n"+_engine_status_lines(),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت",callback_data="home")]]),parse_mode="Markdown")
             elif data=="controls": await q.edit_message_text(("🎛 **کنترل موتورها**\n\n🤖 اتحاد هالک روشن است.\nهمه موتورهای تحلیلی با هم رأی می‌دهند و فقط یک سیگنال واحد منتشر می‌شود.\n\nبرای کنترل تک‌تک موتورها، اتحاد را خاموش کنید." if SYNCHRONIZED_MODE else "🎛 **کنترل موتورها**\n\n🔴 اتحاد خاموش است.\nحالا هر موتور کلید مستقل خودش را دارد و می‌توانید هرکدام را جداگانه روشن/خاموش کنید."),reply_markup=_control_keyboard(),parse_mode="Markdown") if is_admin else await q.edit_message_text("⛔ این بخش فقط برای ادمین است.",reply_markup=_main_keyboard(False))
             elif data=="wallet":
@@ -2552,7 +2598,60 @@ def start_telegram_bot():
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.",reply_markup=_main_keyboard(False)); return
 
+                if data == "toggle_max_fusion":
+                    if not MAX_FUSION_ENABLED:
+                        _MAX_FUSION_PREV = {
+                            "unified": SYNCHRONIZED_MODE,
+                            "advanced": ADVANCED_AI_ENABLED,
+                            "engines": {var_name: bool(globals().get(var_name)) for _, var_name, _ in ENGINE_SWITCHES}
+                        }
+                        MAX_FUSION_ENABLED = True
+                        SYNCHRONIZED_MODE = True
+                        ADVANCED_AI_ENABLED = True
+                        for _, var_name, _ in ENGINE_SWITCHES:
+                            globals()[var_name] = True
+                        message = "👑 **MAX FUSION روشن شد**\n\n⚡ اتحاد هالک + 🧠 سیستم پیشرفته هم‌زمان فعال شدند.\n🎯 فقط سخت‌گیرترین سیگنال نهایی منتشر می‌شود."
+                    else:
+                        MAX_FUSION_ENABLED = False
+                        if _MAX_FUSION_PREV:
+                            SYNCHRONIZED_MODE = bool(_MAX_FUSION_PREV.get("unified", True))
+                            ADVANCED_AI_ENABLED = bool(_MAX_FUSION_PREV.get("advanced", False))
+                            for var_name, value in _MAX_FUSION_PREV.get("engines", {}).items():
+                                globals()[var_name] = value
+                        _MAX_FUSION_PREV = None
+                        message = "🔴 **MAX FUSION خاموش شد**\n\nکنترل اتحاد هالک و سیستم پیشرفته دوباره مستقل است."
+                    await q.edit_message_text(message, reply_markup=_control_keyboard(), parse_mode="Markdown")
+                    return
+
+                if data == "toggle_advanced":
+                    ADVANCED_AI_ENABLED = not ADVANCED_AI_ENABLED
+                    await q.edit_message_text(
+                        ("🟢 **سیستم پیشرفته AI روشن شد**\n\nتمام فیلترهای پیشرفته در مسیر تصمیم‌گیری فعال شدند و سیگنال‌ها سخت‌گیرانه‌تر می‌شوند." if ADVANCED_AI_ENABLED else "🔴 **سیستم پیشرفته AI خاموش شد**\n\nاتحاد هالک، در صورت روشن بودن، مستقل ادامه می‌دهد."),
+                        reply_markup=_control_keyboard(), parse_mode="Markdown"
+                    )
+                    return
+
+                if data == "toggle_emergency":
+                    EMERGENCY_STOP = not EMERGENCY_STOP
+                    message = (
+                        "🛑 **توقف اضطراری فعال شد**\n\n❌ سیگنال جدید\n❌ خرید جدید\n❌ کپی‌ترید جدید\n\n✅ پوزیشن‌های باز تا فروش نهایی مدیریت می‌شوند (TP/SL/Trailing)."
+                        if EMERGENCY_STOP else
+                        "🟢 **توقف اضطراری برداشته شد**\n\nسیستم‌های فعال دوباره اجازه جست‌وجوی معامله جدید دارند."
+                    )
+                    await q.edit_message_text(message, reply_markup=_control_keyboard(), parse_mode="Markdown")
+                    return
+
+                if data == "engine_manage":
+                    if MAX_FUSION_ENABLED:
+                        await q.edit_message_text("👑 **MAX FUSION فعال است**\n\nکنترل تک‌تک موتورها تا زمان خاموش‌شدن MAX FUSION قفل است.", reply_markup=_control_keyboard(), parse_mode="Markdown")
+                    else:
+                        await q.edit_message_text("⚙️ **مدیریت موتورهای مستقل**\n\nهر موتور را جداگانه روشن/خاموش کن. این بخش فقط وقتی MAX FUSION خاموش باشد قابل کنترل است.", reply_markup=_engine_control_keyboard(), parse_mode="Markdown")
+                    return
+
                 if data == "toggle_unified":
+                    if MAX_FUSION_ENABLED:
+                        await q.edit_message_text("👑 MAX FUSION فعال است؛ اتحاد هالک همراه با سیستم پیشرفته قفل شده است.", reply_markup=_control_keyboard(), parse_mode="Markdown")
+                        return
                     # روشن‌شدن اتحاد یعنی همه موتورهای تحلیلی فوراً برای اجماع فعال شوند.
                     SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
                     if SYNCHRONIZED_MODE:
@@ -2573,14 +2672,12 @@ def start_telegram_bot():
                     name = engine_map.get(data)
                     if not name:
                         return
-                    # وقتی اتحاد روشن است، تغییر تکی ممنوع نیست اما دوباره با روشن‌بودن اتحاد همه باید روشن بمانند.
-                    if SYNCHRONIZED_MODE:
-                        for _, var_name, _ in ENGINE_SWITCHES:
-                            globals()[var_name] = True
-                    else:
-                        globals()[name] = not bool(globals()[name])
+                    if MAX_FUSION_ENABLED or SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED:
+                        await q.edit_message_text("🔒 کنترل تکی موتورها در حالت اتحاد/سیستم پیشرفته قفل است.", reply_markup=_control_keyboard(), parse_mode="Markdown")
+                        return
+                    globals()[name] = not bool(globals()[name])
 
-                await q.edit_message_text("🎛 **کنترل موتورها**\n\n"+_engine_status_lines(),reply_markup=_control_keyboard(),parse_mode="Markdown")
+                await q.edit_message_text("⚙️ **موتورهای مستقل**\n\n"+_engine_status_lines(),reply_markup=_engine_control_keyboard(),parse_mode="Markdown")
         app.add_handler(CommandHandler("start",start_cmd))
         app.add_handler(CommandHandler("free",free_cmd))
         app.add_handler(CommandHandler("setvipchannel",setvipchannel_cmd))
