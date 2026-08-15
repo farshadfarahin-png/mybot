@@ -2486,8 +2486,13 @@ def engine_stats_snapshot(engine):
             "profit_factor": pf, "net_pnl": s["sum_profit"] - s["sum_loss"]}
 
 def engine_stats_table_text():
-    engines = [("smart", "🧠 هوشمند"), ("union", "🤝 اتحاد"), ("max", "🚀 MAX")]
-    d = {k: engine_stats_snapshot(k) for k, _ in engines}
+    """Clean, Telegram-friendly comparison card; no ranking."""
+    engines = [
+        ("smart", "🧠 هوشمند"),
+        ("union", "🤝 اتحاد"),
+        ("max", "🚀 MAX"),
+    ]
+    d = {key: engine_stats_snapshot(key) for key, _ in engines}
 
     def pct(v):
         return f"{float(v):+.2f}%"
@@ -2499,30 +2504,38 @@ def engine_stats_table_text():
         ("سیگنال‌ها", "signals", str),
         ("خریدها", "buys", str),
         ("فروش‌ها", "sells", str),
-        ("🟢 معاملات سودده", "wins", str),
-        ("🔴 معاملات ضررده", "losses", str),
+        ("🟢 سودده", "wins", str),
+        ("🔴 ضررده", "losses", str),
         ("Win Rate واقعی", "win_rate", pct),
         ("میانگین سود", "avg_win", pct),
         ("میانگین ضرر", "avg_loss", lambda x: f"-{float(x):.2f}%"),
-        ("بهترین معامله", "best", lambda x: pct(x) if x is not None else "0%"),
-        ("بدترین معامله", "worst", lambda x: pct(x) if x is not None else "0%"),
+        ("بهترین معامله", "best", lambda x: pct(x) if x is not None else "0.00%"),
+        ("بدترین معامله", "worst", lambda x: pct(x) if x is not None else "0.00%"),
         ("مجموع PnL", "net_pnl", pct),
         ("Profit Factor", "profit_factor", pf),
     ]
 
+    # LTR isolates prevent Telegram's RTL renderer from scrambling columns.
+    L = "\u2066"
+    R = "\u2069"
+    def cell(value):
+        return f"{L}{value}{R}"
+
     lines = [
-        "📊 **مقایسه عملکرد موتورها**",
-        "",
-        "| معیار | 🧠 هوشمند | 🤝 اتحاد | 🚀 MAX |",
-        "|---|---:|---:|---:|",
+        "📊 مقایسه عملکرد موتورها",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"{cell('معیار')}   {cell('🧠 هوشمند')}   {cell('🤝 اتحاد')}   {cell('🚀 MAX')}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
     for label, field, formatter in rows:
         values = [formatter(d[key][field]) for key, _ in engines]
-        lines.append(f"| {label} | {values[0]} | {values[1]} | {values[2]} |")
+        lines.append(
+            f"{label}:   {cell(values[0])}   |   {cell(values[1])}   |   {cell(values[2])}"
+        )
 
     lines += [
-        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "ℹ️ آمار مستقل هر سیستم — بدون رتبه‌بندی",
     ]
     return "\n".join(lines)
@@ -4120,7 +4133,7 @@ def start_telegram_bot():
             elif data == "engine_stats":
                 await q.edit_message_text(
                     engine_stats_table_text(),
-                    parse_mode="Markdown",
+                    parse_mode=None,
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="engine_stats")],
                         [InlineKeyboardButton("🔙 بازگشت به مرکز تحلیل", callback_data="analytics_center")]
