@@ -2409,31 +2409,100 @@ def balanced_signal_allowed(base_score, threshold, seconds_without_signal=0.0):
     factor = balanced_quality_multiplier(seconds_without_signal)
     return score >= (gate * factor)
 
+
 # ==========================================================
-# V12_REAL_AUDIT
-# Real scanner observability. Counters describe actual pipeline
-# decisions only; no synthetic signals/trades are generated.
+# ENGINE_PERFORMANCE_TABLE_V1
+# Independent statistics: Smart / Union / MAX. No ranking.
 # ==========================================================
-V12_REAL_AUDIT = {
-    "scans": 0,
-    "tokens_seen": 0,
-    "pairs_seen": 0,
-    "fusion_candidates": 0,
-    "quality_rejected": 0,
-    "duplicate_rejected": 0,
-    "daily_cap_rejected": 0,
-    "cooldown_rejected": 0,
-    "circuit_rejected": 0,
-    "emergency_rejected": 0,
-    "real_buy_success": 0,
-    "real_buy_failed": 0,
-    "channel_sent": 0,
-    "channel_failed": 0,
-    "last_scan": 0.0,
-    "last_candidate": 0.0,
-    "last_signal": 0.0,
-    "last_error": "",
+ENGINE_PERFORMANCE_TABLE_V1 = True
+
+ENGINE_STATS = {
+    "smart": {"signals": 0, "buys": 0, "sells": 0, "wins": 0, "losses": 0,
+              "sum_profit": 0.0, "sum_loss": 0.0, "best": None, "worst": None},
+    "union": {"signals": 0, "buys": 0, "sells": 0, "wins": 0, "losses": 0,
+              "sum_profit": 0.0, "sum_loss": 0.0, "best": None, "worst": None},
+    "max": {"signals": 0, "buys": 0, "sells": 0, "wins": 0, "losses": 0,
+            "sum_profit": 0.0, "sum_loss": 0.0, "best": None, "worst": None},
 }
+
+def engine_stats_record(engine, event, pnl_pct=None):
+    aliases = {"هوشمند":"smart", "smart":"smart", "اتحاد":"union",
+               "union":"union", "مکس":"max", "max":"max", "pro max":"max"}
+    key = aliases.get(str(engine or "").strip().lower())
+    if key not in ENGINE_STATS:
+        return
+    s = ENGINE_STATS[key]
+    event = str(event or "").lower()
+    if event == "signal":
+        s["signals"] += 1
+    elif event == "buy":
+        s["buys"] += 1
+    elif event == "sell":
+        s["sells"] += 1
+    elif event == "close" and pnl_pct is not None:
+        pnl = float(pnl_pct)
+        s["sells"] += 1
+        if pnl > 0:
+            s["wins"] += 1
+            s["sum_profit"] += pnl
+        elif pnl < 0:
+            s["losses"] += 1
+            s["sum_loss"] += abs(pnl)
+        s["best"] = pnl if s["best"] is None else max(s["best"], pnl)
+        s["worst"] = pnl if s["worst"] is None else min(s["worst"], pnl)
+
+def engine_stats_snapshot(engine):
+    s = ENGINE_STATS[engine]
+    closed = s["wins"] + s["losses"]
+    wr = s["wins"] / closed * 100 if closed else 0.0
+    avg_win = s["sum_profit"] / s["wins"] if s["wins"] else 0.0
+    avg_loss = s["sum_loss"] / s["losses"] if s["losses"] else 0.0
+    pf = s["sum_profit"] / s["sum_loss"] if s["sum_loss"] else (
+        float("inf") if s["sum_profit"] > 0 else 0.0)
+    return {**s, "win_rate": wr, "avg_win": avg_win, "avg_loss": avg_loss,
+            "profit_factor": pf, "net_pnl": s["sum_profit"] - s["sum_loss"]}
+
+def engine_stats_table_text():
+    engines = [("smart", "🧠 هوشمند"), ("union", "🤝 اتحاد"), ("max", "🚀 MAX")]
+    d = {k: engine_stats_snapshot(k) for k, _ in engines}
+
+    def pct(v):
+        return f"{float(v):+.2f}%"
+
+    def pf(v):
+        return "∞" if v == float("inf") else f"{float(v):.2f}"
+
+    rows = [
+        ("سیگنال‌ها", "signals", str),
+        ("خریدها", "buys", str),
+        ("فروش‌ها", "sells", str),
+        ("🟢 معاملات سودده", "wins", str),
+        ("🔴 معاملات ضررده", "losses", str),
+        ("Win Rate واقعی", "win_rate", pct),
+        ("میانگین سود", "avg_win", pct),
+        ("میانگین ضرر", "avg_loss", lambda x: f"-{float(x):.2f}%"),
+        ("بهترین معامله", "best", lambda x: pct(x) if x is not None else "0%"),
+        ("بدترین معامله", "worst", lambda x: pct(x) if x is not None else "0%"),
+        ("مجموع PnL", "net_pnl", pct),
+        ("Profit Factor", "profit_factor", pf),
+    ]
+
+    lines = [
+        "📊 **مقایسه عملکرد موتورها**",
+        "",
+        "| معیار | 🧠 هوشمند | 🤝 اتحاد | 🚀 MAX |",
+        "|---|---:|---:|---:|",
+    ]
+
+    for label, field, formatter in rows:
+        values = [formatter(d[key][field]) for key, _ in engines]
+        lines.append(f"| {label} | {values[0]} | {values[1]} | {values[2]} |")
+
+    lines += [
+        "",
+        "ℹ️ آمار مستقل هر سیستم — بدون رتبه‌بندی",
+    ]
+    return "\n".join(lines)
 
 def _audit_signal_decision(reason):
     key = {
@@ -3915,6 +3984,17 @@ def start_telegram_bot():
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="v12_real_audit")],
                         [InlineKeyboardButton("🧠 V11", callback_data="v11_data")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                    ])
+                )
+                return
+
+            elif data == "engine_stats":
+                await q.edit_message_text(
+                    engine_stats_table_text(),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="engine_stats")],
                         [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
                     ])
                 )
