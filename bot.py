@@ -799,7 +799,18 @@ def send_telegram_msg(text, target_chat=None, reply_markup=None, parse_mode="Mar
             if retry_data.get("ok"):
                 logger.warning("⚠️ پیام با fallback بدون Markdown ارسال شد.")
                 return True
-            logger.error(f"❌ Telegram fallback failed: {retry_data.get('description', retry_data)}")
+            logger.error(f"❌ Telegram fallback بدون Markdown failed: {retry_data.get('description', retry_data)}")
+
+        # اگر مشکل از inline keyboard باشد، خود پیام را بدون دکمه دوباره می‌فرستیم
+        # تا سیگنال به هر حال به کانال برسد و خطای اصلی در لاگ باقی بماند.
+        if payload.get("reply_markup") is not None:
+            payload.pop("reply_markup", None)
+            retry2 = http_session.post(url, json=payload, timeout=8)
+            retry2_data = retry2.json()
+            if retry2_data.get("ok"):
+                logger.warning("⚠️ سیگنال کانال بدون دکمه ارسال شد؛ reply_markup مشکل داشت.")
+                return True
+            logger.error(f"❌ Telegram fallback بدون دکمه failed: {retry2_data.get('description', retry2_data)}")
         return False
     except Exception as e:
         logger.error(f"❌ خطای ارسال پیام به تلگرام: {e}")
@@ -928,6 +939,16 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         result_line = "📌 وضعیت: سیگنال خرید"
         price_label = "🎯 نقطه ورود"
 
+    # مقدارهای آماری برای جلوگیری از توقف ارسال کانال در صورت نبودن داده کامل
+    try:
+        m5_change = float(p_change or 0.0)
+    except Exception:
+        m5_change = 0.0
+    # این تابع در نسخه‌های قبلی از متغیرهای تعریف‌نشده استفاده می‌کرد و قبل از sendMessage کرش می‌کرد.
+    # اگر آمار خرید/فروش جداگانه در ورودی موجود نباشد، مقدار صفر نمایش داده می‌شود.
+    buys_m5 = 0
+    sells_m5 = 0
+
     graphic_text = (
         f"🤖⚡ {signal_title}\n"
         f"{side_icon}\n"
@@ -959,18 +980,35 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         ]
     ]
     if WEBAPP_URL:
+        # نکته مهم: دکمه web_app در پیام کانال قابل استفاده نیست و باعث
+        # خطای BUTTON_TYPE_INVALID و عدم ارسال کل پیام می‌شود.
+        # در کانال از URL button استفاده می‌کنیم؛ خود Mini App داخل آن
+        # telegram_id را از initData می‌گیرد.
         buttons.append([
-            InlineKeyboardButton("📱 ورود به Mini App", web_app=WebAppInfo(url=WEBAPP_URL)),
-            InlineKeyboardButton("🤖 کپی‌ترید", web_app=WebAppInfo(url=WEBAPP_URL)),
+            InlineKeyboardButton("📱 ورود به Mini App", url=WEBAPP_URL),
+            InlineKeyboardButton("🤖 کپی‌ترید", url=WEBAPP_URL),
         ])
 
     try:
-        return send_telegram_msg(
+        # قبل از ارسال، تنظیمات کانال را تازه‌سازی می‌کنیم تا مقدار قدیمی Render/DB
+        # باعث ارسال به مقصد اشتباه نشود.
+        _load_channel_config()
+        if not CHANNEL_ID:
+            logger.error("❌ CHANNEL_ID خالی است؛ کارت سیگنال به کانال ارسال نشد.")
+            return False
+
+        keyboard = InlineKeyboardMarkup(buttons)
+        ok = send_telegram_msg(
             graphic_text, target_chat=CHANNEL_ID,
-            reply_markup=InlineKeyboardMarkup(buttons), parse_mode=None
+            reply_markup=keyboard, parse_mode=None
         )
+        if not ok:
+            logger.error(f"❌ کارت کانال ارسال نشد | CHANNEL_ID={CHANNEL_ID!r}")
+        else:
+            logger.info(f"📢 کارت سیگنال کانال ارسال شد | CHANNEL_ID={CHANNEL_ID!r} | {symbol} | {side}")
+        return ok
     except Exception as e:
-        logger.error(f"❌ خطای ارسال کارت سیگنال: {e}")
+        logger.exception(f"❌ خطای ارسال کارت سیگنال به کانال | CHANNEL_ID={CHANNEL_ID!r}: {e}")
         return False
 
 def register_subscription(telegram_id, wallet_addr, tx_sig, currency="USDC"):
