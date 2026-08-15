@@ -1,4 +1,6 @@
 import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import requests
 import json
 import base64
@@ -40,6 +42,10 @@ retries = Retry(total=2, backoff_factor=0.1, status_forcelist=[500, 502, 503, 50
 adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=retries)
 http_session.mount("https://", adapter)
 http_session.mount("http://", adapter)
+
+# کارهای سنگین بازار از اسکنر جدا می‌شوند تا Telegram سریع بماند.
+SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="SignalExec")
+SIGNAL_EMIT_LOCK = Lock()
 
 # تنظیمات کلیدی محیطی و کانال انتشار سیگنال
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -139,23 +145,44 @@ ANTI_WASH_TRADING_ENABLED = True
 
 SMART_MONEY_COPY_ENABLED = True      
 SOCIAL_SENTIMENT_ENABLED = True      
+PARTIAL_TP_LEVELS = [
+    (10.0, 3.0),
+    (15.0, 6.0),
+    (20.0, 10.0),
+    (30.0, 20.0),
+    (40.0, 28.0),
+    (50.0, 35.0),
+    (75.0, 55.0),
+    (100.0, 75.0),
+    (150.0, 110.0),
+    (200.0, 155.0),
+    (300.0, 230.0),
+    (500.0, 350.0),
+    (750.0, 650.0),
+    (1000.0, 950.0),
+]
+PARTIAL_TP_LADDER = PARTIAL_TP_LEVELS
+
 DYNAMIC_TRAILING_TP_ENABLED = True
 # مدیریت سود پله‌ای بر پایه سقف سود: حدضرر فقط بالا می‌رود و هیچ‌وقت پایین نمی‌آید.
 # مثال: اگر سقف سود به +1000% برسد، حدضرر روی حدود +950% قفل می‌شود.
 TRAILING_LOCK_TABLE = (
+    # سقف سود -> حداقل سودی که اجازه می‌دهیم پس بدهد
     (1000.0, 950.0),
-    (750.0, 690.0),
-    (500.0, 430.0),
+    (750.0, 650.0),
+    (500.0, 350.0),
     (300.0, 230.0),
-    (200.0, 160.0),
-    (150.0, 115.0),
+    (200.0, 155.0),
+    (150.0, 110.0),
     (100.0, 75.0),
-    (75.0, 52.0),
-    (50.0, 30.0),
-    (35.0, 20.0),
-    (25.0, 10.0),
-    (20.0, 5.0),
-    (10.0, 2.0),
+    (75.0, 55.0),
+    (50.0, 35.0),
+    (40.0, 28.0),
+    (30.0, 20.0),
+    (25.0, 15.0),
+    (20.0, 10.0),
+    (15.0, 7.0),
+    (10.0, 3.0),
 )
 TRAILING_WEAKNESS_ENABLED = True
 TRAILING_WEAK_SELL_RATIO = 1.45
@@ -1510,7 +1537,7 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     elif outcome == "SELL_FAILED":
         title, status = "⚠️ سیگنال خروج / فروش ناموفق", "⚠️ فروش انجام نشد"
     elif outcome == "SIGNAL_TP":
-        title, status = "🎯 فروش سیگنال؛ حد سود متحرک فعال شد", "🟢 سیگنال سودده بسته شد"
+        title, status = "🎯 فروش سیگنال؛ سیو سود متحرک", "🟢 سیگنال سودده بسته شد"
     else:
         title, status = "🛑 فروش سیگنال؛ حد ضرر فعال شد", "🔴 سیگنال به حد ضرر رسید"
 
@@ -1523,6 +1550,7 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
         f"📊 سود/زیان: {pnl_percent:+.2f}%\n"
         f"📈 بیشترین سود ثبت‌شده: {highest:+.2f}%\n"
         f"🔒 حدضرر متحرک فعلی: {locked:+.2f}%\n"
+        f"🧭 سقف سود ثبت‌شده: {highest:+.2f}%\n"
         f"🎯 تارگت اولیه: +{tp:.2f}%\n"
         f"🛑 حدضرر اولیه: {sl:.2f}%\n"
         f"📌 وضعیت: {status}\n"
@@ -1551,6 +1579,81 @@ def _adaptive_locked_floor(highest_pnl, current_floor):
             break
     return floor
 
+
+def v14_profit_floor(highest_pnl):
+    high = float(highest_pnl or 0.0)
+    floor = 0.0
+    for trigger, locked in PARTIAL_TP_LEVELS:
+        if high >= trigger:
+            floor = max(floor, locked)
+    return floor
+
+
+def v14_classify_exit(pnl_pct, highest_pnl=0.0, locked_floor=0.0, stop_loss=-8.0):
+    pnl = float(pnl_pct or 0.0)
+    floor = max(float(locked_floor or 0.0), v14_profit_floor(highest_pnl))
+
+    if pnl <= float(stop_loss):
+        return "🔴 حد ضرر", "STOP_LOSS"
+    if floor > 0 and pnl >= floor:
+        return f"🟢 سیو سود متحرک +{pnl:.2f}%", "TRAILING_PROFIT"
+    if pnl > 0:
+        return f"🟢 خروج سودده +{pnl:.2f}%", "PROFIT"
+    return f"🔴 خروج با ضرر {pnl:.2f}%", "LOSS"
+
+
+def v14_raise_floor(current_floor, highest_pnl):
+    return max(float(current_floor or 0.0), v14_profit_floor(highest_pnl))
+
+
+def profit_locked_floor(highest_pnl):
+    """Highest locked-profit floor reached by this position."""
+    high = float(highest_pnl or 0.0)
+    floor = 0.0
+    for trigger, locked in PARTIAL_TP_LEVELS:
+        if high >= trigger:
+            floor = max(floor, locked)
+    return floor
+
+
+
+FINAL_AUDIT_NEGATIVE_PNL_TRAILING_GUARD = True
+
+def enforce_real_exit_reason(pnl_pct, highest_pnl=0.0, locked_floor=0.0,
+                             stop_loss=-8.0):
+    """
+    Final, centralized exit-reason guard.
+    pnl < 0 can never be reported as trailing profit.
+    """
+    pnl = float(pnl_pct or 0.0)
+    if pnl < 0:
+        if pnl <= float(stop_loss):
+            return "🔴 حد ضرر", "STOP_LOSS"
+        return f"🔴 خروج با ضرر {pnl:.2f}%", "LOSS"
+    return final_profit_exit_reason(
+        pnl, highest_pnl, locked_floor, stop_loss
+    )
+
+def final_profit_exit_reason(pnl_pct, highest_pnl=0.0, locked_floor=0.0,
+                             stop_loss=-8.0):
+    """A negative close can never be labelled as a trailing-profit close."""
+    pnl = float(pnl_pct or 0.0)
+    floor = max(float(locked_floor or 0.0),
+                profit_locked_floor(highest_pnl))
+
+    if pnl <= float(stop_loss):
+        return "🔴 حد ضرر", "STOP_LOSS"
+    if floor > 0 and pnl >= floor:
+        return f"🟢 سیو سود متحرک +{pnl:.2f}%", "TRAILING_PROFIT"
+    if pnl > 0:
+        return f"🟢 خروج سودده +{pnl:.2f}%", "PROFIT"
+    return f"🔴 خروج با ضرر {pnl:.2f}%", "LOSS"
+
+
+def raise_profit_floor(current_floor, highest_pnl):
+    return max(float(current_floor or 0.0),
+               profit_locked_floor(highest_pnl))
+
 def _update_trailing_state(pos, current_price, pnl_percent, pair):
     """به‌روزرسانی سقف قیمت، حدضرر متحرک و تشخیص ضعف بازار.
     این تابع ادعای پیش‌بینی قطعی ریزش ندارد؛ از افت از سقف + مومنتوم/نسبت فروش به خرید استفاده می‌کند.
@@ -1578,7 +1681,7 @@ def _update_trailing_state(pos, current_price, pnl_percent, pair):
         if ratio_bad and momentum_bad and drawdown_from_high >= TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT:
             weakness = True
             # در ضعف جدی بازار، حدضرر را تا نزدیک قیمت فعلی بالا می‌آوریم، اما هرگز پایین نمی‌بریم.
-            weakness_floor = pnl_percent - 0.5
+            weakness_floor = pnl_percent - 0.35
             current_floor = max(current_floor, weakness_floor)
 
     pos["locked_floor"] = current_floor
@@ -1771,7 +1874,7 @@ def check_positions_loop():
                         _mark_token_closed(t_addr)
         except Exception as e:
             logger.error(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
-        time.sleep(2)
+        time.sleep(1)
 
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
@@ -2246,6 +2349,66 @@ def v11_data_report():
     return v11_state
 
 
+# اجرای محاسبات سنگین خارج از event loop تلگرام
+async def _tg_bg(fn, *args, **kwargs):
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+# ==========================================================
+# BALANCED_SIGNAL_FLOW_V1
+# Keeps scanning alive without weakening quality indiscriminately.
+# ==========================================================
+BALANCED_SIGNAL_FLOW_V1 = True
+
+SIGNAL_FLOW_STATE = {
+    "cycles": 0,
+    "tokens_seen": 0,
+    "candidates": 0,
+    "fusion_candidates": 0,
+    "signals": 0,
+    "rejected": 0,
+    "last_signal_ts": 0.0,
+    "last_scan_ts": 0.0,
+}
+
+# Only quality thresholds are allowed to relax inside this bounded band.
+# The core safety checks (duplicate position, invalid price/liquidity,
+# blocked mint, and risk limits) must remain hard.
+BALANCED_QUALITY_RELAX_MAX = 0.12
+BALANCED_STALE_SCAN_SECONDS = 180.0
+BALANCED_NO_SIGNAL_SECONDS = 1800.0
+
+def balanced_quality_multiplier(seconds_without_signal):
+    """
+    Bounded adaptation:
+    0..30 min: normal.
+    30..60 min: small relaxation.
+    60+ min: maximum bounded relaxation.
+    Never turns safety filters off.
+    """
+    try:
+        idle = float(seconds_without_signal or 0.0)
+    except Exception:
+        idle = 0.0
+    if idle >= 3600:
+        return 1.0 - BALANCED_QUALITY_RELAX_MAX
+    if idle >= 1800:
+        return 1.0 - (BALANCED_QUALITY_RELAX_MAX * 0.50)
+    return 1.0
+
+def balanced_signal_allowed(base_score, threshold, seconds_without_signal=0.0):
+    """
+    Adaptive quality gate. It only relaxes the score threshold within a
+    bounded range; it never bypasses hard safety checks.
+    """
+    try:
+        score = float(base_score)
+        gate = float(threshold)
+    except Exception:
+        return False
+    factor = balanced_quality_multiplier(seconds_without_signal)
+    return score >= (gate * factor)
+
 # ==========================================================
 # V12_REAL_AUDIT
 # Real scanner observability. Counters describe actual pipeline
@@ -2595,35 +2758,38 @@ v7_compact_learning_memory(force=False)
 
 def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
-    if _token_lock_is_open(token_addr):
-        logger.info(f"Duplicate BUY blocked for open token: {token_addr}")
-        _audit_signal_decision("DUPLICATE_OPEN_POSITION")
-        return False, "DUPLICATE_OPEN_POSITION"
-    if daily_signal_cap_reached():
-        _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
-        return False, "DAILY_SIGNAL_CAP_REACHED"
+    # فقط تصمیم ورود/سهمیه را قفل می‌کنیم؛ خرید شبکه و Telegram خارج از قفل انجام می‌شوند.
+    with SIGNAL_EMIT_LOCK:
+        if _token_lock_is_open(token_addr):
+            logger.info(f"Duplicate BUY blocked for open token: {token_addr}")
+            _audit_signal_decision("DUPLICATE_OPEN_POSITION")
+            return False, "DUPLICATE_OPEN_POSITION"
+        if daily_signal_cap_reached():
+            _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
+            return False, "DAILY_SIGNAL_CAP_REACHED"
+        if learning_is_in_circuit_breaker():
+            logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
+            _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
+            return False, "LEARNING_CIRCUIT_BREAKER"
+        if not fusion_quality_gate(fusion):
+            logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
+            _audit_signal_decision("QUALITY_GATE_REJECTED")
+            return False, "QUALITY_GATE_REJECTED"
+        now_global = time.time()
+        if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
+            _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
+            return False, "GLOBAL_SIGNAL_COOLDOWN"
+        if EMERGENCY_STOP:
+            logger.info("Emergency stop active: new signal execution skipped.")
+            _audit_signal_decision("EMERGENCY_STOP")
+            return False, "EMERGENCY_STOP"
 
-    if learning_is_in_circuit_breaker():
-        logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
-        _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
-        return False, "LEARNING_CIRCUIT_BREAKER"
-
-    # IMPORTANT: changing the daily budget never relaxes signal quality.
-    if not fusion_quality_gate(fusion):
-        logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
-        _audit_signal_decision("QUALITY_GATE_REJECTED")
-        return False, "QUALITY_GATE_REJECTED"
-    now_global = time.time()
-    if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
-        _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
-        return False, "GLOBAL_SIGNAL_COOLDOWN"
-    """Emit one unified signal after the enabled engines vote together.
-    A failed real buy is still published and tracked as a signal-only position.
-    """
-    if EMERGENCY_STOP:
-        logger.info("Emergency stop active: new signal execution skipped.")
-        _audit_signal_decision("EMERGENCY_STOP")
-        return False, "EMERGENCY_STOP"
+        # سهمیه در لحظه صدور سیگنال واقعی رزرو می‌شود؛ شکست خرید/کانال سهمیه را دور نمی‌زند.
+        last_global_signal_time = now_global
+        UNIFIED_LAST_EMIT_TIME = now_global
+        V12_REAL_AUDIT["last_signal"] = now_global
+        _increment_daily_signal_count()
+        _lock_token_entry(token_addr, "OPEN_PENDING")
     amount = get_dynamic_buy_amount(0.01)
     reason = " + ".join(fusion["votes"])
     symbol = fusion["symbol"]
@@ -2633,7 +2799,6 @@ def send_fused_signal(token_addr, fusion):
     dex_link = f"https://dexscreener.com/solana/{token_addr}"
     token_link = f"https://solscan.io/token/{token_addr}"
 
-    _lock_token_entry(token_addr, "OPEN_PENDING")
     success, result = execute_real_buy(token_addr, amount)
     if success:
         V12_REAL_AUDIT["real_buy_success"] += 1
@@ -2674,14 +2839,6 @@ def send_fused_signal(token_addr, fusion):
         V12_REAL_AUDIT["channel_sent"] += 1
     else:
         V12_REAL_AUDIT["channel_failed"] += 1
-
-    # The daily budget counts a real qualified signal emission, even if channel
-    # delivery temporarily fails. This prevents the channel from becoming a
-    # loophole that bypasses the daily limit.
-    last_global_signal_time = time.time()
-    UNIFIED_LAST_EMIT_TIME = last_global_signal_time
-    V12_REAL_AUDIT["last_signal"] = last_global_signal_time
-    _increment_daily_signal_count()
 
     if success:
         txlink = f"https://solscan.io/tx/{result}"
@@ -2861,7 +3018,7 @@ def unified_market_scanner_loop(app):
                     if fusion:
                         V12_REAL_AUDIT["fusion_candidates"] += 1
                         V12_REAL_AUDIT["last_candidate"] = time.time()
-                        send_fused_signal(token_addr,fusion)
+                        SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
                 except Exception as token_error:
                     logger.debug(f"Fusion token error {token_addr}: {token_error}")
         except Exception as e:
@@ -3489,9 +3646,11 @@ def start_telegram_bot():
             elif data=="controls": await q.edit_message_text(("🎛 **کنترل موتورها**\n\n🤖 اتحاد هالک روشن است.\nهمه موتورهای تحلیلی با هم رأی می‌دهند و فقط یک سیگنال واحد منتشر می‌شود.\n\nبرای کنترل تک‌تک موتورها، اتحاد را خاموش کنید." if SYNCHRONIZED_MODE else "🎛 **کنترل موتورها**\n\n🔴 اتحاد خاموش است.\nحالا هر موتور کلید مستقل خودش را دارد و می‌توانید هرکدام را جداگانه روشن/خاموش کنید."),reply_markup=_control_keyboard(),parse_mode="Markdown") if is_admin else await q.edit_message_text("⛔ این بخش فقط برای ادمین است.",reply_markup=_main_keyboard(False))
             elif data=="wallet":
                 if not is_admin: await q.edit_message_text("⛔ اطلاعات ولت اصلی خصوصی است.",reply_markup=_main_keyboard(False))
-                else: await q.edit_message_text(f"💼 **ولت اصلی**\n\n💰 موجودی: `{get_sol_balance():.6f} SOL`\n\n📍 `{WALLET_PUBKEY or '-'} `",reply_markup=_main_keyboard(True),parse_mode="Markdown")
+                else:
+                    sol_balance = await _tg_bg(get_sol_balance)
+                    await q.edit_message_text(f"💼 **ولت اصلی**\n\n💰 موجودی: `{sol_balance:.6f} SOL`\n\n📍 `{WALLET_PUBKEY or '-'} `",reply_markup=_main_keyboard(True),parse_mode="Markdown")
             elif data=="stats":
-                a=get_advanced_trade_analytics(); await q.edit_message_text(f"📊 **آمار واقعی ثبت‌شده**\n\nمعاملات: `{a['total_trades']}`\nWin Rate: `{a['win_rate']:.2f}%`\nسود/زیان: `{a['total_pct']:+.2f}%`\nP/L: `${a['total_usd']:+.2f}`",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+                a=await _tg_bg(get_advanced_trade_analytics); await q.edit_message_text(f"📊 **آمار واقعی ثبت‌شده**\n\nمعاملات: `{a['total_trades']}`\nWin Rate: `{a['win_rate']:.2f}%`\nسود/زیان: `{a['total_pct']:+.2f}%`\nP/L: `${a['total_usd']:+.2f}`",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data=="security":
                 if not is_admin: await q.edit_message_text("⛔ فقط ادمین.",reply_markup=_main_keyboard(False))
                 else: await q.edit_message_text(f"🔐 **امنیت**\n\nPrivate Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\nRPCها: `{len(RPC_ENDPOINTS)}`\nAdmin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",reply_markup=_main_keyboard(True),parse_mode="Markdown")
@@ -3541,7 +3700,7 @@ def start_telegram_bot():
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
                     return
-                st = learning_stats()
+                st = await _tg_bg(learning_stats)
                 await q.edit_message_text(
                     "📚 **یادگیری و عملکرد واقعی**\n\n"
                     f"📊 معاملات ثبت‌شده: `{st['trades']}`\n"
@@ -3567,15 +3726,15 @@ def start_telegram_bot():
                     return
 
                 try:
-                    st = learning_stats()
+                    st = await _tg_bg(learning_stats)
                 except Exception:
                     st = {"trades": 0, "win_rate": 0.0, "net_pnl_pct_sum": 0.0, "loss_streak": 0}
                 try:
-                    ps = v7_paper_stats()
+                    ps = await _tg_bg(v7_paper_stats)
                 except Exception:
                     ps = {"trades": 0, "win_rate": 0.0, "profit_factor": 0.0}
                 try:
-                    bt = v7_backtest_from_learning_history()
+                    bt = await _tg_bg(v7_backtest_from_learning_history)
                 except Exception:
                     bt = {"trades": 0, "win_rate": 0.0, "profit_factor": 0.0}
                 rg = v7_state.get("regime", {}) or {}
@@ -3617,9 +3776,9 @@ def start_telegram_bot():
                     )
                     return
 
-                bt = v10_real_backtest()
-                wf = v10_walk_forward()
-                ab = v10_ab_engine_test()
+                bt = await _tg_bg(v10_real_backtest)
+                wf = await _tg_bg(v10_walk_forward)
+                ab = await _tg_bg(v10_ab_engine_test)
 
                 top = sorted(
                     ab.items(),
