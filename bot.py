@@ -2416,6 +2416,8 @@ def balanced_signal_allowed(base_score, threshold, seconds_without_signal=0.0):
 # ==========================================================
 ENGINE_PERFORMANCE_TABLE_V1 = True
 
+ENGINE_STATS_CLOSED_KEYS = set()
+
 ENGINE_STATS = {
     "smart": {"signals": 0, "buys": 0, "sells": 0, "wins": 0, "losses": 0,
               "sum_profit": 0.0, "sum_loss": 0.0, "best": None, "worst": None},
@@ -2425,7 +2427,23 @@ ENGINE_STATS = {
             "sum_profit": 0.0, "sum_loss": 0.0, "best": None, "worst": None},
 }
 
-def engine_stats_record(engine, event, pnl_pct=None):
+def detect_stats_engine(value):
+    """Resolve the owning engine without changing trade logic."""
+    if isinstance(value, dict):
+        for field in ("engine", "source_engine", "signal_engine", "motor", "origin"):
+            if value.get(field):
+                return detect_stats_engine(value[field])
+        return None
+    raw = str(value or "").strip().lower()
+    if "هوشمند" in raw or "smart" in raw:
+        return "smart"
+    if "اتحاد" in raw or "union" in raw:
+        return "union"
+    if "مکس" in raw or "max" in raw:
+        return "max"
+    return None
+
+def engine_stats_record(engine, event, pnl_pct=None, close_key=None):
     aliases = {"هوشمند":"smart", "smart":"smart", "اتحاد":"union",
                "union":"union", "مکس":"max", "max":"max", "pro max":"max"}
     key = aliases.get(str(engine or "").strip().lower())
@@ -2440,6 +2458,11 @@ def engine_stats_record(engine, event, pnl_pct=None):
     elif event == "sell":
         s["sells"] += 1
     elif event == "close" and pnl_pct is not None:
+        if close_key is not None:
+            close_key = str(close_key)
+            if close_key in ENGINE_STATS_CLOSED_KEYS:
+                return
+            ENGINE_STATS_CLOSED_KEYS.add(close_key)
         pnl = float(pnl_pct)
         s["sells"] += 1
         if pnl > 0:
@@ -3554,6 +3577,10 @@ def _control_keyboard():
 
     rows = [
         [InlineKeyboardButton(
+            "📊 مرکز آمار و تحلیل سیستم",
+            callback_data="analytics_center"
+        )],
+        [InlineKeyboardButton(
             f"👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}",
             callback_data="toggle_max_fusion"
         )],
@@ -3577,10 +3604,6 @@ def _control_keyboard():
             f"🎯 سقف روزانه سیگنال: {daily_signal_status_text()}",
             callback_data="daily_signal_limit"
         )],
-        [InlineKeyboardButton("📊 داشبورد PRO MAX", callback_data="v7_dashboard")],
-                        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
-                        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
-                        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ]
     return InlineKeyboardMarkup(rows)
@@ -3781,7 +3804,7 @@ def start_telegram_bot():
                     "فیلتر کیفیت را ضعیف نمی‌کند.",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                        [InlineKeyboardButton("🔙 بازگشت به مرکز تحلیل", callback_data="analytics_center")]
                     ])
                 )
                 return
@@ -3985,6 +4008,28 @@ def start_telegram_bot():
                         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="v12_real_audit")],
                         [InlineKeyboardButton("🧠 V11", callback_data="v11_data")],
                         [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                    ])
+                )
+                return
+
+            elif data == "analytics_center":
+                if not is_admin:
+                    await q.edit_message_text(
+                        "⛔ این بخش فقط برای ادمین است.",
+                        reply_markup=_main_keyboard(False)
+                    )
+                    return
+                await q.edit_message_text(
+                    "📊 **مرکز آمار، تحلیل و عیب‌یابی**\n\n"
+                    "همه ابزارهای تحلیلی در این بخش قرار دارند و از مدیریت موتورهای مستقل جدا هستند.",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="engine_stats")],
+                        [InlineKeyboardButton("📈 داشبورد PRO MAX", callback_data="v7_dashboard")],
+                        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
+                        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
+                        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
+                        [InlineKeyboardButton("🔙 بازگشت به پنل کنترل", callback_data="controls")]
                     ])
                 )
                 return
