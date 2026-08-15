@@ -3131,24 +3131,38 @@ def start_telegram_bot():
                     ])
                 )
                 return
+
             elif data == "v7_dashboard":
                 if not is_admin:
-                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    await q.answer("⛔ دسترسی غیرمجاز.", show_alert=True)
                     return
+
                 st = learning_stats()
                 ps = v7_paper_stats()
                 bt = v7_backtest_from_learning_history()
-                rg = v7_state.get("regime", {})
-                await q.edit_message_text(
+                rg = v7_state.get("regime", {}) or {}
+
+                msg = (
                     "📊 **PRO MAX Dashboard**\n\n"
-                    f"🧠 معاملات یادگیری: `{st.get('trades',0)}`\n"
-                    f"✅ Win Rate: `{st.get('win_rate',0):.1f}%`\n"
-                    f"💰 PnL ثبت‌شده: `{st.get('net_pnl_pct_sum',0):.2f}%`\n"
-                    f"🧪 Paper: `{ps.get('trades',0)}` | WR `{ps.get('win_rate',0):.1f}%` | PF `{ps.get('profit_factor',0):.2f}`\n"
-                    f"🔬 Backtest Check: `{bt.get('trades',0)}` | WR `{bt.get('win_rate',0):.1f}%` | PF `{bt.get('profit_factor',0):.2f}`\n"
-                    f"🌐 Regime: `{rg.get('name','RANGE')}` ({float(rg.get('confidence',0))*100:.0f}%)\n"
-                    f"🛡️ Risk: `{learning_risk_multiplier():.2f}x`\n"
-                    f"🧹 حافظه: جزئیات بیش از {V7_MEMORY_MAX_AGE_DAYS} روز به‌تدریج فشرده/حذف می‌شوند.",
+                    f"🧠 معاملات یادگیری: `{st.get('trades', 0)}`\n"
+                    f"✅ Win Rate: `{st.get('win_rate', 0):.1f}%`\n"
+                    f"💰 PnL ثبت‌شده: `{st.get('net_pnl_pct_sum', 0):.2f}%`\n\n"
+                    f"🧪 Paper Trading: `{ps.get('trades', 0)}` معامله\n"
+                    f"   └ Win Rate: `{ps.get('win_rate', 0):.1f}%`\n"
+                    f"   └ Profit Factor: `{ps.get('profit_factor', 0):.2f}`\n\n"
+                    f"🔬 Backtest Check: `{bt.get('trades', 0)}` معامله\n"
+                    f"   └ Win Rate: `{bt.get('win_rate', 0):.1f}%`\n"
+                    f"   └ Profit Factor: `{bt.get('profit_factor', 0):.2f}`\n\n"
+                    f"🌐 وضعیت بازار: `{rg.get('name', 'RANGE')}`\n"
+                    f"🎯 اطمینان: `{float(rg.get('confidence', 0))*100:.0f}%`\n"
+                    f"🛡️ ضریب ریسک: `{learning_risk_multiplier():.2f}x`\n"
+                    f"🧹 حافظه: پاک‌سازی/فشرده‌سازی خودکار فعال\n"
+                    f"   └ جزئیات قدیمی‌تر از {V7_MEMORY_MAX_AGE_DAYS} روز حذف/فشرده می‌شوند."
+                )
+
+                await q.answer()
+                await q.edit_message_text(
+                    msg,
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="v7_dashboard")],
@@ -3156,6 +3170,8 @@ def start_telegram_bot():
                     ])
                 )
                 return
+
+
             elif data == "trade_limit":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
