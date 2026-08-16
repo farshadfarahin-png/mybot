@@ -3826,8 +3826,16 @@ def unified_market_scanner_loop(app):
                 if MAX_FUSION_ENABLED:
                     # Analysis is always independent, even while MAX is ON.
                     analysis_best = best_by_lane.get("ANALYSIS")
+
+                    # Independent Analysis fallback: do not require Fusion to select it.
+                    if analysis_best is None:
+                        _analysis_pool = candidates_by_lane.get("ANALYSIS") or []
+                        if _analysis_pool:
+                            analysis_best = max(_analysis_pool, key=lambda x: x[0])
                     if analysis_best:
+                        # Analysis lane is independent of Fusion selection.
                         _, token_addr_a, fusion_a = analysis_best
+                        _analysis_diag("selected", token_addr=token_addr_a)
                         _analysis_diag("submit_called", token_addr=token_addr_a)
                         SIGNAL_EXECUTOR.submit(_analysis_submit_worker, token_addr_a, fusion_a)
                     max_candidates = {k: v for k, v in best_by_lane.items() if k != "ANALYSIS"}
