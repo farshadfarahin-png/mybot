@@ -1,3 +1,4 @@
+# V17 TRUE HUNTER — verified architecture: independent lanes, MAX unified attack, rotating low-latency radar.
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -1923,13 +1924,13 @@ ADAPTIVE_MAX_RATIO_BONUS = 0.10
 consensus_last_signal = {}
 
 # سرعت رصد فقط — هیچ آستانه کیفیت، تعداد سیگنال یا منطق موتور تغییر نمی‌کند.
-FAST_SCAN_INTERVAL_SECONDS = 0.25
+FAST_SCAN_INTERVAL_SECONDS = 0.20
 MARKET_DISCOVERY_WORKERS = 16
-PAIR_SCAN_WORKERS = 24
+PAIR_SCAN_WORKERS = 32
 
 # ELITE RADAR + HULK SENTINEL: فقط معماری رصد/رتبه‌بندی ارتقا یافته؛ هیچ آستانه کیفیت، سقف سیگنال یا کلید کنترلی تغییر نمی‌کند.
 # بازار در پس‌زمینه تازه می‌شود تا رادار منتظر HTTP discovery نماند.
-ELITE_DISCOVERY_REFRESH_SECONDS = 0.50
+ELITE_DISCOVERY_REFRESH_SECONDS = 0.40
 ELITE_DISCOVERY_MAX_AGE_SECONDS = 4.0
 ELITE_PAIR_TIMEOUT_SECONDS = 1.50
 ELITE_VOTE_WORKERS = 12
@@ -1948,6 +1949,13 @@ _elite_market_refresh_thread = None
 _SENTINEL_MEMORY_TTL = 120.0
 _SENTINEL_MAX_TOKENS = 5000
 _SENTINEL_PAIR_CHOICES = 3
+
+# V17 TRUE HUNTER: scan the universe in rotating micro-batches.
+# This prevents the radar from waiting for hundreds of HTTP calls before making
+# a decision, while every discovered token is revisited continuously.
+TRUE_HUNTER_BATCH_SIZE = 64
+_TRUE_HUNTER_CURSOR = 0
+_TRUE_HUNTER_CURSOR_LOCK = Lock()
 _sentinel_memory = {}
 _sentinel_lock = Lock()
 
@@ -3078,17 +3086,20 @@ def _evaluate_elite_token(token_addr):
 
 
 def _independent_engine_candidate(token_addr, pair, engine_name):
-    """One-engine hunter. It never borrows a vote from another engine.
-    MAX is the only mode that intentionally fuses these hunters into one attack.
+    """TRUE HUNTER: one engine, one decision, zero borrowed votes.
+
+    The common hard market-quality gate remains authoritative. Engine-specific
+    evidence is then evaluated independently. No engine receives credit from
+    another engine.
     """
     q = _mode_market_quality(pair)
     if not q:
         return None
     chg, vol, liq = q["chg"], q["vol"], q["liq"]
     buys, sells = q["buys"], q["sells"]
-    ok = False
-    strength = 0.0
     try:
+        ok = False
+        strength = 0.0
         if engine_name == "Technical":
             ok = bool(TECHNICAL_RUNNING and check_major_support_resistance_pa(pair)[0]); strength = 6.0
         elif engine_name == "UltimateAI/21":
@@ -3113,19 +3124,26 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
             ok = bool(ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * 0.8)); strength = 5.5
         if not ok:
             return None
+
         buy_ratio = buys / max(1, sells)
-        score = strength + min(5.0, chg / 5.0) + min(4.0, vol / 10000.0) + min(3.0, liq / 50000.0) + min(3.0, max(0.0, buy_ratio - 1.0))
+        # Selection score only. Existing quality thresholds are not lowered.
+        score = (strength + min(5.0, chg / 5.0) + min(4.0, vol / 10000.0)
+                 + min(3.0, liq / 50000.0) + min(3.0, max(0.0, buy_ratio - 1.0)))
         if score < 8.0:
             return None
         now = time.time()
         cooldown_key = f"{token_addr}:{engine_name}"
         if now - consensus_last_signal.get(cooldown_key, 0) < CONSENSUS_COOLDOWN_SECONDS:
             return None
+        group = "ADVANCED" if engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter") else "HULK"
         return {
             "score": float(score), "strength": float(strength),
-            "votes": [engine_name], "advanced_votes": [engine_name] if engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter") else [],
-            "hulk_votes": [engine_name] if engine_name in ("Fire", "Trend", "Combo", "Golden", "Mempool/SmartMoney", "Whale", "Anti-Wash") else [],
-            "engines": [engine_name], "mode": f"موتور مستقل — {engine_name}", **q,
+            "votes": [engine_name],
+            "advanced_votes": [engine_name] if group == "ADVANCED" else [],
+            "hulk_votes": [engine_name] if group == "HULK" else [],
+            "engines": [engine_name],
+            "mode": f"سیستم پیشرفته AI — {engine_name}" if group == "ADVANCED" else f"اتحاد هالک AI — {engine_name}",
+            "hunter_group": group, **q,
             "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
             "tp": max(15.0, min(30.0, 14.0 + min(12.0, score))), "sl": -8.0,
             "rank_bonus": _sentinel_rank_bonus(token_addr, {"score": score, **q}),
@@ -3133,7 +3151,6 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
     except Exception as e:
         logger.debug(f"Independent engine {engine_name} failed for {token_addr}: {e}")
         return None
-
 
 def _active_independent_engine_names():
     adv_names = ["Technical", "UltimateAI/21", "Social/Hype", "SmartFilter"]
@@ -3151,8 +3168,9 @@ def _evaluate_token_for_active_modes(token_addr):
     if not pairs:
         return token_addr, []
     results = []
-    # MAX is the one deliberate fusion path: all active engines feed the single consensus attack.
     if MAX_FUSION_ENABLED:
+        # MAX = one unified attack. All active engine evidence enters the same
+        # consensus function; no independent emission is allowed in MAX.
         for pair in pairs:
             fusion = build_consensus_signal(token_addr, pair)
             if fusion:
@@ -3161,25 +3179,26 @@ def _evaluate_token_for_active_modes(token_addr):
                 results.append(fusion)
         return token_addr, results
 
-    # Advanced and Hulk/Unified remain separate. Each active engine hunts independently.
+    # Non-MAX: Advanced and Hulk are separate lanes. Each enabled sub-engine
+    # hunts independently; there is no cross-group vote or score borrowing.
+    active = _active_independent_engine_names()
     for pair in pairs:
-        for engine_name in _active_independent_engine_names():
-            # Advanced engines are only allowed when Advanced mode is ON; Hulk engines only when Unified is ON.
+        for engine_name in active:
             is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
-            is_hulk = not is_adv
             if is_adv and not ADVANCED_AI_ENABLED:
                 continue
-            if is_hulk and not SYNCHRONIZED_MODE:
+            if (not is_adv) and not SYNCHRONIZED_MODE:
                 continue
             fusion = _independent_engine_candidate(token_addr, pair, engine_name)
             if fusion and fusion_quality_gate(fusion):
+                fusion["rank_score"] = float(fusion.get("score", 0)) + float(fusion.get("rank_bonus", 0))
                 results.append(fusion)
     return token_addr, results
 
-
 def unified_market_scanner_loop(app):
-    logger.info(f"{UNIFIED_ENGINE_NAME} / HULK SENTINEL: independent hunter architecture active.")
-    send_telegram_msg("📡 رادار فوق‌سریع فعال شد: شکارچی مستقل / اتحاد هالک / سیستم پیشرفته / MAX")
+    global _TRUE_HUNTER_CURSOR
+    logger.info(f"{UNIFIED_ENGINE_NAME} / V17 TRUE HUNTER: مستقل + MAX unified attack فعال شد.")
+    send_telegram_msg("🚀 رادار V17 TRUE HUNTER فعال شد: شکار مستقل + MAX Attack")
     while True:
         if not new_trade_system_enabled():
             time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
@@ -3188,28 +3207,55 @@ def unified_market_scanner_loop(app):
             if daily_signal_cap_reached():
                 time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
             tokens = _elite_get_market_tokens()
-            V12_REAL_AUDIT["tokens_seen"] += len(tokens)
-            scan_tokens = [t for t in tokens if t and not _token_lock_is_open(t)]
-            best = None
-            with ThreadPoolExecutor(max_workers=PAIR_SCAN_WORKERS, thread_name_prefix="RocketRadar") as ex:
-                futures = [ex.submit(_evaluate_token_for_active_modes, t) for t in scan_tokens]
+            if not tokens:
+                time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
+
+            # Rotating micro-batch: never wait for the whole universe.
+            with _TRUE_HUNTER_CURSOR_LOCK:
+                start_i = _TRUE_HUNTER_CURSOR % len(tokens)
+                batch_n = min(TRUE_HUNTER_BATCH_SIZE, len(tokens))
+                if start_i + batch_n <= len(tokens):
+                    scan_tokens = tokens[start_i:start_i + batch_n]
+                else:
+                    scan_tokens = tokens[start_i:] + tokens[:(start_i + batch_n) % len(tokens)]
+                _TRUE_HUNTER_CURSOR = (start_i + batch_n) % len(tokens)
+
+            V12_REAL_AUDIT["tokens_seen"] += len(scan_tokens)
+            best_by_lane = {}
+            with ThreadPoolExecutor(max_workers=PAIR_SCAN_WORKERS, thread_name_prefix="RocketHunter") as ex:
+                futures = [ex.submit(_evaluate_token_for_active_modes, t) for t in scan_tokens if t and not _token_lock_is_open(t)]
                 for fut in __import__('concurrent.futures').as_completed(futures):
                     try:
                         token_addr, fusions = fut.result()
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Hunter worker failed: {e}")
                         continue
                     for fusion in fusions:
-                        V12_REAL_AUDIT["pairs_seen"] += 1; V12_REAL_AUDIT["fusion_candidates"] += 1; V12_REAL_AUDIT["last_candidate"] = time.time()
-                        rank = (float(fusion.get("score",0)), float(fusion.get("rank_bonus",0)), float(fusion.get("chg",0)), float(fusion.get("vol",0)), float(fusion.get("liq",0)))
-                        if best is None or rank > best[0]:
-                            best = (rank, token_addr, fusion)
-            if best:
-                _, token_addr, fusion = best
-                for key in (token_addr, f"{token_addr}:{(fusion.get('engines') or ['ENGINE'])[0]}"):
-                    consensus_last_signal[key] = time.time()
+                        V12_REAL_AUDIT["pairs_seen"] += 1
+                        V12_REAL_AUDIT["fusion_candidates"] += 1
+                        V12_REAL_AUDIT["last_candidate"] = time.time()
+                        lane = "MAX" if MAX_FUSION_ENABLED else str(fusion.get("hunter_group", "UNKNOWN"))
+                        rank = (float(fusion.get("rank_score", fusion.get("score", 0))),
+                                float(fusion.get("score", 0)),
+                                float(fusion.get("chg", 0)),
+                                float(fusion.get("vol", 0)),
+                                float(fusion.get("liq", 0)))
+                        current = best_by_lane.get(lane)
+                        if current is None or rank > current[0]:
+                            best_by_lane[lane] = (rank, token_addr, fusion)
+
+            # Non-MAX lanes stay independent. When both lanes happen to be ON,
+            # the stronger lane is selected; they never vote for each other.
+            # MAX has exactly one unified candidate.
+            if best_by_lane:
+                selected = max(best_by_lane.values(), key=lambda x: x[0])
+                _, token_addr, fusion = selected
+                engine_key = (fusion.get("engines") or ["ENGINE"])[0]
+                consensus_last_signal[f"{token_addr}:{engine_key}"] = time.time()
+                consensus_last_signal[token_addr] = time.time()
                 SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
         except Exception as e:
-            V12_REAL_AUDIT["last_error"] = str(e); logger.error(f"⚠️ Rocket radar error: {e}")
+            V12_REAL_AUDIT["last_error"] = str(e); logger.error(f"⚠️ TRUE HUNTER radar error: {e}")
         time.sleep(FAST_SCAN_INTERVAL_SECONDS)
 
 
