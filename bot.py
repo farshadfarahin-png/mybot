@@ -2687,6 +2687,14 @@ V13_SIGNAL_DIAGNOSTICS = {
     "candidate_prefilter_reasons": {},
     "analysis": {
         "scanned": 0,
+        "selected": 0,
+        "submit_called": 0,
+        "worker_started": 0,
+        "blocked_duplicate": 0,
+        "blocked_daily_cap": 0,
+        "blocked_circuit": 0,
+        "blocked_cooldown": 0,
+        "execution_started": 0,
         "data_ready": 0,
         "warmup_checked": 0,
         "full_structure_checked": 0,
@@ -2727,7 +2735,7 @@ V13_SIGNAL_DIAGNOSTICS = {
 def _analysis_diag(action=None, reason=None, token_addr=""):
     try:
         a=V13_SIGNAL_DIAGNOSTICS["analysis"]
-        if action in ("scanned","data_ready","warmup_checked","full_structure_checked","support_setups","breakout_setups","continuation_setups","candidates","submitted","real_buy_success","real_buy_failed","channel_sent","channel_failed","rejected"):
+        if action in ("scanned","data_ready","warmup_checked","full_structure_checked","support_setups","breakout_setups","continuation_setups","candidates","selected","submit_called","worker_started","blocked_duplicate","blocked_daily_cap","blocked_circuit","blocked_cooldown","execution_started","submitted","real_buy_success","real_buy_failed","channel_sent","channel_failed","rejected"):
             a[action]=a.get(action,0)+1
         if action=="reject":
             a["rejected"]+=1
@@ -3096,13 +3104,19 @@ def send_fused_signal(token_addr, fusion):
     # فقط تصمیم ورود/سهمیه را قفل می‌کنیم؛ خرید شبکه و Telegram خارج از قفل انجام می‌شوند.
     with SIGNAL_EMIT_LOCK:
         if _token_lock_is_open(token_addr):
+            if is_analysis_signal:
+                _analysis_diag("blocked_duplicate", token_addr=token_addr)
             logger.info(f"Duplicate BUY blocked for open token: {token_addr}")
             _audit_signal_decision("DUPLICATE_OPEN_POSITION")
             return False, "DUPLICATE_OPEN_POSITION"
         if daily_signal_cap_reached():
+            if is_analysis_signal:
+                _analysis_diag("blocked_daily_cap", token_addr=token_addr)
             _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
             return False, "DAILY_SIGNAL_CAP_REACHED"
         if learning_is_in_circuit_breaker():
+            if is_analysis_signal:
+                _analysis_diag("blocked_circuit", token_addr=token_addr)
             logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
             _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
             return False, "LEARNING_CIRCUIT_BREAKER"
@@ -3115,10 +3129,15 @@ def send_fused_signal(token_addr, fusion):
         # MAX is a single attack and therefore uses the global cooldown.
         # Outside MAX, Advanced/Hulk/individual engines have their own lane
         # cooldown so one engine cannot suppress another engine's valid signal.
-        if MAX_FUSION_ENABLED:
+        if MAX_FUSION_ENABLED and not is_analysis_signal:
             if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
                 _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
                 return False, "GLOBAL_SIGNAL_COOLDOWN"
+        elif is_analysis_signal:
+            if now_global - consensus_last_signal.get(emit_key, 0) < CONSENSUS_COOLDOWN_SECONDS:
+                _analysis_diag("blocked_cooldown", token_addr=token_addr)
+                _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
+                return False, "ANALYSIS_COOLDOWN"
         else:
             lane_last = consensus_last_signal.get(emit_key, 0)
             if now_global - lane_last < CONSENSUS_COOLDOWN_SECONDS:
@@ -3130,7 +3149,7 @@ def send_fused_signal(token_addr, fusion):
             return False, "EMERGENCY_STOP"
 
         # سهمیه در لحظه صدور سیگنال واقعی رزرو می‌شود؛ شکست خرید/کانال سهمیه را دور نمی‌زند.
-        if MAX_FUSION_ENABLED:
+        if MAX_FUSION_ENABLED and not is_analysis_signal:
             last_global_signal_time = now_global
             UNIFIED_LAST_EMIT_TIME = now_global
         consensus_last_signal[emit_key] = now_global
@@ -3735,6 +3754,15 @@ def _evaluate_token_for_active_modes(token_addr):
                 results.append(fusion)
     return token_addr, results
 
+def _analysis_submit_worker(token_addr, fusion):
+    _analysis_diag("worker_started", token_addr=token_addr)
+    _analysis_diag("execution_started", token_addr=token_addr)
+    try:
+        return send_fused_signal(token_addr, fusion)
+    except Exception as e:
+        _diag_reject("EXECUTION", f"ANALYSIS_WORKER_EXCEPTION:{e}", token_addr)
+        return False, f"ANALYSIS_WORKER_EXCEPTION:{e}"
+
 def unified_market_scanner_loop(app):
     global _TRUE_HUNTER_CURSOR
     logger.info(f"{UNIFIED_ENGINE_NAME} / V17 TRUE HUNTER: مستقل + MAX unified attack فعال شد.")
@@ -3786,6 +3814,8 @@ def unified_market_scanner_loop(app):
                         current = best_by_lane.get(lane)
                         if current is None or rank > current[0]:
                             best_by_lane[lane] = (rank, token_addr, fusion)
+                            if lane == "ANALYSIS":
+                                _analysis_diag("selected", token_addr=token_addr)
 
             if not best_by_lane:
                 _diag_reject("SYSTEM", "NO_CANDIDATE_IN_BATCH")
@@ -3798,7 +3828,8 @@ def unified_market_scanner_loop(app):
                     analysis_best = best_by_lane.get("ANALYSIS")
                     if analysis_best:
                         _, token_addr_a, fusion_a = analysis_best
-                        SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr_a, fusion_a)
+                        _analysis_diag("submit_called", token_addr=token_addr_a)
+                        SIGNAL_EXECUTOR.submit(_analysis_submit_worker, token_addr_a, fusion_a)
                     max_candidates = {k: v for k, v in best_by_lane.items() if k != "ANALYSIS"}
                     if max_candidates:
                         selected = max(max_candidates.values(), key=lambda x: x[0])
@@ -4707,7 +4738,10 @@ def start_telegram_bot():
                     f"اسکن: `{V13_SIGNAL_DIAGNOSTICS['analysis']['scanned']}` | داده‌دار: `{V13_SIGNAL_DIAGNOSTICS['analysis']['data_ready']}`\n"
                     f"Warmup: `{V13_SIGNAL_DIAGNOSTICS['analysis']['warmup_checked']}` | ساختار کامل: `{V13_SIGNAL_DIAGNOSTICS['analysis']['full_structure_checked']}`\n"
                     f"کف: `{V13_SIGNAL_DIAGNOSTICS['analysis']['support_setups']}` | شکست سقف: `{V13_SIGNAL_DIAGNOSTICS['analysis']['breakout_setups']}` | ادامه‌روند: `{V13_SIGNAL_DIAGNOSTICS['analysis']['continuation_setups']}`\n"
-                    f"کاندید تحلیل: `{V13_SIGNAL_DIAGNOSTICS['analysis']['candidates']}` | ارسال: `{V13_SIGNAL_DIAGNOSTICS['analysis']['submitted']}`\n"
+                    f"کاندید تحلیل: `{V13_SIGNAL_DIAGNOSTICS['analysis']['candidates']}` | انتخاب: `{V13_SIGNAL_DIAGNOSTICS['analysis']['selected']}`\n"
+                    f"Submit: `{V13_SIGNAL_DIAGNOSTICS['analysis']['submit_called']}` | Worker: `{V13_SIGNAL_DIAGNOSTICS['analysis']['worker_started']}`\n"
+                    f"بلاک تکراری: `{V13_SIGNAL_DIAGNOSTICS['analysis']['blocked_duplicate']}` | سقف: `{V13_SIGNAL_DIAGNOSTICS['analysis']['blocked_daily_cap']}` | Circuit: `{V13_SIGNAL_DIAGNOSTICS['analysis']['blocked_circuit']}` | Cooldown: `{V13_SIGNAL_DIAGNOSTICS['analysis']['blocked_cooldown']}`\n"
+                    f"شروع اجرای واقعی: `{V13_SIGNAL_DIAGNOSTICS['analysis']['execution_started']}` | ارسال نهایی: `{V13_SIGNAL_DIAGNOSTICS['analysis']['submitted']}`\n"
                     f"خرید موفق: `{V13_SIGNAL_DIAGNOSTICS['analysis']['real_buy_success']}` | خرید ناموفق: `{V13_SIGNAL_DIAGNOSTICS['analysis']['real_buy_failed']}`\n"
                     f"کانال موفق: `{V13_SIGNAL_DIAGNOSTICS['analysis']['channel_sent']}` | کانال ناموفق: `{V13_SIGNAL_DIAGNOSTICS['analysis']['channel_failed']}`\n"
                     f"آخرین مانع موتور تحلیل: `{V13_SIGNAL_DIAGNOSTICS['analysis']['last_reason'] or '—'}`\n"
