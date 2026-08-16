@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from threading import Thread, Lock, RLock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -115,6 +116,35 @@ def send_rpc_request(payload, timeout=8, retries_count=3):
         return {}
 
 RPC_URL = RPC_ENDPOINTS[0]
+
+RPC_HEALTH = {"ok": 0, "failed": 0, "rate_limited": 0, "last_endpoint": "", "last_error": "", "last_check": 0.0}
+
+def check_rpc_health():
+    """Check Solana RPC health without changing security or trading gates."""
+    try:
+        endpoint = get_rpc_url()
+        r = http_session.post(endpoint, json={"jsonrpc":"2.0","id":1,"method":"getHealth"}, timeout=5)
+        RPC_HEALTH["last_endpoint"] = endpoint
+        RPC_HEALTH["last_check"] = time.time()
+        if r.status_code == 429:
+            RPC_HEALTH["rate_limited"] += 1
+            RPC_HEALTH["failed"] += 1
+            RPC_HEALTH["last_error"] = "HTTP_429_RATE_LIMIT"
+            return False
+        data = r.json() if r.content else {}
+        if r.ok and data.get("result") == "ok":
+            RPC_HEALTH["ok"] += 1
+            RPC_HEALTH["last_error"] = ""
+            return True
+        RPC_HEALTH["failed"] += 1
+        RPC_HEALTH["last_error"] = str(data.get("error") or f"HTTP_{r.status_code}")
+        return False
+    except Exception as e:
+        RPC_HEALTH["failed"] += 1
+        RPC_HEALTH["last_check"] = time.time()
+        RPC_HEALTH["last_error"] = str(e)
+        return False
+
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" 
@@ -1901,8 +1931,11 @@ def advanced_filter_enabled():
 # حالت شکار سخت‌گیر: سیگنال کمتر، کیفیت فیلتر بالاتر.
 # این اعداد «تلاش برای win-rate بالا» هستند و تضمین ۹۰٪ سود نیستند.
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
-CONSENSUS_MIN_SCORE = 6
+CONSENSUS_MIN_SCORE = 4
 CONSENSUS_MIN_RATIO = 0.60
+# Fusion quality is intentionally lowered from the previous 4.5 raw-score gate.
+# The displayed Fusion count is not a 0-100 score; it counts pipeline candidates.
+FUSION_TARGET_SCORE_PCT = 72.0
 CONSENSUS_COOLDOWN_SECONDS = 180
 
 # Daily signal cap: editable from the management panel, 1..50. Default: 15.
@@ -1914,26 +1947,32 @@ SIGNAL_BUDGET_MIN = 1
 SIGNAL_BUDGET_MAX = 50
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
-CONSENSUS_MIN_LIQUIDITY = 10000.0
-CONSENSUS_MIN_VOLUME_5M = 1500.0
+CONSENSUS_MIN_LIQUIDITY = 7500.0  # -25%; security gates are unchanged
+CONSENSUS_MIN_VOLUME_5M = 1125.0  # -25%; security gates are unchanged
 CONSENSUS_MIN_CHANGE_5M = 0.5
 CONSENSUS_MAX_CHANGE_5M = 35.0
-CONSENSUS_MIN_BUY_RATIO = 1.05
+CONSENSUS_MIN_BUY_RATIO = 1.25  # 55.6% of buy+sell flow
+BUY_PRESSURE_MIN_SHARE = 0.55
+ANALYSIS_BUY_PRESSURE_MIN_SHARE = 0.56
+
+# Optional holder metadata: only enforced when a trusted upstream source provides it.
+# Missing holder data never becomes a false rejection.
+TOP10_HOLDERS_MAX_PCT = 30.0
 
 # V3: two-stage candidate pipeline.
 # These thresholds only decide whether a market is worth deeper analysis.
 # They do NOT authorize a trade by themselves.
-CANDIDATE_MIN_LIQUIDITY = 5000.0
-CANDIDATE_MIN_VOLUME_5M = 500.0
-CANDIDATE_MIN_BUY_RATIO = 1.02
+CANDIDATE_MIN_LIQUIDITY = 3750.0  # -25%
+CANDIDATE_MIN_VOLUME_5M = 375.0  # -25%
+CANDIDATE_MIN_BUY_RATIO = 1.22  # ~55% buy share when sells are nonzero
 CANDIDATE_MIN_BUYS = 1
 
 # Final entry quality remains stricter and is checked after structure/flow analysis.
-FINAL_ANALYSIS_MIN_LIQUIDITY = 10000.0
-FINAL_ANALYSIS_MIN_VOLUME_5M = 1500.0
-FINAL_ANALYSIS_MIN_BUY_RATIO = 1.10
-FINAL_BREAKOUT_MIN_VOLUME_5M = 2500.0
-FINAL_SUPPORT_MIN_VOLUME_5M = 1500.0
+FINAL_ANALYSIS_MIN_LIQUIDITY = 7500.0  # -25%
+FINAL_ANALYSIS_MIN_VOLUME_5M = 1125.0  # -25%
+FINAL_ANALYSIS_MIN_BUY_RATIO = 1.27  # ~56% buy share
+FINAL_BREAKOUT_MIN_VOLUME_5M = 1875.0  # -25%
+FINAL_SUPPORT_MIN_VOLUME_5M = 1125.0  # -25%
 ADAPTIVE_TARGET_WIN_RATE = 80.0
 ADAPTIVE_LOOKBACK = 20
 ADAPTIVE_MIN_SAMPLE = 10
@@ -1949,7 +1988,7 @@ consensus_last_signal = {}
 # ==========================================================
 STRUCTURE_FILTER_ENABLED = True
 STRUCTURE_LOOKBACK = 30
-STRUCTURE_MIN_SAMPLES = 4
+STRUCTURE_MIN_SAMPLES = 3  # shorter warmup: 3 real price samples
 STRUCTURE_SAMPLE_MIN_GAP = 0.75
 STRUCTURE_SUPPORT_DISTANCE_PCT = 3.5
 STRUCTURE_RESISTANCE_DISTANCE_PCT = 2.0
@@ -2248,6 +2287,33 @@ def _active_subengine_votes(token_addr, pair):
     }
 
 
+def _buy_share(buys, sells):
+    """Return buys/(buys+sells), the intuitive buy-pressure percentage."""
+    total = int(buys or 0) + int(sells or 0)
+    if total <= 0:
+        return 0.0
+    return float(buys or 0) / total
+
+
+def _optional_top10_holder_pct(pair):
+    """Read holder concentration only when an upstream source actually supplies it."""
+    candidates = [
+        pair.get("top10HoldersPct"),
+        pair.get("top10_holders_pct"),
+        pair.get("holderConcentrationPct"),
+        (pair.get("security") or {}).get("top10HoldersPct"),
+    ]
+    for value in candidates:
+        try:
+            if value is None or value == "":
+                continue
+            x = float(value)
+            return x * 100.0 if 0.0 <= x <= 1.0 else x
+        except Exception:
+            continue
+    return None
+
+
 def _candidate_prefilter(pair):
     """Cheap discovery gate. Passing this never means 'BUY'."""
     try:
@@ -2267,7 +2333,7 @@ def _candidate_prefilter(pair):
             reason = "CANDIDATE_LOW_5M_VOLUME"
         elif buys < CANDIDATE_MIN_BUYS:
             reason = "CANDIDATE_NO_BUYERS"
-        elif ratio < CANDIDATE_MIN_BUY_RATIO:
+        elif sells > 0 and _buy_share(buys, sells) < BUY_PRESSURE_MIN_SHARE:
             reason = "CANDIDATE_WEAK_BUY_PRESSURE"
         else:
             V13_SIGNAL_DIAGNOSTICS["candidate_prefilter_pass"] += 1
@@ -2305,8 +2371,11 @@ def _mode_market_quality(pair):
         _diag_reject("MARKET_QUALITY", "5M_CHANGE_TOO_HIGH", token_addr); return None
     if buys <= 0:
         _diag_reject("MARKET_QUALITY", "NO_BUYERS", token_addr); return None
-    if sells > 0 and buys < max(1, int(sells * CONSENSUS_MIN_BUY_RATIO)):
+    if sells > 0 and _buy_share(buys, sells) < BUY_PRESSURE_MIN_SHARE:
         _diag_reject("MARKET_QUALITY", "BUY_PRESSURE_TOO_WEAK", token_addr); return None
+    top10 = _optional_top10_holder_pct(pair)
+    if top10 is not None and top10 > TOP10_HOLDERS_MAX_PCT:
+        _diag_reject("MARKET_QUALITY", "TOP10_HOLDERS_TOO_CONCENTRATED", token_addr); return None
     return {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
 
 
@@ -2423,7 +2492,7 @@ def fusion_quality_gate(fusion):
             return False
         # MAX keeps a meaningful quality floor, but 10.0 was unreachable
         # for otherwise valid 1+1 consensus candidates.
-        if MAX_FUSION_ENABLED and score < 4.5:
+        if MAX_FUSION_ENABLED and score < 3.5:
             return False
         if ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 4.0:
             return False
@@ -3420,6 +3489,7 @@ def _fetch_best_solana_pair(token_addr):
             return token_addr, []
         pairs = (res.json() or {}).get("pairs") or []
         pairs = [p for p in pairs if p.get("chainId") == "solana"]
+        V13_SIGNAL_DIAGNOSTICS["stages"]["PAIR_FETCH"] += len(pairs)
         if not pairs:
             _diag_reject("PAIR_FETCH", "NO_SOLANA_PAIR_DATA", token_addr)
             return token_addr, []
@@ -3569,7 +3639,7 @@ def _analysis_engine_candidate(token_addr, pair):
             # Provisional path: real liquidity + volume + stronger buyers. It is
             # intentionally independent of MAX/consensus so the Analysis engine
             # can emit while its own structure history is still warming up.
-            if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
+            if sells > 0 and _buy_share(buys, sells) < ANALYSIS_BUY_PRESSURE_MIN_SHARE:
                 _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_BUY_RATIO", token_addr); return None
             if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
                 _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_LIQUIDITY", token_addr); return None
@@ -3642,7 +3712,7 @@ def _analysis_engine_candidate(token_addr, pair):
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_LIQUIDITY_WEAK", token_addr); return None
             if vol < FINAL_SUPPORT_MIN_VOLUME_5M:
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_VOLUME_WEAK", token_addr); return None
-            if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
+            if sells > 0 and _buy_share(buys, sells) < ANALYSIS_BUY_PRESSURE_MIN_SHARE:
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_BUY_PRESSURE_WEAK", token_addr); return None
             _analysis_diag("support_setups", token_addr=token_addr)
             structure = "ANALYSIS_SUPPORT_BOUNCE"
@@ -3653,7 +3723,7 @@ def _analysis_engine_candidate(token_addr, pair):
             # and price is not sitting at resistance.
             if slope_pct < 0.20:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_SLOPE_WEAK", token_addr); return None
-            if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
+            if sells > 0 and _buy_share(buys, sells) < ANALYSIS_BUY_PRESSURE_MIN_SHARE:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_BUY_PRESSURE_WEAK", token_addr); return None
             if vol < FINAL_ANALYSIS_MIN_VOLUME_5M:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_VOLUME_WEAK", token_addr); return None
@@ -3763,16 +3833,49 @@ def _analysis_submit_worker(token_addr, fusion):
         _diag_reject("EXECUTION", f"ANALYSIS_WORKER_EXCEPTION:{e}", token_addr)
         return False, f"ANALYSIS_WORKER_EXCEPTION:{e}"
 
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
+SCAN_WINDOW_START_MINUTE = 17 * 60
+SCAN_WINDOW_END_MINUTE = 2 * 60
+
+def _is_peak_scan_window_tehran(now=None):
+    """Active scan window: 17:00 through 02:00 Iran time."""
+    now = now or datetime.now(TEHRAN_TZ)
+    minute = now.hour * 60 + now.minute
+    return minute >= SCAN_WINDOW_START_MINUTE or minute < SCAN_WINDOW_END_MINUTE
+
+def _seconds_until_next_scan_window_tehran(now=None):
+    now = now or datetime.now(TEHRAN_TZ)
+    if _is_peak_scan_window_tehran(now):
+        return 0
+    target = now.replace(hour=17, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return max(1, int((target - now).total_seconds()))
+
+
 def unified_market_scanner_loop(app):
     global _TRUE_HUNTER_CURSOR
     logger.info(f"{UNIFIED_ENGINE_NAME} / V17 TRUE HUNTER: مستقل + MAX unified attack فعال شد.")
     send_telegram_msg("🚀 رادار V17 TRUE HUNTER فعال شد: شکار مستقل + MAX Attack")
+    last_window_log = None
     while True:
+        if not _is_peak_scan_window_tehran():
+            now_tehran = datetime.now(TEHRAN_TZ)
+            state = now_tehran.strftime("%Y-%m-%d")
+            if last_window_log != state:
+                wait_s = _seconds_until_next_scan_window_tehran(now_tehran)
+                logger.info(f"⏸️ Peak scan window closed ({now_tehran:%H:%M} Iran). Next scan window in ~{wait_s//60}m.")
+                last_window_log = state
+            time.sleep(min(60, max(1, _seconds_until_next_scan_window_tehran(now_tehran))))
+            continue
+        last_window_log = None
         if not new_trade_system_enabled():
             _diag_reject("SYSTEM", "TRADE_SYSTEM_DISABLED")
             time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
         try:
             V12_REAL_AUDIT["scans"] += 1; V12_REAL_AUDIT["last_scan"] = time.time()
+            if V12_REAL_AUDIT["scans"] % 50 == 1:
+                check_rpc_health()
             if daily_signal_cap_reached():
                 _diag_reject("EXECUTION", "DAILY_SIGNAL_CAP_REACHED")
                 time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
@@ -4775,6 +4878,8 @@ def start_telegram_bot():
                     f"📊 **گلوگاه‌های Pipeline**\n"
                     f"Discovery: `{V13_SIGNAL_DIAGNOSTICS['stages'].get('DISCOVERY', 0)}` | "
                     f"Pair: `{V13_SIGNAL_DIAGNOSTICS['stages'].get('PAIR_FETCH', 0)}`\n"
+                    f"🌐 RPC: `{RPC_HEALTH.get('ok',0)} OK | {RPC_HEALTH.get('rate_limited',0)} RateLimit | {RPC_HEALTH.get('failed',0)} Fail`\n"
+                    f"RPC endpoint: `{str(RPC_HEALTH.get('last_endpoint',''))[-45:] or '—'}` | خطا: `{RPC_HEALTH.get('last_error') or '—'}`\n"
                     f"Market: `{V13_SIGNAL_DIAGNOSTICS['stages'].get('MARKET_QUALITY', 0)}` | "
                     f"Structure: `{V13_SIGNAL_DIAGNOSTICS['stages'].get('STRUCTURE', 0)}`\n"
                     f"Engine: `{V13_SIGNAL_DIAGNOSTICS['stages'].get('ENGINE', 0)}` | "
