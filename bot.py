@@ -6,7 +6,6 @@ import json
 import base64
 import base58
 import os
-from pathlib import Path
 
 VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "-1003840577545")
 import sqlite3
@@ -129,7 +128,7 @@ TECHNICAL_RUNNING = True
 SMART_FILTER_ENABLED = True   
 DYNAMIC_RISK_ENABLED = True   
 MANUAL_SETTINGS_ENABLED = False 
-SYNCHRONIZED_MODE = False
+SYNCHRONIZED_MODE = True
 ADVANCED_AI_ENABLED = False
 MAX_FUSION_ENABLED = False
 EMERGENCY_STOP = False
@@ -146,24 +145,6 @@ ANTI_WASH_TRADING_ENABLED = True
 
 SMART_MONEY_COPY_ENABLED = True      
 SOCIAL_SENTIMENT_ENABLED = True      
-PARTIAL_TP_LEVELS = [
-    (10.0, 3.0),
-    (15.0, 6.0),
-    (20.0, 10.0),
-    (30.0, 20.0),
-    (40.0, 28.0),
-    (50.0, 35.0),
-    (75.0, 55.0),
-    (100.0, 75.0),
-    (150.0, 110.0),
-    (200.0, 155.0),
-    (300.0, 230.0),
-    (500.0, 350.0),
-    (750.0, 650.0),
-    (1000.0, 950.0),
-]
-PARTIAL_TP_LADDER = PARTIAL_TP_LEVELS
-
 DYNAMIC_TRAILING_TP_ENABLED = True
 # مدیریت سود پله‌ای بر پایه سقف سود: حدضرر فقط بالا می‌رود و هیچ‌وقت پایین نمی‌آید.
 # مثال: اگر سقف سود به +1000% برسد، حدضرر روی حدود +950% قفل می‌شود.
@@ -936,7 +917,7 @@ def ensure_channel_invite_link():
 def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="", execution_tx="", pnl_percent=None):
     # در MAX FUSION، پیام BUY فقط از مسیر Unified Fusion اجازه انتشار دارد.
     # پیام SELL همیشه مجاز است تا خروج پوزیشن‌ها بدون مانع ادامه پیدا کند.
-    if str(side).upper() == "BUY" and MAX_FUSION_ENABLED and signal_title not in (UNIFIED_ENGINE_NAME,) and not str(signal_title).startswith("🚀 MAX"):
+    if str(side).upper() == "BUY" and MAX_FUSION_ENABLED and signal_title not in (UNIFIED_ENGINE_NAME, "MAX FUSION"):
         logger.info(f"Blocked legacy BUY channel card while MAX FUSION is active: {signal_title}")
         return False
     """کارت سیگنال VIP برای موبایل.
@@ -1538,7 +1519,7 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     elif outcome == "SELL_FAILED":
         title, status = "⚠️ سیگنال خروج / فروش ناموفق", "⚠️ فروش انجام نشد"
     elif outcome == "SIGNAL_TP":
-        title, status = "🎯 فروش سیگنال؛ سیو سود متحرک", "🟢 سیگنال سودده بسته شد"
+        title, status = "🎯 فروش سیگنال؛ حد سود متحرک فعال شد", "🟢 سیگنال سودده بسته شد"
     else:
         title, status = "🛑 فروش سیگنال؛ حد ضرر فعال شد", "🔴 سیگنال به حد ضرر رسید"
 
@@ -1579,81 +1560,6 @@ def _adaptive_locked_floor(highest_pnl, current_floor):
             floor = max(floor, lock)
             break
     return floor
-
-
-def v14_profit_floor(highest_pnl):
-    high = float(highest_pnl or 0.0)
-    floor = 0.0
-    for trigger, locked in PARTIAL_TP_LEVELS:
-        if high >= trigger:
-            floor = max(floor, locked)
-    return floor
-
-
-def v14_classify_exit(pnl_pct, highest_pnl=0.0, locked_floor=0.0, stop_loss=-8.0):
-    pnl = float(pnl_pct or 0.0)
-    floor = max(float(locked_floor or 0.0), v14_profit_floor(highest_pnl))
-
-    if pnl <= float(stop_loss):
-        return "🔴 حد ضرر", "STOP_LOSS"
-    if floor > 0 and pnl >= floor:
-        return f"🟢 سیو سود متحرک +{pnl:.2f}%", "TRAILING_PROFIT"
-    if pnl > 0:
-        return f"🟢 خروج سودده +{pnl:.2f}%", "PROFIT"
-    return f"🔴 خروج با ضرر {pnl:.2f}%", "LOSS"
-
-
-def v14_raise_floor(current_floor, highest_pnl):
-    return max(float(current_floor or 0.0), v14_profit_floor(highest_pnl))
-
-
-def profit_locked_floor(highest_pnl):
-    """Highest locked-profit floor reached by this position."""
-    high = float(highest_pnl or 0.0)
-    floor = 0.0
-    for trigger, locked in PARTIAL_TP_LEVELS:
-        if high >= trigger:
-            floor = max(floor, locked)
-    return floor
-
-
-
-FINAL_AUDIT_NEGATIVE_PNL_TRAILING_GUARD = True
-
-def enforce_real_exit_reason(pnl_pct, highest_pnl=0.0, locked_floor=0.0,
-                             stop_loss=-8.0):
-    """
-    Final, centralized exit-reason guard.
-    pnl < 0 can never be reported as trailing profit.
-    """
-    pnl = float(pnl_pct or 0.0)
-    if pnl < 0:
-        if pnl <= float(stop_loss):
-            return "🔴 حد ضرر", "STOP_LOSS"
-        return f"🔴 خروج با ضرر {pnl:.2f}%", "LOSS"
-    return final_profit_exit_reason(
-        pnl, highest_pnl, locked_floor, stop_loss
-    )
-
-def final_profit_exit_reason(pnl_pct, highest_pnl=0.0, locked_floor=0.0,
-                             stop_loss=-8.0):
-    """A negative close can never be labelled as a trailing-profit close."""
-    pnl = float(pnl_pct or 0.0)
-    floor = max(float(locked_floor or 0.0),
-                profit_locked_floor(highest_pnl))
-
-    if pnl <= float(stop_loss):
-        return "🔴 حد ضرر", "STOP_LOSS"
-    if floor > 0 and pnl >= floor:
-        return f"🟢 سیو سود متحرک +{pnl:.2f}%", "TRAILING_PROFIT"
-    if pnl > 0:
-        return f"🟢 خروج سودده +{pnl:.2f}%", "PROFIT"
-    return f"🔴 خروج با ضرر {pnl:.2f}%", "LOSS"
-
-
-def raise_profit_floor(current_floor, highest_pnl):
-    return max(float(current_floor or 0.0),
-               profit_locked_floor(highest_pnl))
 
 def _update_trailing_state(pos, current_price, pnl_percent, pair):
     """به‌روزرسانی سقف قیمت، حدضرر متحرک و تشخیص ضعف بازار.
@@ -2005,111 +1911,173 @@ ADAPTIVE_MAX_RATIO_BONUS = 0.10
 consensus_last_signal = {}
 
 
+def _active_subengine_votes(token_addr, pair):
+    """Evaluate the existing sub-engines independently on one real market pair.
+
+    This does NOT place a trade.  It only returns evidence that the top-level
+    mode can use.  The three top-level modes are:
+      ADVANCED = quality/AI-oriented sub-engines
+      HULK     = momentum/flow-oriented sub-engines
+      MAX      = both groups must independently agree
+    """
+    chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+    vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
+    liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+    txns = (pair.get("txns") or {}).get("m5", {}) or {}
+    buys = int(txns.get("buys", 0) or 0)
+    sells = int(txns.get("sells", 0) or 0)
+
+    advanced_votes = []
+    hulk_votes = []
+    all_votes = []
+
+    # Advanced / AI-oriented group.
+    if TECHNICAL_RUNNING:
+        try:
+            ok, _ = check_major_support_resistance_pa(pair)
+            if ok:
+                advanced_votes.append("Technical")
+        except Exception:
+            pass
+    if ULTIMATE_21_ENGINE_ENABLED:
+        try:
+            ok, *_ = evaluate_ultimate_super_signal(token_addr, pair)
+            if ok:
+                advanced_votes.append("UltimateAI/21")
+        except Exception:
+            pass
+    if SOCIAL_SENTIMENT_ENABLED:
+        try:
+            ok, _ = check_social_sentiment_and_hype(pair)
+            if ok:
+                advanced_votes.append("Social/Hype")
+        except Exception:
+            pass
+    if SMART_FILTER_ENABLED:
+        try:
+            if is_token_worthy(pair):
+                advanced_votes.append("SmartFilter")
+        except Exception:
+            pass
+
+    # Hulk / momentum-flow group.
+    if IS_RUNNING and chg >= 3 and vol >= 3000:
+        hulk_votes.append("Fire")
+    if TREND_ALERT_RUNNING and chg >= 5 and buys >= max(1, sells):
+        hulk_votes.append("Trend")
+    if COMBO_RUNNING and buys > sells and vol >= 5000 and liq >= 15000:
+        hulk_votes.append("Combo")
+    if GOLDEN_OPTION and chg >= 8 and vol >= 7000 and liq >= 18000:
+        hulk_votes.append("Golden")
+    if MEMPOOL_SMART_MONEY_ENABLED and buys >= max(2, int(sells * 1.20) + 1) and vol >= 5000 and liq >= 15000:
+        hulk_votes.append("Mempool/SmartMoney")
+    if BOTTOM_WHALE_RUNNING and buys >= max(3, sells + 2) and vol >= 5000:
+        hulk_votes.append("Whale")
+    if ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * 0.8):
+        hulk_votes.append("Anti-Wash")
+
+    all_votes = advanced_votes + hulk_votes
+    return {
+        "advanced_votes": advanced_votes,
+        "hulk_votes": hulk_votes,
+        "votes": all_votes,
+        "advanced_count": len(advanced_votes),
+        "hulk_count": len(hulk_votes),
+        "all_count": len(all_votes),
+    }
+
+
+def _mode_market_quality(pair):
+    price = float(pair.get("priceUsd", 0) or 0)
+    liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+    vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
+    chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+    txns = (pair.get("txns") or {}).get("m5", {}) or {}
+    buys = int(txns.get("buys", 0) or 0)
+    sells = int(txns.get("sells", 0) or 0)
+    if price <= 0 or liq < CONSENSUS_MIN_LIQUIDITY or vol < CONSENSUS_MIN_VOLUME_5M:
+        return None
+    if chg < CONSENSUS_MIN_CHANGE_5M or chg > CONSENSUS_MAX_CHANGE_5M:
+        return None
+    if buys <= 0 or (sells > 0 and buys < max(1, int(sells * CONSENSUS_MIN_BUY_RATIO))):
+        return None
+    return {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
+
+
 def build_consensus_signal(token_addr, pair):
-    """One decision from all enabled engines; individual engines do not emit separate signals."""
+    """Top-level mode selector while preserving the original Fusion pipeline name.
+
+    IMPORTANT: one best candidate is selected by the market scanner; this function
+    only evaluates a candidate.  Real execution remains in send_fused_signal().
+    """
     try:
-        price = float(pair.get("priceUsd", 0) or 0)
-        liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
-        vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
-        chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
-        txns = (pair.get("txns") or {}).get("m5", {}) or {}
-        buys = int(txns.get("buys", 0) or 0)
-        sells = int(txns.get("sells", 0) or 0)
-        # فیلتر کیفیت پایه: بازارهای کم‌عمق و کم‌حجم اصلاً وارد اجماع نمی‌شوند.
-        if price <= 0 or liq < CONSENSUS_MIN_LIQUIDITY or vol < CONSENSUS_MIN_VOLUME_5M:
-            return None
-        if chg < CONSENSUS_MIN_CHANGE_5M or chg > CONSENSUS_MAX_CHANGE_5M:
-            return None
-        if buys <= 0 or sells > 0 and buys < max(1, sells * CONSENSUS_MIN_BUY_RATIO):
+        q = _mode_market_quality(pair)
+        if not q:
             return None
 
-        # Advanced/Max keeps safety filters, but lets the learning layer decide how much consensus is enough.
-        if advanced_filter_enabled():
-            if liq < 15000.0 or vol < 5000.0:
+        evidence = _active_subengine_votes(token_addr, pair)
+        adv = evidence["advanced_count"]
+        hulk = evidence["hulk_count"]
+        total = evidence["all_count"]
+
+        # Top-level mode.  MAX owns the market scanner whenever it is ON.
+        if MAX_FUSION_ENABLED:
+            mode = "MAX FUSION"
+            # MAX is intentionally stronger than either component alone:
+            # both groups must contribute, not merely the sum of votes.
+            if adv < 2 or hulk < 2:
                 return None
-            if chg < 2.0 or chg > 35.0:
+            if total < 5:
                 return None
-            if sells > 0 and buys < sells * 1.15:
+            required = max(5, int(total * 0.60 + 0.9999))
+            if total < required:
                 return None
-
-        votes = []
-        enabled = 0
-
-        # هر موتور فقط رأی می‌دهد؛ ارسال سیگنال فقط یک بار و توسط Fusion انجام می‌شود.
-        if IS_RUNNING:
-            enabled += 1
-            if chg >= 3 and vol >= 3000: votes.append("Fire")
-        if TREND_ALERT_RUNNING:
-            enabled += 1
-            if chg >= 5 and buys >= max(1, sells): votes.append("Trend")
-        if COMBO_RUNNING:
-            enabled += 1
-            if buys > sells and vol >= 5000 and liq >= 15000: votes.append("Combo")
-        if GOLDEN_OPTION:
-            enabled += 1
-            if chg >= 8 and vol >= 7000 and liq >= 18000: votes.append("Golden")
-        if TECHNICAL_RUNNING:
-            enabled += 1
-            try:
-                ok, _ = check_major_support_resistance_pa(pair)
-                if ok: votes.append("Technical")
-            except Exception: pass
-        if ULTIMATE_21_ENGINE_ENABLED:
-            enabled += 1
-            try:
-                ok, *_ = evaluate_ultimate_super_signal(token_addr, pair)
-                if ok: votes.append("UltimateAI")
-            except Exception: pass
-        if MEMPOOL_SMART_MONEY_ENABLED:
-            enabled += 1
-            if buys >= max(2, int(sells * 1.20) + 1) and vol >= 5000 and liq >= 15000:
-                votes.append("Mempool/SmartMoney")
-        if BOTTOM_WHALE_RUNNING:
-            enabled += 1
-            if buys >= max(3, sells + 2) and vol >= 5000:
-                votes.append("Whale")
-        if SOCIAL_SENTIMENT_ENABLED:
-            enabled += 1
-            try:
-                ok, _ = check_social_sentiment_and_hype(pair)
-                if ok: votes.append("Social/Hype")
-            except Exception: pass
-        if ANTI_WASH_TRADING_ENABLED:
-            enabled += 1
-            if not (sells > 0 and buys < sells * 0.8):
-                votes.append("Anti-Wash")
-        if SMART_FILTER_ENABLED:
-            enabled += 1
-            if is_token_worthy(pair): votes.append("SmartFilter")
-
-        # Adaptive consensus: learn from closed trades while preventing signal spam.
-        minimum_base, ratio_base, engine_wr, learning = get_adaptive_consensus_settings(enabled)
-        minimum = max(minimum_base, int(enabled * ratio_base + 0.9999))
-        if advanced_filter_enabled():
-            minimum = max(minimum_base, int(enabled * max(0.70, ratio_base) + 0.9999))
-        # Reward engines that have actually produced profitable closed trades, without letting one engine dominate.
-        weights = {e: max(0.75, min(1.25, (engine_wr.get(e, 80.0) / 80.0))) for e in ["Fire","Trend","Combo","Golden","Technical","UltimateAI","Mempool/SmartMoney","Whale","Social/Hype","Anti-Wash","SmartFilter"]}
-        weighted_score = sum(weights.get(v, 1.0) for v in votes)
-        required_weight = minimum * 0.95
-        if len(votes) < minimum and weighted_score < required_weight:
+            strength = adv * 1.25 + hulk * 1.35
+        elif ADVANCED_AI_ENABLED:
+            mode = "سیستم پیشرفته AI"
+            # Advanced can operate completely by itself and searches the market
+            # using its own AI/quality sub-engines.
+            if adv < 2:
+                return None
+            required = max(2, int(max(4, adv + 1) * 0.60 + 0.9999))
+            if adv < required:
+                return None
+            strength = adv * 1.35 + (hulk * 0.15)
+        elif SYNCHRONIZED_MODE:
+            mode = "اتحاد هالک AI"
+            if hulk < 2:
+                return None
+            required = max(2, int(max(4, hulk + 1) * 0.60 + 0.9999))
+            if hulk < required:
+                return None
+            strength = hulk * 1.40 + (adv * 0.15)
+        else:
             return None
-        if len(votes) < minimum:
-            return None
+
+        # Prefer stronger momentum, healthy buy pressure, liquidity and volume.
+        buy_ratio = q["buys"] / max(1, q["sells"])
+        score = strength + min(5.0, q["chg"] / 5.0) + min(4.0, q["vol"] / 10000.0) + min(3.0, q["liq"] / 50000.0)
+        score += min(3.0, max(0.0, buy_ratio - 1.0))
 
         now = time.time()
         if now - consensus_last_signal.get(token_addr, 0) < CONSENSUS_COOLDOWN_SECONDS:
             return None
-        consensus_last_signal[token_addr] = now
-        score = len(votes)
-        tp = max(15.0, min(30.0, 12.0 + score * 2.0))
+
         return {
-            "score": score, "votes": votes, "price": price, "liq": liq, "vol": vol, "chg": chg,
-            "buys": buys, "sells": sells,
+            "score": float(score),
+            "strength": float(strength),
+            "votes": evidence["votes"],
+            "advanced_votes": evidence["advanced_votes"],
+            "hulk_votes": evidence["hulk_votes"],
+            "engines": evidence["votes"],
+            "mode": mode,
+            **q,
             "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
-            "tp": tp, "sl": -8.0
+            "tp": max(15.0, min(30.0, 14.0 + min(12.0, score))),
+            "sl": -8.0,
         }
     except Exception as e:
-        logger.debug(f"Consensus error {token_addr}: {e}")
+        logger.debug(f"Mode engine evaluation error {token_addr}: {e}")
         return None
 
 
@@ -2130,7 +2098,11 @@ def fusion_quality_gate(fusion):
             return False
         if chg < CONSENSUS_MIN_CHANGE_5M:
             return False
-        if score < CONSENSUS_MIN_SCORE:
+        if MAX_FUSION_ENABLED and score < 10.0:
+            return False
+        if ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 5.0:
+            return False
+        if SYNCHRONIZED_MODE and not ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 5.0:
             return False
         return True
     except Exception:
@@ -2201,6 +2173,7 @@ def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
             "pnl_pct": pnl,
             "reason": reason,
             "engines": list(engine_names or []),
+            "top_level_mode": (str(reason).split(" | ", 1)[0] if " | " in str(reason) else "UNKNOWN"),
             "hold_seconds": int(hold_seconds or 0),
             "regime": regime or "UNKNOWN",
         }
@@ -2353,62 +2326,6 @@ def v11_data_report():
 # اجرای محاسبات سنگین خارج از event loop تلگرام
 async def _tg_bg(fn, *args, **kwargs):
     return await asyncio.to_thread(fn, *args, **kwargs)
-
-
-# ==========================================================
-# BALANCED_SIGNAL_FLOW_V1
-# Keeps scanning alive without weakening quality indiscriminately.
-# ==========================================================
-BALANCED_SIGNAL_FLOW_V1 = True
-
-SIGNAL_FLOW_STATE = {
-    "cycles": 0,
-    "tokens_seen": 0,
-    "candidates": 0,
-    "fusion_candidates": 0,
-    "signals": 0,
-    "rejected": 0,
-    "last_signal_ts": 0.0,
-    "last_scan_ts": 0.0,
-}
-
-# Only quality thresholds are allowed to relax inside this bounded band.
-# The core safety checks (duplicate position, invalid price/liquidity,
-# blocked mint, and risk limits) must remain hard.
-BALANCED_QUALITY_RELAX_MAX = 0.12
-BALANCED_STALE_SCAN_SECONDS = 180.0
-BALANCED_NO_SIGNAL_SECONDS = 1800.0
-
-def balanced_quality_multiplier(seconds_without_signal):
-    """
-    Bounded adaptation:
-    0..30 min: normal.
-    30..60 min: small relaxation.
-    60+ min: maximum bounded relaxation.
-    Never turns safety filters off.
-    """
-    try:
-        idle = float(seconds_without_signal or 0.0)
-    except Exception:
-        idle = 0.0
-    if idle >= 3600:
-        return 1.0 - BALANCED_QUALITY_RELAX_MAX
-    if idle >= 1800:
-        return 1.0 - (BALANCED_QUALITY_RELAX_MAX * 0.50)
-    return 1.0
-
-def balanced_signal_allowed(base_score, threshold, seconds_without_signal=0.0):
-    """
-    Adaptive quality gate. It only relaxes the score threshold within a
-    bounded range; it never bypasses hard safety checks.
-    """
-    try:
-        score = float(base_score)
-        gate = float(threshold)
-    except Exception:
-        return False
-    factor = balanced_quality_multiplier(seconds_without_signal)
-    return score >= (gate * factor)
 
 # ==========================================================
 # V12_REAL_AUDIT
@@ -2792,7 +2709,9 @@ def send_fused_signal(token_addr, fusion):
         _increment_daily_signal_count()
         _lock_token_entry(token_addr, "OPEN_PENDING")
     amount = get_dynamic_buy_amount(0.01)
-    reason = " + ".join(fusion["votes"])
+    reason = " + ".join(fusion.get("votes") or [])
+    mode_name = fusion.get("mode", UNIFIED_ENGINE_NAME)
+    engine_names = list(fusion.get("engines") or fusion.get("votes") or [])
     symbol = fusion["symbol"]
     price = fusion["price"]
     tp = fusion["tp"]
@@ -2809,9 +2728,9 @@ def send_fused_signal(token_addr, fusion):
     solscan_link = f"https://solscan.io/tx/{result}" if success else token_link
 
     msg = (
-        f"⚡🤖 **{UNIFIED_ENGINE_NAME}**\n"
-        f"🎯 اجماع موتورها: **{fusion['score']} تأیید**\n"
-        f"🤖 تأییدکننده‌ها: {reason}\n\n"
+        f"⚡🤖 **{mode_name}**\n"
+        f"🎯 قدرت سیگنال: **{fusion['score']:.2f}**\n"
+        f"🤖 موتورهای مؤثر: {reason}\n\n"
         f"🪙 توکن: {symbol}\n"
         f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
         f"💵 نقطه ورود دقیق: ${price:.8f}\n"
@@ -2833,7 +2752,7 @@ def send_fused_signal(token_addr, fusion):
         token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
         buy_amt=amount, volume=fusion['vol'], liquidity=fusion['liq'],
         p_change=fusion['chg'], solscan_link=solscan_link,
-        signal_title=UNIFIED_ENGINE_NAME, side="BUY",
+        signal_title=mode_name, side="BUY",
         execution_status=execution_status, execution_tx=result if success else ""
     )
     if channel_ok:
@@ -2850,7 +2769,7 @@ def send_fused_signal(token_addr, fusion):
                 "tp": tp, "sl": sl, "highest_price": price,
                 "highest_pnl": 0.0, "locked_floor": sl,
                 "trailing_active": DYNAMIC_TRAILING_TP_ENABLED,
-                "side": "BUY", "reason": reason, "buy_amt": amount,
+                "side": "BUY", "reason": f"{mode_name} | {reason}", "engines": engine_names, "engine_names": engine_names, "mode": mode_name, "opened_at": time.time(), "buy_amt": amount,
                 "entry_lock": True,
                 "volume": float(fusion.get("vol", 0.0) or 0.0),
                 "liquidity": float(fusion.get("liq", 0.0) or 0.0),
@@ -2982,12 +2901,12 @@ def daily_signal_status_text():
 
 
 def unified_market_scanner_loop(app):
-    logger.info(f"{UNIFIED_ENGINE_NAME} فعال شد؛ تمام موتورهای تحلیلی فقط از مسیر Fusion سیگنال می‌دهند.")
-    send_telegram_msg(f"{UNIFIED_ENGINE_NAME} فعال شد؛ DexScreener در حال رصد بازار است.")
+    logger.info(f"{UNIFIED_ENGINE_NAME} / Top-Level Mode Radar فعال شد؛ هر حالت به‌صورت مستقل بازار را رصد می‌کند.")
+    send_telegram_msg("📡 رادار سه‌حالته فعال شد: سیستم پیشرفته / اتحاد هالک / MAX FUSION")
     while True:
         if not new_trade_system_enabled():
-            # در حالت خاموش، هیچ ورود جدیدی صادر نمی‌شود؛ مدیریت پوزیشن‌های باز در حلقه جدا ادامه دارد.
-            time.sleep(3); continue
+            time.sleep(3)
+            continue
         try:
             V12_REAL_AUDIT["scans"] += 1
             V12_REAL_AUDIT["last_scan"] = time.time()
@@ -2998,33 +2917,57 @@ def unified_market_scanner_loop(app):
                     v11_tune_weights()
             except Exception as e:
                 logger.warning(f"V11 periodic analysis failed: {e}")
+
             if daily_signal_cap_reached():
-                # سقف روزانه پر شده؛ فقط مدیریت فروش/پوزیشن‌های باز ادامه دارد.
                 time.sleep(10)
                 continue
-            tokens=get_real_market_trending_tokens()
+
+            tokens = get_real_market_trending_tokens()
             V12_REAL_AUDIT["tokens_seen"] += len(tokens)
-            for token_addr in tokens[:80]:
+            candidates = []
+
+            # Scan the complete real-token list returned by the market collector,
+            # not just the first 80.  The collector already combines several
+            # DexScreener market discovery endpoints.
+            for token_addr in tokens:
                 try:
                     with state_lock:
-                        if not token_addr or token_addr in active_positions: continue
-                    res=http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}",timeout=5)
-                    if res.status_code!=200: continue
-                    pairs=(res.json() or {}).get("pairs") or []
-                    pairs=[p for p in pairs if p.get("chainId")=="solana"]
-                    if not pairs: continue
-                    pair=max(pairs,key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
+                        if not token_addr or _token_lock_is_open(token_addr):
+                            continue
+                    res = http_session.get(
+                        f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=5
+                    )
+                    if res.status_code != 200:
+                        continue
+                    pairs = (res.json() or {}).get("pairs") or []
+                    pairs = [p for p in pairs if p.get("chainId") == "solana"]
+                    if not pairs:
+                        continue
+                    # Best executable pair for this token: deepest liquidity.
+                    pair = max(pairs, key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
                     V12_REAL_AUDIT["pairs_seen"] += 1
-                    fusion=build_consensus_signal(token_addr,pair)
+                    fusion = build_consensus_signal(token_addr, pair)
                     if fusion:
                         V12_REAL_AUDIT["fusion_candidates"] += 1
                         V12_REAL_AUDIT["last_candidate"] = time.time()
-                        SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
+                        candidates.append((float(fusion.get("score", 0.0)), token_addr, fusion))
                 except Exception as token_error:
-                    logger.debug(f"Fusion token error {token_addr}: {token_error}")
+                    logger.debug(f"Mode radar token error {token_addr}: {token_error}")
+
+            if candidates:
+                # Never fire the first mediocre candidate.  Pick the strongest
+                # candidate from the current market sweep.
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                _, token_addr, fusion = candidates[0]
+                consensus_last_signal[token_addr] = time.time()
+                fusion["engines"] = list(fusion.get("engines") or [])
+                SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
+
         except Exception as e:
-            logger.error(f"⚠️ خطای رادار اتحاد: {e}")
+            V12_REAL_AUDIT["last_error"] = str(e)
+            logger.error(f"⚠️ خطای رادار سه‌حالته: {e}")
         time.sleep(3)
+
 
 web_app = Flask(__name__)
 
@@ -3397,11 +3340,11 @@ def _engine_status_lines():
     detail = " | ".join(f"{name}:{'🟢' if state else '🔴'}" for name, state in components)
     return (
         f"🤖⚡ **{UNIFIED_ENGINE_NAME}**\n\n"
-        f"وضعیت اتحاد: {'🟢 فعال — فقط موتورهای ON رأی می‌دهند' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
+        f"وضعیت اتحاد: {'🟢 فعال — رادار مستقل اتحاد بازار را رصد می‌کند' if SYNCHRONIZED_MODE else '🔴 خاموش'}\n"
         f"موتورهای تحلیلی روشن: `{active}/{len(components)}`\n\n"
         f"{detail}\n\n"
         f"🤖 کپی‌ترید: {'🟢' if COPY_TRADING_ENABLED else '🔴'}\n"
-        f"🎯 تست واقعی V2: هر موتور BUY/SELL مستقل دارد | MAX = SMART + UNION"
+        f"🎯 فیلتر اتحاد سخت‌گیر: حداقل {CONSENSUS_MIN_SCORE} رأی و {CONSENSUS_MIN_RATIO*100:.0f}% موتورهای روشن + نقدینگی/حجم/فشار خرید"
     )
 
 def _admin_free_panel_text():
@@ -3427,7 +3370,7 @@ def _admin_free_panel_text():
     return text
 
 def _main_keyboard(is_admin=False):
-    rows=[[InlineKeyboardButton("📊 مقایسه عملکرد موتورها",callback_data="glass_engine_lab")],[InlineKeyboardButton("🔬 مرکز تحلیل",callback_data="glass_analysis_center")],[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
+    rows=[[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
     elif CHANNEL_INVITE_LINK: rows.append([InlineKeyboardButton("📢 کانال VIP",url=CHANNEL_INVITE_LINK)])
     if is_admin:
@@ -3509,708 +3452,13 @@ def _control_keyboard():
             f"🎯 سقف روزانه سیگنال: {daily_signal_status_text()}",
             callback_data="daily_signal_limit"
         )],
+        [InlineKeyboardButton("📊 داشبورد PRO MAX", callback_data="v7_dashboard")],
+                        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
+                        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
+                        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ]
     return InlineKeyboardMarkup(rows)
-
-
-# ==========================================================
-# REAL INDEPENDENT ENGINES V2
-# سه موتور مستقل واقعی: SMART / UNION / MAX
-# هر موتور سیگنال، BUY واقعی، SELL واقعی و آمار مستقل خودش را دارد.
-# MAX فقط وقتی فعال است که SMART و UNION هر دو همان توکن را تایید کنند.
-# هیچ موتور برای ثبت معامله یا فروش از آمار موتور دیگر استفاده نمی‌کند.
-# ==========================================================
-
-ENGINE_NAMES = ("SMART", "UNION", "MAX")
-ENGINE_LABELS = {
-    "SMART": "🧠 هوشمند",
-    "UNION": "🤝 اتحاد",
-    "MAX": "🚀 MAX",
-}
-ENGINE_STATE_FILE = "engine_v2_state.json"
-ENGINE_STATS_FILE = "engine_v2_stats.json"
-ENGINE_SCAN_SECONDS = 4
-ENGINE_ENTRY_COOLDOWN = 20
-ENGINE_DAILY_LIMIT = 15
-ENGINE_MAX_OPEN_PER_ENGINE = 3
-ENGINE_BUY_AMOUNT_SOL = 0.01
-ENGINE_TP = {"SMART": 22.0, "UNION": 20.0, "MAX": 28.0}
-ENGINE_SL = {"SMART": -8.0, "UNION": -8.0, "MAX": -10.0}
-
-engine_lock = RLock()
-engine_positions = {}
-engine_last_entry = {name: 0.0 for name in ENGINE_NAMES}
-engine_daily = {name: {"date": time.strftime("%Y-%m-%d"), "count": 0} for name in ENGINE_NAMES}
-engine_stats = {
-    name: {
-        "signals": 0, "buys": 0, "sells": 0, "wins": 0, "losses": 0,
-        "gross_profit": 0.0, "gross_loss": 0.0, "net_pnl": 0.0,
-        "best": 0.0, "worst": 0.0, "sum_pnl": 0.0,
-        "avg_win": 0.0, "avg_loss": 0.0,
-        "last_signal": 0.0, "last_buy": 0.0, "last_sell": 0.0,
-        "last_error": "",
-    } for name in ENGINE_NAMES
-}
-
-# Do not let the old global entry locks block the three independent engines.
-# Each engine has its own token key: ENGINE:token.
-def _engine_key(engine, token):
-    return f"{engine}:{token}"
-
-
-def _load_engine_v2_state():
-    global engine_stats, engine_daily, engine_last_entry
-    try:
-        p = Path(ENGINE_STATS_FILE)
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                for name in ENGINE_NAMES:
-                    if isinstance(data.get(name), dict):
-                        engine_stats[name].update(data[name])
-    except Exception as e:
-        logger.warning(f"Engine V2 stats load failed: {e}")
-    try:
-        p = Path(ENGINE_STATE_FILE)
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                for name in ENGINE_NAMES:
-                    d = data.get(name, {}) or {}
-                    if d.get("date") == time.strftime("%Y-%m-%d"):
-                        engine_daily[name] = {"date": d.get("date"), "count": int(d.get("count", 0) or 0)}
-    except Exception as e:
-        logger.warning(f"Engine V2 state load failed: {e}")
-
-
-def _save_engine_v2_state():
-    try:
-        tmp = Path(ENGINE_STATS_FILE + ".tmp")
-        tmp.write_text(json.dumps(engine_stats, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(ENGINE_STATS_FILE)
-        tmp2 = Path(ENGINE_STATE_FILE + ".tmp")
-        tmp2.write_text(json.dumps(engine_daily, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp2.replace(ENGINE_STATE_FILE)
-    except Exception as e:
-        logger.warning(f"Engine V2 state save failed: {e}")
-
-
-def _engine_reset_daily_if_needed(engine):
-    today = time.strftime("%Y-%m-%d")
-    d = engine_daily.setdefault(engine, {"date": today, "count": 0})
-    if d.get("date") != today:
-        d["date"] = today
-        d["count"] = 0
-    return d
-
-
-def _engine_open_count(engine):
-    with engine_lock:
-        return sum(1 for p in engine_positions.values() if p.get("engine") == engine)
-
-
-def _engine_can_enter(engine, token):
-    if EMERGENCY_STOP:
-        return False, "EMERGENCY_STOP"
-    now = time.time()
-    with engine_lock:
-        if now - float(engine_last_entry.get(engine, 0.0)) < ENGINE_ENTRY_COOLDOWN:
-            return False, "ENGINE_COOLDOWN"
-        d = _engine_reset_daily_if_needed(engine)
-        if int(d.get("count", 0)) >= ENGINE_DAILY_LIMIT:
-            return False, "ENGINE_DAILY_LIMIT"
-        if _engine_open_count(engine) >= ENGINE_MAX_OPEN_PER_ENGINE:
-            return False, "ENGINE_OPEN_LIMIT"
-        key = _engine_key(engine, token)
-        if key in engine_positions:
-            return False, "ENGINE_DUPLICATE"
-    return True, "OK"
-
-
-def _fetch_best_solana_pair(token_addr):
-    try:
-        res = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=5)
-        if res.status_code != 200:
-            return None
-        pairs = (res.json() or {}).get("pairs") or []
-        pairs = [p for p in pairs if p.get("chainId") == "solana"]
-        if not pairs:
-            return None
-        return max(pairs, key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
-    except Exception:
-        return None
-
-
-def _smart_engine_decision(token_addr, pair):
-    """Independent SMART strategy. It does not use UNION consensus or MAX."""
-    try:
-        price = float(pair.get("priceUsd") or 0)
-        liq = float((pair.get("liquidity") or {}).get("usd") or 0)
-        vol = float((pair.get("volume") or {}).get("m5") or 0)
-        chg = float((pair.get("priceChange") or {}).get("m5") or 0)
-        tx = (pair.get("txns") or {}).get("m5") or {}
-        buys = int(tx.get("buys", 0) or 0)
-        sells = int(tx.get("sells", 0) or 0)
-        if price <= 0 or liq < 12000 or vol < 4000 or not (2.0 <= chg <= 30.0):
-            return None
-        if buys < 2 or sells > buys * 0.95:
-            return None
-        score = 0
-        if chg >= 4: score += 1
-        if vol >= 6000: score += 1
-        if liq >= 20000: score += 1
-        if buys >= max(3, sells + 2): score += 1
-        try:
-            ok, _ = check_major_support_resistance_pa(pair)
-            score += int(bool(ok))
-        except Exception:
-            pass
-        try:
-            ok, *_ = evaluate_ultimate_super_signal(token_addr, pair)
-            score += int(bool(ok))
-        except Exception:
-            pass
-        try:
-            ok, _ = check_social_sentiment_and_hype(pair)
-            score += int(bool(ok))
-        except Exception:
-            pass
-        if score < 4:
-            return None
-        return {
-            "engine": "SMART", "token": token_addr,
-            "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
-            "price": price, "liq": liq, "vol": vol, "chg": chg,
-            "buys": buys, "sells": sells, "score": score,
-            "tp": ENGINE_TP["SMART"], "sl": ENGINE_SL["SMART"],
-            "reason": f"SMART score {score}/7 | momentum + volume + liquidity + flow",
-        }
-    except Exception:
-        return None
-
-
-def _union_engine_decision(token_addr, pair):
-    """Independent UNION strategy. It uses its own consensus and never emits via old Fusion."""
-    try:
-        price = float(pair.get("priceUsd") or 0)
-        liq = float((pair.get("liquidity") or {}).get("usd") or 0)
-        vol = float((pair.get("volume") or {}).get("m5") or 0)
-        chg = float((pair.get("priceChange") or {}).get("m5") or 0)
-        tx = (pair.get("txns") or {}).get("m5") or {}
-        buys = int(tx.get("buys", 0) or 0)
-        sells = int(tx.get("sells", 0) or 0)
-        if price <= 0 or liq < 15000 or vol < 5000 or not (2.0 <= chg <= 35.0):
-            return None
-        votes = []
-        if chg >= 3 and vol >= 3000: votes.append("Fire")
-        if chg >= 5 and buys >= max(1, sells): votes.append("Trend")
-        if buys > sells and vol >= 5000 and liq >= 15000: votes.append("Combo")
-        if chg >= 8 and vol >= 7000 and liq >= 18000: votes.append("Golden")
-        try:
-            ok, _ = check_major_support_resistance_pa(pair)
-            if ok: votes.append("Technical")
-        except Exception: pass
-        try:
-            ok, *_ = evaluate_ultimate_super_signal(token_addr, pair)
-            if ok: votes.append("UltimateAI")
-        except Exception: pass
-        if buys >= max(2, int(sells * 1.20) + 1) and vol >= 5000 and liq >= 15000:
-            votes.append("SmartMoney")
-        if buys >= max(3, sells + 2) and vol >= 5000:
-            votes.append("Whale")
-        try:
-            ok, _ = check_social_sentiment_and_hype(pair)
-            if ok: votes.append("Social")
-        except Exception: pass
-        if not (sells > 0 and buys < sells * 0.8):
-            votes.append("AntiWash")
-        if is_token_worthy(pair):
-            votes.append("SmartFilter")
-        if len(votes) < 5:
-            return None
-        return {
-            "engine": "UNION", "token": token_addr,
-            "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
-            "price": price, "liq": liq, "vol": vol, "chg": chg,
-            "buys": buys, "sells": sells, "score": len(votes),
-            "votes": votes, "tp": ENGINE_TP["UNION"], "sl": ENGINE_SL["UNION"],
-            "reason": " + ".join(votes),
-        }
-    except Exception:
-        return None
-
-
-def _max_engine_decision(smart, union):
-    """MAX is a real combined engine: both independent strategies must agree."""
-    if not smart or not union:
-        return None
-    if smart.get("token") != union.get("token"):
-        return None
-    return {
-        "engine": "MAX", "token": smart["token"], "symbol": smart["symbol"],
-        "price": smart["price"], "liq": min(smart["liq"], union["liq"]),
-        "vol": min(smart["vol"], union["vol"]), "chg": smart["chg"],
-        "buys": smart["buys"], "sells": smart["sells"],
-        "score": smart["score"] + union["score"],
-        "tp": ENGINE_TP["MAX"], "sl": ENGINE_SL["MAX"],
-        "reason": "SMART + UNION confirmed independently",
-    }
-
-
-def _execute_real_buy_for_engine(token_addr, amount_sol):
-    """Real BUY plus exact token-amount attribution for this engine."""
-    before = get_token_balance(token_addr)
-    success, sig_or_error = execute_real_buy(token_addr, amount_sol)
-    if not success:
-        return False, sig_or_error, 0
-    after = get_token_balance(token_addr)
-    delta = max(0, int(after) - int(before))
-    if delta <= 0:
-        return False, "خرید ارسال شد ولی مقدار توکن قابل نسبت‌دهی نیست", 0
-    return True, sig_or_error, delta
-
-
-def _send_engine_buy_signal(decision, amount, tx_sig):
-    engine = decision["engine"]
-    title = f"{ENGINE_LABELS[engine]} — سیگنال خرید واقعی"
-    msg = (
-        f"{title}\n\n"
-        f"🪙 توکن: {decision['symbol']}\n"
-        f"📍 `{decision['token']}`\n\n"
-        f"💵 ورود: ${decision['price']:.8f}\n"
-        f"💰 خرید واقعی: {amount:g} SOL\n"
-        f"🎯 TP: +{decision['tp']:.1f}%\n"
-        f"🛑 SL: {decision['sl']:.1f}%\n"
-        f"📊 امتیاز موتور: {decision['score']}\n"
-        f"📌 منطق: {decision['reason']}\n"
-        f"🔗 Solscan: https://solscan.io/tx/{tx_sig}\n"
-        f"📈 DexScreener: https://dexscreener.com/solana/{decision['token']}"
-    )
-    send_telegram_msg(msg)
-    send_graphic_signal_to_vip_channel(
-        token_addr=decision["token"], symbol=decision["symbol"], price=decision["price"],
-        tp=decision["tp"], sl=decision["sl"], buy_amt=amount,
-        volume=decision["vol"], liquidity=decision["liq"], p_change=decision["chg"],
-        solscan_link=f"https://solscan.io/tx/{tx_sig}", signal_title=title,
-        side="BUY", execution_status="🟢 خرید واقعی موفق", execution_tx=tx_sig
-    )
-
-
-def _open_engine_real_position(decision):
-    engine = decision["engine"]
-    token = decision["token"]
-    allowed, why = _engine_can_enter(engine, token)
-    if not allowed:
-        return False, why
-    amount = min(get_dynamic_buy_amount(ENGINE_BUY_AMOUNT_SOL), MAX_TRADE_SOL)
-    if amount <= 0:
-        return False, "INVALID_BUY_AMOUNT"
-    with engine_lock:
-        # Reserve a short per-engine entry slot while the real blockchain BUY is built.
-        # The daily quota and signal counter are committed only after a verified real BUY.
-        engine_last_entry[engine] = time.time()
-    success, result, token_amount = _execute_real_buy_for_engine(token, amount)
-    if not success:
-        with engine_lock:
-            engine_stats[engine]["last_error"] = str(result)
-        _save_engine_v2_state()
-        return False, result
-    opened = time.time()
-    pos = {
-        "engine": engine, "token": token, "symbol": decision["symbol"],
-        "entry_price": decision["price"], "buy_amt": amount,
-        "token_amount": token_amount, "tp": decision["tp"], "sl": decision["sl"],
-        "highest_price": decision["price"], "highest_pnl": 0.0,
-        "locked_floor": decision["sl"], "opened_at": opened,
-        "reason": decision["reason"], "score": decision["score"],
-        "volume": decision["vol"], "liquidity": decision["liq"], "p_change": decision["chg"],
-        "buys_m5": decision["buys"], "sells_m5": decision["sells"], "entry_tx": result,
-    }
-    with engine_lock:
-        _engine_reset_daily_if_needed(engine)["count"] += 1
-        engine_stats[engine]["signals"] += 1
-        engine_positions[_engine_key(engine, token)] = pos
-        engine_stats[engine]["buys"] += 1
-        engine_stats[engine]["last_buy"] = time.time()
-        engine_stats[engine]["last_signal"] = time.time()
-    _send_engine_buy_signal(decision, amount, result)
-    trigger_copy_trading_for_subscribers(token, amount, side="BUY", tx_signature=result)
-    _save_engine_v2_state()
-    return True, result
-
-
-def _engine_exit_reason(pos, pnl, pair):
-    highest = max(float(pos.get("highest_pnl", 0.0)), float(pnl))
-    floor = float(pos.get("locked_floor", pos.get("sl", -8.0)))
-    floor = raise_profit_floor(floor, highest)
-    pos["highest_pnl"] = highest
-    pos["highest_price"] = max(float(pos.get("highest_price", 0.0)), float(pair.get("priceUsd") or 0))
-    pos["locked_floor"] = floor
-    if pnl <= float(pos.get("sl", -8.0)) and highest < 10.0:
-        return True, "STOP_LOSS", floor
-    if highest >= 10.0 and pnl <= floor:
-        return True, "TRAILING_PROFIT", floor
-    return False, "", floor
-
-
-def _execute_real_sell_for_engine(token_mint, token_amount):
-    """Real SELL with post-trade balance verification to avoid false SELL records."""
-    try:
-        before = int(get_token_balance(token_mint) or 0)
-    except Exception:
-        before = 0
-    amount = int(token_amount or 0)
-    if amount <= 0:
-        return False, "مقدار توکن برای فروش نامعتبر است"
-    if before < amount:
-        amount = before
-    if amount <= 0:
-        return False, "موجودی توکن برای فروش صفر است"
-    success, sig_or_error = execute_real_sell(token_mint, amount)
-    if not success:
-        return False, sig_or_error
-    time.sleep(1.2)
-    try:
-        after = int(get_token_balance(token_mint) or 0)
-    except Exception:
-        after = before
-    # Exact confirmation is not required because token accounts can settle asynchronously;
-    # a substantial balance reduction is required before the engine records a real SELL.
-    if after >= before:
-        return False, "تراکنش فروش ارسال شد ولی کاهش موجودی توکن هنوز تایید نشده است"
-    return True, sig_or_error
-
-
-def independent_engine_position_loop():
-    logger.info("🚀 V2 position manager: real BUY/SELL for SMART, UNION and MAX")
-    while True:
-        try:
-            with engine_lock:
-                items = list(engine_positions.items())
-            for key, pos in items:
-                token = pos["token"]
-                pair = _fetch_best_solana_pair(token)
-                if not pair:
-                    continue
-                price = float(pair.get("priceUsd") or 0)
-                entry = float(pos.get("entry_price") or 0)
-                if price <= 0 or entry <= 0:
-                    continue
-                pnl = (price - entry) / entry * 100.0
-                should_exit, reason_code, floor = _engine_exit_reason(pos, pnl, pair)
-                if not should_exit:
-                    continue
-                token_amount = int(pos.get("token_amount", 0) or 0)
-                if token_amount <= 0:
-                    token_amount = get_token_balance(token)
-                if token_amount <= 0:
-                    continue
-                success, sell_result = _execute_real_sell_for_engine(token, token_amount)
-                if not success:
-                    with engine_lock:
-                        engine_stats[pos["engine"]]["last_error"] = str(sell_result)
-                    continue
-                engine = pos["engine"]
-                hold = max(0, int(time.time() - float(pos.get("opened_at", time.time()))))
-                pnl_usd = float(pos.get("buy_amt", 0.0)) * pnl / 100.0
-                with engine_lock:
-                    st = engine_stats[engine]
-                    st["sells"] += 1
-                    st["last_sell"] = time.time()
-                    st["sum_pnl"] += pnl
-                    st["net_pnl"] += pnl
-                    if pnl > 0:
-                        st["wins"] += 1
-                        st["gross_profit"] += pnl
-                        wins_before = st["wins"] - 1
-                        st["avg_win"] = ((st["avg_win"] * wins_before) + pnl) / max(1, st["wins"])
-                    else:
-                        st["losses"] += 1
-                        loss_abs = abs(pnl)
-                        st["gross_loss"] += loss_abs
-                        losses_before = st["losses"] - 1
-                        st["avg_loss"] = ((st["avg_loss"] * losses_before) + loss_abs) / max(1, st["losses"])
-                    st["best"] = max(float(st.get("best", 0.0)), pnl) if st["sells"] > 1 else pnl
-                    st["worst"] = min(float(st.get("worst", 0.0)), pnl) if st["sells"] > 1 else pnl
-                reason_text = "حد ضرر" if reason_code == "STOP_LOSS" else "سیو سود متحرک"
-                msg = (
-                    f"{'🟢' if pnl >= 0 else '🔴'} {ENGINE_LABELS[engine]} — فروش واقعی\n\n"
-                    f"🪙 {pos['symbol']}\n"
-                    f"💵 ورود: ${entry:.8f}\n"
-                    f"📉 خروج: ${price:.8f}\n"
-                    f"📊 PnL: {pnl:+.2f}%\n"
-                    f"🔒 کف سود قفل‌شده: {floor:+.2f}%\n"
-                    f"📌 دلیل: {reason_text}\n"
-                    f"⏱ مدت: {hold//60}m {hold%60}s\n"
-                    f"🔗 Solscan: https://solscan.io/tx/{sell_result}"
-                )
-                send_telegram_msg(msg)
-                send_graphic_signal_to_vip_channel(
-                    token_addr=token, symbol=pos["symbol"], price=price,
-                    tp=pos["tp"], sl=floor, buy_amt=pos["buy_amt"],
-                    volume=float((pair.get("volume") or {}).get("m5") or 0),
-                    liquidity=float((pair.get("liquidity") or {}).get("usd") or 0),
-                    p_change=float((pair.get("priceChange") or {}).get("m5") or 0),
-                    solscan_link=f"https://solscan.io/tx/{sell_result}",
-                    signal_title=f"{ENGINE_LABELS[engine]} — فروش واقعی", side="SELL",
-                    execution_status="🟢 فروش واقعی موفق", execution_tx=sell_result,
-                    pnl_percent=pnl
-                )
-                log_trade_to_db(token, pos["symbol"], entry, price, pnl, pnl_usd, f"{engine}: {reason_text}")
-                record_closed_trade(
-                    token_addr=token, symbol=pos["symbol"], side="BUY", entry=entry,
-                    exit_price=price, pnl_pct=pnl, reason=f"{engine}: {reason_text}",
-                    engine_names=[engine], hold_seconds=hold,
-                    regime=v7_state.get("regime", {}).get("name", "UNKNOWN")
-                )
-                trigger_copy_trading_for_subscribers(token, pos["buy_amt"], side="SELL", tx_signature=sell_result)
-                with engine_lock:
-                    engine_positions.pop(key, None)
-                _save_engine_v2_state()
-        except Exception as e:
-            logger.exception(f"Independent engine position loop error: {e}")
-        time.sleep(2)
-
-
-def independent_engine_scanner_loop(app=None):
-    """Continuously scans real DexScreener data and independently executes real entries."""
-    logger.info("🧠🤝🚀 Independent V2 engines started")
-    send_telegram_msg("🧠 هوشمند + 🤝 اتحاد + 🚀 MAX | موتورهای مستقل واقعی فعال شدند.")
-    while True:
-        try:
-            tokens = get_real_market_trending_tokens()
-            # keep scanning all three strategies every cycle; no one-shot latch
-            smart_decisions = {}
-            union_decisions = {}
-            for token in tokens[:100]:
-                pair = _fetch_best_solana_pair(token)
-                if not pair:
-                    continue
-                smart = _smart_engine_decision(token, pair)
-                union = _union_engine_decision(token, pair)
-                if smart:
-                    smart_decisions[token] = smart
-                if union:
-                    union_decisions[token] = union
-                if ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and smart:
-                    threading.Thread(target=_open_engine_real_position, args=(smart,), daemon=True).start()
-                if SYNCHRONIZED_MODE and not MAX_FUSION_ENABLED and union:
-                    threading.Thread(target=_open_engine_real_position, args=(union,), daemon=True).start()
-                if MAX_FUSION_ENABLED:
-                    max_decision = _max_engine_decision(smart, union)
-                    if max_decision:
-                        threading.Thread(target=_open_engine_real_position, args=(max_decision,), daemon=True).start()
-            # MAX mode deliberately does not run SMART/UNION as separate trades;
-            # it combines their live approvals into one real MAX position.
-        except Exception as e:
-            logger.exception(f"Independent engine scanner error: {e}")
-        time.sleep(ENGINE_SCAN_SECONDS)
-
-
-def _engine_table_stats():
-    out = {}
-    with engine_lock:
-        for name in ENGINE_NAMES:
-            st = engine_stats[name]
-            trades = int(st.get("sells", 0) or 0)
-            wins = int(st.get("wins", 0) or 0)
-            losses = int(st.get("losses", 0) or 0)
-            gp = float(st.get("gross_profit", 0.0) or 0.0)
-            gl = float(st.get("gross_loss", 0.0) or 0.0)
-            out[name] = {
-                **st,
-                "trades": trades,
-                "win_rate": (wins / trades * 100.0) if trades else 0.0,
-                "profit_factor": (gp / gl) if gl else (999.0 if gp else 0.0),
-                "open": sum(1 for p in engine_positions.values() if p.get("engine") == name),
-            }
-    return out
-
-
-def engine_comparison_table_text():
-    """Clean, LTR-only Telegram mobile table for real independent engines.
-
-    This function ONLY renders the comparison table.
-    It does not modify glass buttons, callbacks, engine controls, or navigation.
-    """
-    s = _engine_table_stats()
-
-    specs = [
-        ("Signals", "signals", "int"),
-        ("Buys", "buys", "int"),
-        ("Sells", "sells", "int"),
-        ("Winning Trades", "wins", "int"),
-        ("Losing Trades", "losses", "int"),
-        ("Real Win Rate", "win_rate", "pct"),
-        ("Average Win", "avg_win", "signed_pct"),
-        ("Average Loss", "avg_loss", "negative_pct"),
-        ("Best Trade", "best", "signed_pct"),
-        ("Worst Trade", "worst", "signed_pct"),
-        ("Total PnL", "net_pnl", "signed_pct"),
-        ("Profit Factor", "profit_factor", "float"),
-    ]
-
-    def val(engine, key, kind):
-        x = s.get(engine, {}).get(key, 0) or 0
-        if kind == "int":
-            return str(int(x))
-        if kind == "pct":
-            return f"{float(x):.2f}%"
-        if kind == "signed_pct":
-            return f"{float(x):+.2f}%"
-        if kind == "negative_pct":
-            return f"{-abs(float(x)):.2f}%"
-        if kind == "float":
-            return f"{float(x):.2f}"
-        return str(x)
-
-    # Pure LTR ASCII layout: no RTL text and no bidi control characters.
-    # This avoids Telegram mobile reordering/overlapping cells.
-    MW = 22
-    EW = 11
-    SEP = "|"
-    HLINE = "+" + "+".join(["-" * MW, "-" * EW, "-" * EW, "-" * EW]) + "+"
-
-    def cell(value, width, align="center"):
-        value = str(value)
-        if len(value) > width:
-            value = value[:width]
-        if align == "left":
-            return value.ljust(width)
-        if align == "right":
-            return value.rjust(width)
-        left = (width - len(value)) // 2
-        return " " * left + value + " " * (width - len(value) - left)
-
-    def row(metric, smart, union, max_value):
-        return (
-            "|" + cell(metric, MW, "left") + SEP
-            + cell(smart, EW) + SEP
-            + cell(union, EW) + SEP
-            + cell(max_value, EW) + "|"
-        )
-
-    lines = [
-        "ENGINE PERFORMANCE COMPARISON",
-        HLINE,
-        row("Metric", "SMART", "UNION", "MAX"),
-        HLINE,
-    ]
-
-    for label, key, kind in specs:
-        lines.append(row(
-            label,
-            val("SMART", key, kind),
-            val("UNION", key, kind),
-            val("MAX", key, kind),
-        ))
-        if key == "losses":
-            lines.append(HLINE)
-
-    lines += [
-        HLINE,
-        "REAL DATA ONLY: BUY/SELL executions recorded by each engine.",
-        "No synthetic trades. No artificial ranking.",
-    ]
-    return "<pre>" + "\n".join(lines) + "</pre>"
-
-
-# Initialize persistent independent-engine statistics after all helpers exist.
-_load_engine_v2_state()
-
-
-
-async def _glass_engine_lab(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Dedicated glass callback for the real engine comparison table."""
-    q = update.callback_query
-    try:
-        await q.answer()
-    except Exception:
-        pass
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 بروزرسانی جدول", callback_data="glass_engine_lab")],
-        [InlineKeyboardButton("🔙 بازگشت به مرکز تحلیل", callback_data="glass_engine_lab_to_analysis")],
-    ])
-    try:
-        body = engine_comparison_table_text()
-        try:
-            await q.edit_message_text(body, parse_mode="HTML", reply_markup=kb)
-        except Exception:
-            await q.edit_message_text(body, reply_markup=kb)
-    except Exception as e:
-        logger.exception("engine_lab glass callback failed")
-        await q.edit_message_text(
-            f"⚠️ خطا در جدول مقایسه:\n{str(e)[:500]}",
-            reply_markup=kb
-        )
-
-
-async def _glass_analysis_center(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Dedicated glass callback for the analytics center."""
-    q = update.callback_query
-    try:
-        await q.answer()
-    except Exception:
-        pass
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 داشبورد PRO MAX", callback_data="v7_dashboard")],
-        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
-        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
-        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
-        [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="glass_engine_lab")],
-        [InlineKeyboardButton("🔙 بازگشت به پنل اصلی", callback_data="glass_analysis_to_home")],
-    ])
-    try:
-        await q.edit_message_text(
-            "🔬 <b>مرکز تحلیل سیستم</b>\n\n"
-            "داشبورد، اعتبارسنجی، تحلیل داده‌محور و عیب‌یابی واقعی:",
-            parse_mode="HTML",
-            reply_markup=kb
-        )
-    except Exception as e:
-        logger.exception("analysis_center glass callback failed")
-        await q.edit_message_text(
-            f"⚠️ خطا در مرکز تحلیل:\n{str(e)[:500]}",
-            reply_markup=kb
-        )
-
-
-
-async def _glass_engine_lab_to_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Return from comparison directly to the analytics center."""
-    q = update.callback_query
-    try:
-        await q.answer()
-    except Exception:
-        pass
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 داشبورد PRO MAX", callback_data="v7_dashboard")],
-        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
-        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
-        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
-        [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="glass_engine_lab")],
-        [InlineKeyboardButton("🔙 بازگشت به پنل اصلی", callback_data="glass_analysis_to_home")],
-    ])
-    await q.edit_message_text(
-        "🔬 <b>مرکز تحلیل سیستم</b>\n\nهمه ابزارهای تحلیل و عیب‌یابی در این بخش قرار دارند:",
-        parse_mode="HTML", reply_markup=kb
-    )
-
-
-async def _glass_analysis_to_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Return from analytics center directly to the real main keyboard."""
-    q = update.callback_query
-    try:
-        await q.answer()
-    except Exception:
-        pass
-    cid = str(q.from_user.id)
-    is_admin = bool(TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID))
-    await q.edit_message_text(
-        "🤖⚡ <b>هالک AI — مرکز ربات هوشمند ترید</b>",
-        parse_mode="HTML", reply_markup=_main_keyboard(is_admin)
-    )
 
 def start_telegram_bot():
     try:
@@ -4697,7 +3945,7 @@ def start_telegram_bot():
                         SYNCHRONIZED_MODE = True
                         ADVANCED_AI_ENABLED = True
                         # وضعیت دستی موتورها حفظ می‌شود؛ MAX FUSION موتور خاموش‌شده را خودکار روشن نمی‌کند.
-                        message = "👑 **MAX FUSION روشن شد**\n\n🧠 هوشمند + 🤝 اتحاد → 🚀 MAX\nهر دو موتور باید همان بازار را مستقل تأیید کنند؛ سپس فقط یک BUY/SELL واقعی با نام MAX اجرا می‌شود.\n🔒 وضعیت دستی موتورهای زیرمجموعه حفظ شد."
+                        message = "👑 **MAX FUSION روشن شد**\n\n⚡ اتحاد هالک + 🧠 سیستم پیشرفته هم‌زمان فعال شدند.\n🔒 وضعیت دستی موتورهای زیرمجموعه حفظ شد.\n🎯 فقط سخت‌گیرترین سیگنال نهایی منتشر می‌شود."
                     else:
                         MAX_FUSION_ENABLED = False
                         if _MAX_FUSION_PREV:
@@ -4777,11 +4025,6 @@ def start_telegram_bot():
         app.add_handler(CommandHandler("settradesol",settradesol_cmd))
         app.add_handler(CommandHandler("cancel",cancel_trade_limit_cmd))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
-        # Exact glass-button handlers come first; generic router comes last.
-        app.add_handler(CallbackQueryHandler(_glass_engine_lab, pattern=r"^glass_engine_lab$"))
-        app.add_handler(CallbackQueryHandler(_glass_engine_lab_to_analysis, pattern=r"^glass_engine_lab_to_analysis$"))
-        app.add_handler(CallbackQueryHandler(_glass_analysis_center, pattern=r"^glass_analysis_center$"))
-        app.add_handler(CallbackQueryHandler(_glass_analysis_to_home, pattern=r"^glass_analysis_to_home$"))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
         app.run_polling(drop_pending_updates=False)
@@ -4795,11 +4038,10 @@ if __name__ == "__main__":
 
     threads = [
         Thread(target=self_learning_ai_optimizer_loop, daemon=True, name="AILearning"),
+        # رادار واحد فقط یک Thread اجرایی دارد؛ رفتار آن بر اساس سه حالت اصلی تغییر می‌کند و خرید فقط از بهترین کاندیدای هر sweep انجام می‌شود.
         Thread(target=subscription_monitor_loop, daemon=True, name="SubMonitor"),
-        # مدیریت پوزیشن‌های مستقل: فقط BUY/SELL واقعی موتورهای V2.
-        Thread(target=independent_engine_position_loop, daemon=True, name="IndependentPositions"),
-        # سه موتور مستقل واقعی؛ در MAX فقط ترکیب SMART+UNION وارد معامله می‌شود.
-        Thread(target=independent_engine_scanner_loop, args=(None,), daemon=True, name="IndependentEngines"),
+        Thread(target=check_positions_loop, daemon=True, name="PositionsCheck"),
+        Thread(target=unified_market_scanner_loop, args=(None,), daemon=True, name="UnifiedHulkAI"),
     ]
     for t in threads:
         t.start()
