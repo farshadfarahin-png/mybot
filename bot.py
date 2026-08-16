@@ -1912,11 +1912,11 @@ SIGNAL_BUDGET_MIN = 1
 SIGNAL_BUDGET_MAX = 50
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
-CONSENSUS_MIN_LIQUIDITY = 15000.0
-CONSENSUS_MIN_VOLUME_5M = 5000.0
-CONSENSUS_MIN_CHANGE_5M = 2.0
+CONSENSUS_MIN_LIQUIDITY = 10000.0
+CONSENSUS_MIN_VOLUME_5M = 1500.0
+CONSENSUS_MIN_CHANGE_5M = 0.5
 CONSENSUS_MAX_CHANGE_5M = 35.0
-CONSENSUS_MIN_BUY_RATIO = 1.15
+CONSENSUS_MIN_BUY_RATIO = 1.05
 ADAPTIVE_TARGET_WIN_RATE = 80.0
 ADAPTIVE_LOOKBACK = 20
 ADAPTIVE_MIN_SAMPLE = 10
@@ -1937,10 +1937,10 @@ STRUCTURE_SAMPLE_MIN_GAP = 0.75
 STRUCTURE_SUPPORT_DISTANCE_PCT = 3.5
 STRUCTURE_RESISTANCE_DISTANCE_PCT = 2.0
 STRUCTURE_BREAKOUT_BUFFER_PCT = 0.75
-STRUCTURE_MIN_SUPPORT_LIQUIDITY = 25000.0
-STRUCTURE_MIN_SUPPORT_VOLUME_5M = 6000.0
-STRUCTURE_MIN_SUPPORT_BUY_RATIO = 1.35
-STRUCTURE_MIN_BREAKOUT_BUY_RATIO = 1.40
+STRUCTURE_MIN_SUPPORT_LIQUIDITY = 12000.0
+STRUCTURE_MIN_SUPPORT_VOLUME_5M = 2500.0
+STRUCTURE_MIN_SUPPORT_BUY_RATIO = 1.15
+STRUCTURE_MIN_BREAKOUT_BUY_RATIO = 1.20
 STRUCTURE_HISTORY_TTL_SECONDS = 15 * 60
 _structure_memory = {}
 _structure_lock = Lock()
@@ -1996,9 +1996,9 @@ def _market_structure_gate(token_addr, pair):
         # the full swing-high/swing-low gate once enough samples exist.
         if len(samples) < STRUCTURE_MIN_SAMPLES:
             provisional_ok = (
-                liq >= max(CONSENSUS_MIN_LIQUIDITY, 15000.0) and
-                vol >= max(CONSENSUS_MIN_VOLUME_5M, 5000.0) and
-                buys > 0 and buy_ratio >= 1.15 and chg > 0
+                liq >= CONSENSUS_MIN_LIQUIDITY and
+                vol >= CONSENSUS_MIN_VOLUME_5M and
+                buys > 0 and buy_ratio >= CONSENSUS_MIN_BUY_RATIO and chg >= CONSENSUS_MIN_CHANGE_5M
             )
             if provisional_ok:
                 return True, {
@@ -2267,11 +2267,9 @@ def build_consensus_signal(token_addr, pair):
             # reject almost every candidate even when market quality was valid.
             if adv < 1 or hulk < 1:
                 return None
-            if total < 3:
-                return None
-            required = max(3, int(total * 0.55 + 0.9999))
-            if total < required:
-                return None
+            # MAX requires one credible vote from each family, not an arbitrary
+            # third/fourth vote. The market-quality and structure gates remain
+            # responsible for rejecting weak setups.
             strength = adv * 1.25 + hulk * 1.35
         elif ADVANCED_AI_ENABLED:
             mode = "سیستم پیشرفته AI"
@@ -2345,11 +2343,11 @@ def fusion_quality_gate(fusion):
             return False
         # MAX keeps a meaningful quality floor, but 10.0 was unreachable
         # for otherwise valid 1+1 consensus candidates.
-        if MAX_FUSION_ENABLED and score < 6.0:
+        if MAX_FUSION_ENABLED and score < 4.5:
             return False
-        if ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 5.0:
+        if ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 4.0:
             return False
-        if SYNCHRONIZED_MODE and not ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 5.0:
+        if SYNCHRONIZED_MODE and not ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 4.0:
             return False
         return True
     except Exception:
