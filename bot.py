@@ -4076,6 +4076,63 @@ def engine_comparison_table_text():
 _load_engine_v2_state()
 
 
+
+async def _glass_engine_lab(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dedicated glass callback for the real engine comparison table."""
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 بروزرسانی جدول", callback_data="engine_lab")],
+        [InlineKeyboardButton("🔬 مرکز تحلیل", callback_data="analysis_center")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+    ])
+    try:
+        body = engine_comparison_table_text()
+        try:
+            await q.edit_message_text(body, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await q.edit_message_text(body, reply_markup=kb)
+    except Exception as e:
+        logger.exception("engine_lab glass callback failed")
+        await q.edit_message_text(
+            f"⚠️ خطا در جدول مقایسه:\n{str(e)[:500]}",
+            reply_markup=kb
+        )
+
+
+async def _glass_analysis_center(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dedicated glass callback for the analytics center."""
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📈 داشبورد PRO MAX", callback_data="v7_dashboard")],
+        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
+        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
+        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
+        [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="engine_lab")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+    ])
+    try:
+        await q.edit_message_text(
+            "🔬 <b>مرکز تحلیل سیستم</b>\n\n"
+            "داشبورد، اعتبارسنجی، تحلیل داده‌محور و عیب‌یابی واقعی:",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+    except Exception as e:
+        logger.exception("analysis_center glass callback failed")
+        await q.edit_message_text(
+            f"⚠️ خطا در مرکز تحلیل:\n{str(e)[:500]}",
+            reply_markup=kb
+        )
+
+
 def start_telegram_bot():
     try:
         if not TELEGRAM_BOT_TOKEN:
@@ -4676,6 +4733,9 @@ def start_telegram_bot():
         app.add_handler(CommandHandler("settradesol",settradesol_cmd))
         app.add_handler(CommandHandler("cancel",cancel_trade_limit_cmd))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
+        # Exact glass-button handlers come first; generic router comes last.
+        app.add_handler(CallbackQueryHandler(_glass_engine_lab, pattern=r"^engine_lab$"))
+        app.add_handler(CallbackQueryHandler(_glass_analysis_center, pattern=r"^analysis_center$"))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
         app.run_polling(drop_pending_updates=False)
