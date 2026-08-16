@@ -1919,6 +1919,21 @@ CONSENSUS_MIN_VOLUME_5M = 1500.0
 CONSENSUS_MIN_CHANGE_5M = 0.5
 CONSENSUS_MAX_CHANGE_5M = 35.0
 CONSENSUS_MIN_BUY_RATIO = 1.05
+
+# V3: two-stage candidate pipeline.
+# These thresholds only decide whether a market is worth deeper analysis.
+# They do NOT authorize a trade by themselves.
+CANDIDATE_MIN_LIQUIDITY = 5000.0
+CANDIDATE_MIN_VOLUME_5M = 500.0
+CANDIDATE_MIN_BUY_RATIO = 1.02
+CANDIDATE_MIN_BUYS = 1
+
+# Final entry quality remains stricter and is checked after structure/flow analysis.
+FINAL_ANALYSIS_MIN_LIQUIDITY = 10000.0
+FINAL_ANALYSIS_MIN_VOLUME_5M = 1500.0
+FINAL_ANALYSIS_MIN_BUY_RATIO = 1.10
+FINAL_BREAKOUT_MIN_VOLUME_5M = 2500.0
+FINAL_SUPPORT_MIN_VOLUME_5M = 1500.0
 ADAPTIVE_TARGET_WIN_RATE = 80.0
 ADAPTIVE_LOOKBACK = 20
 ADAPTIVE_MIN_SAMPLE = 10
@@ -1998,6 +2013,7 @@ def _market_structure_gate(token_addr, pair):
         # evidence; use that as a provisional structure check, then switch to
         # the full swing-high/swing-low gate once enough samples exist.
         if len(samples) < STRUCTURE_MIN_SAMPLES:
+            _analysis_diag("warmup_checked", token_addr=token_addr)
             provisional_ok = (
                 liq >= CONSENSUS_MIN_LIQUIDITY and
                 vol >= CONSENSUS_MIN_VOLUME_5M and
@@ -2015,6 +2031,7 @@ def _market_structure_gate(token_addr, pair):
             _diag_reject("STRUCTURE", "BUILDING_HISTORY", token_addr)
             return False, {"structure": "BUILDING_HISTORY", "structure_score": 0.0, "samples": len(samples)}
 
+        _analysis_diag("full_structure_checked", token_addr=token_addr)
         prices = [x[1] for x in samples]
         prior = prices[:-1]
         local_low = min(prices)
@@ -2229,6 +2246,42 @@ def _active_subengine_votes(token_addr, pair):
         "hulk_count": len(hulk_votes),
         "all_count": len(all_votes),
     }
+
+
+def _candidate_prefilter(pair):
+    """Cheap discovery gate. Passing this never means 'BUY'."""
+    try:
+        price = float(pair.get("priceUsd", 0) or 0)
+        liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+        vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
+        tx = (pair.get("txns") or {}).get("m5", {}) or {}
+        buys = int(tx.get("buys", 0) or 0)
+        sells = int(tx.get("sells", 0) or 0)
+        ratio = buys / max(1, sells)
+        token_addr = (pair.get("baseToken") or {}).get("address", "")
+        if price <= 0:
+            reason = "CANDIDATE_INVALID_PRICE"
+        elif liq < CANDIDATE_MIN_LIQUIDITY:
+            reason = "CANDIDATE_LOW_LIQUIDITY"
+        elif vol < CANDIDATE_MIN_VOLUME_5M:
+            reason = "CANDIDATE_LOW_5M_VOLUME"
+        elif buys < CANDIDATE_MIN_BUYS:
+            reason = "CANDIDATE_NO_BUYERS"
+        elif ratio < CANDIDATE_MIN_BUY_RATIO:
+            reason = "CANDIDATE_WEAK_BUY_PRESSURE"
+        else:
+            V13_SIGNAL_DIAGNOSTICS["candidate_prefilter_pass"] += 1
+            return True
+        V13_SIGNAL_DIAGNOSTICS["candidate_prefilter_reject"] += 1
+        V13_SIGNAL_DIAGNOSTICS["candidate_prefilter_reasons"][reason] = (
+            V13_SIGNAL_DIAGNOSTICS["candidate_prefilter_reasons"].get(reason, 0) + 1
+        )
+        _diag_reject("DISCOVERY", reason, token_addr)
+        return False
+    except Exception:
+        V13_SIGNAL_DIAGNOSTICS["candidate_prefilter_reject"] += 1
+        _diag_reject("DISCOVERY", "CANDIDATE_PREFILTER_EXCEPTION")
+        return False
 
 
 def _mode_market_quality(pair):
@@ -2629,6 +2682,28 @@ V12_REAL_AUDIT = {
 
 V13_SIGNAL_DIAGNOSTICS = {
     "total": 0,
+    "candidate_prefilter_pass": 0,
+    "candidate_prefilter_reject": 0,
+    "candidate_prefilter_reasons": {},
+    "analysis": {
+        "scanned": 0,
+        "data_ready": 0,
+        "warmup_checked": 0,
+        "full_structure_checked": 0,
+        "support_setups": 0,
+        "breakout_setups": 0,
+        "continuation_setups": 0,
+        "candidates": 0,
+        "submitted": 0,
+        "real_buy_success": 0,
+        "real_buy_failed": 0,
+        "channel_sent": 0,
+        "channel_failed": 0,
+        "rejected": 0,
+        "reasons": {},
+        "last_reason": "",
+        "last_token": "",
+    },
     "last_blocker": "هنوز داده‌ای ثبت نشده",
     "last_token": "",
     "last_stage": "",
@@ -2649,6 +2724,21 @@ V13_SIGNAL_DIAGNOSTICS = {
     "last_error": "",
 }
 
+def _analysis_diag(action=None, reason=None, token_addr=""):
+    try:
+        a=V13_SIGNAL_DIAGNOSTICS["analysis"]
+        if action in ("scanned","data_ready","warmup_checked","full_structure_checked","support_setups","breakout_setups","continuation_setups","candidates","submitted","real_buy_success","real_buy_failed","channel_sent","channel_failed","rejected"):
+            a[action]=a.get(action,0)+1
+        if action=="reject":
+            a["rejected"]+=1
+            if reason:
+                a["reasons"][reason]=a["reasons"].get(reason,0)+1
+                a["last_reason"]=reason
+        if token_addr:
+            a["last_token"]=str(token_addr)
+    except Exception:
+        pass
+
 def _diag_reject(stage, reason, token_addr=""):
     """Record the exact last blocking point and aggregate every rejection reason."""
     try:
@@ -2660,6 +2750,8 @@ def _diag_reject(stage, reason, token_addr=""):
         V13_SIGNAL_DIAGNOSTICS["last_token"] = str(token_addr or "")
         V13_SIGNAL_DIAGNOSTICS["stages"][stage] = V13_SIGNAL_DIAGNOSTICS["stages"].get(stage, 0) + 1
         V13_SIGNAL_DIAGNOSTICS["reasons"][reason] = V13_SIGNAL_DIAGNOSTICS["reasons"].get(reason, 0) + 1
+        if stage == "ANALYSIS":
+            _analysis_diag("reject", reason, token_addr)
     except Exception:
         pass
 
@@ -2997,7 +3089,8 @@ v7_compact_learning_memory(force=False)
 def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
     # V17 FIX: non-MAX engines emit independently. MAX keeps one global lane.
-    emit_lane = "ANALYSIS" if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS" else ("MAX" if MAX_FUSION_ENABLED else str(fusion.get("hunter_group", "ENGINE")))
+    is_analysis_signal = bool(fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS")
+    emit_lane = "ANALYSIS" if is_analysis_signal else ("MAX" if MAX_FUSION_ENABLED else str(fusion.get("hunter_group", "ENGINE")))
     emit_engine = (fusion.get("engines") or fusion.get("votes") or [emit_lane])[0]
     emit_key = f"{emit_lane}:{emit_engine}"
     # فقط تصمیم ورود/سهمیه را قفل می‌کنیم؛ خرید شبکه و Telegram خارج از قفل انجام می‌شوند.
@@ -3013,7 +3106,7 @@ def send_fused_signal(token_addr, fusion):
             logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
             _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
             return False, "LEARNING_CIRCUIT_BREAKER"
-        if not (fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS"):
+        if not (is_analysis_signal):
             if not fusion_quality_gate(fusion):
                 logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
                 _audit_signal_decision("QUALITY_GATE_REJECTED")
@@ -3044,6 +3137,9 @@ def send_fused_signal(token_addr, fusion):
         V12_REAL_AUDIT["last_signal"] = now_global
         _increment_daily_signal_count()
         _lock_token_entry(token_addr, "OPEN_PENDING")
+        if is_analysis_signal:
+            V12_REAL_AUDIT["analysis_signals_submitted"] += 1
+            _analysis_diag("submitted", token_addr=token_addr)
     amount = get_dynamic_buy_amount(0.01)
     reason = " + ".join(fusion.get("votes") or [])
     mode_name = fusion.get("mode", UNIFIED_ENGINE_NAME)
@@ -3058,8 +3154,12 @@ def send_fused_signal(token_addr, fusion):
     success, result = execute_real_buy(token_addr, amount)
     if success:
         V12_REAL_AUDIT["real_buy_success"] += 1
+        if is_analysis_signal:
+            _analysis_diag("real_buy_success", token_addr=token_addr)
     else:
         V12_REAL_AUDIT["real_buy_failed"] += 1
+        if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS":
+            _analysis_diag("real_buy_failed", f"REAL_BUY_FAILED:{result}", token_addr)
         _diag_reject("EXECUTION", f"REAL_BUY_FAILED:{result}", token_addr)
     execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید واقعی انجام نشد: {result}"
     solscan_link = f"https://solscan.io/tx/{result}" if success else token_link
@@ -3094,8 +3194,12 @@ def send_fused_signal(token_addr, fusion):
     )
     if channel_ok:
         V12_REAL_AUDIT["channel_sent"] += 1
+        if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS":
+            _analysis_diag("channel_sent", token_addr=token_addr)
     else:
         V12_REAL_AUDIT["channel_failed"] += 1
+        if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS":
+            _analysis_diag("channel_failed", "CHANNEL_SEND_FAILED", token_addr)
         _diag_reject("CHANNEL", "CHANNEL_SEND_FAILED", token_addr)
 
     if success:
@@ -3411,6 +3515,7 @@ def _analysis_engine_candidate(token_addr, pair):
     support bounce, or a high-volume breakout above the previous resistance.
     Touching resistance alone is never a BUY trigger.
     """
+    _analysis_diag("scanned", token_addr=token_addr)
     if not ANALYSIS_ENGINE_ENABLED:
         _diag_reject("ANALYSIS", "ANALYSIS_ENGINE_OFF", token_addr)
         return None
@@ -3423,17 +3528,19 @@ def _analysis_engine_candidate(token_addr, pair):
         buys = int(tx.get("buys", 0) or 0)
         sells = int(tx.get("sells", 0) or 0)
         buy_ratio = buys / max(1, sells)
+        if price > 0:
+            _analysis_diag("data_ready", token_addr=token_addr)
         if price <= 0:
             _diag_reject("ANALYSIS", "INVALID_PRICE", token_addr); return None
-        if liq < STRUCTURE_MIN_SUPPORT_LIQUIDITY:
+        if liq < CANDIDATE_MIN_LIQUIDITY:
             _diag_reject("ANALYSIS", "LOW_ANALYSIS_LIQUIDITY", token_addr); return None
-        if vol < STRUCTURE_MIN_SUPPORT_VOLUME_5M:
+        if vol < CANDIDATE_MIN_VOLUME_5M:
             _diag_reject("ANALYSIS", "LOW_ANALYSIS_5M_VOLUME", token_addr); return None
         # Do not require positive 5m change before evaluating structure: a valid
         # support bounce can occur while the raw 5m change is still flat/negative.
         if buys < 1:
             _diag_reject("ANALYSIS", "ANALYSIS_NO_BUYERS", token_addr); return None
-        if buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO:
+        if buy_ratio < CANDIDATE_MIN_BUY_RATIO:
             _diag_reject("ANALYSIS", "ANALYSIS_BUY_PRESSURE_WEAK", token_addr); return None
 
         samples = _update_structure_memory(token_addr, price)
@@ -3443,11 +3550,11 @@ def _analysis_engine_candidate(token_addr, pair):
             # Provisional path: real liquidity + volume + stronger buyers. It is
             # intentionally independent of MAX/consensus so the Analysis engine
             # can emit while its own structure history is still warming up.
-            if buy_ratio < 1.25:
+            if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
                 _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_BUY_RATIO", token_addr); return None
-            if liq < 12000:
+            if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
                 _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_LIQUIDITY", token_addr); return None
-            if vol < 2500:
+            if vol < FINAL_ANALYSIS_MIN_VOLUME_5M:
                 _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_VOLUME", token_addr); return None
             score = 6.0 + min(2.0, buy_ratio - 1.0) + min(1.5, vol / 10000.0) + min(1.0, liq / 50000.0)
             now = time.time()
@@ -3455,6 +3562,7 @@ def _analysis_engine_candidate(token_addr, pair):
                 _diag_reject("ANALYSIS", "ANALYSIS_COOLDOWN", token_addr)
                 return None
             q = {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
+            _analysis_diag("candidates", token_addr=token_addr)
             return {
                 "score": float(score), "strength": float(score),
                 "votes": ["Analysis"], "advanced_votes": [], "hulk_votes": [],
@@ -3496,10 +3604,13 @@ def _analysis_engine_candidate(token_addr, pair):
         if breakout:
             if slope_pct <= 0:
                 _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_TREND_NOT_UP", token_addr); return None
-            if vol < max(STRUCTURE_MIN_SUPPORT_VOLUME_5M, 5000.0):
+            if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
+                _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_LIQUIDITY_WEAK", token_addr); return None
+            if vol < FINAL_BREAKOUT_MIN_VOLUME_5M:
                 _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_VOLUME_WEAK", token_addr); return None
             if buy_ratio < STRUCTURE_MIN_BREAKOUT_BUY_RATIO:
                 _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_BUY_PRESSURE_WEAK", token_addr); return None
+            _analysis_diag("breakout_setups", token_addr=token_addr)
             structure = "ANALYSIS_RESISTANCE_BREAKOUT"
             structure_score = 4.0
             reason = "روند صعودی + شکست پرقدرت سقف قبلی + حجم/خریدار قوی"
@@ -3508,8 +3619,13 @@ def _analysis_engine_candidate(token_addr, pair):
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_TREND_NOT_UP", token_addr); return None
             if bounce_pct < 0.35:
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_NO_BOUNCE", token_addr); return None
-            if buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO:
+            if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
+                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_LIQUIDITY_WEAK", token_addr); return None
+            if vol < FINAL_SUPPORT_MIN_VOLUME_5M:
+                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_VOLUME_WEAK", token_addr); return None
+            if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_BUY_PRESSURE_WEAK", token_addr); return None
+            _analysis_diag("support_setups", token_addr=token_addr)
             structure = "ANALYSIS_SUPPORT_BOUNCE"
             structure_score = 4.0
             reason = "روند صعودی + کف معتبر + نقدینگی + برگشت با خریدار"
@@ -3518,12 +3634,13 @@ def _analysis_engine_candidate(token_addr, pair):
             # and price is not sitting at resistance.
             if slope_pct < 0.20:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_SLOPE_WEAK", token_addr); return None
-            if buy_ratio < 1.20:
+            if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_BUY_PRESSURE_WEAK", token_addr); return None
-            if vol < 4000:
+            if vol < FINAL_ANALYSIS_MIN_VOLUME_5M:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_VOLUME_WEAK", token_addr); return None
-            if liq < 15000:
+            if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_LIQUIDITY_WEAK", token_addr); return None
+            _analysis_diag("continuation_setups", token_addr=token_addr)
             structure = "ANALYSIS_TREND_CONTINUATION"
             structure_score = 2.5
             reason = "روند خطی صعودی + جریان خرید سالم"
@@ -3535,7 +3652,9 @@ def _analysis_engine_candidate(token_addr, pair):
         score += min(1.5, liq / 50000.0)
         now = time.time()
         if now - consensus_last_signal.get(f"{token_addr}:Analysis", 0) < CONSENSUS_COOLDOWN_SECONDS:
+            _diag_reject("ANALYSIS", "ANALYSIS_COOLDOWN", token_addr)
             return None
+        _analysis_diag("candidates", token_addr=token_addr)
         return {
             "score": float(score), "strength": float(score),
             "votes": ["Analysis"], "advanced_votes": [], "hulk_votes": [],
@@ -3571,14 +3690,17 @@ def _evaluate_token_for_active_modes(token_addr):
         return token_addr, []
     results = []
     if MAX_FUSION_ENABLED:
-        # MAX remains a unified lane, while Analysis stays explicitly independent.
+        # Analysis is independent and scans every fetched pair before the generic prefilter.
         for pair in pairs:
             analysis = _analysis_engine_candidate(token_addr, pair)
             # Analysis has its own quality rules and must not be blocked by MAX consensus.
             if analysis:
+                V12_REAL_AUDIT["analysis_candidates"] += 1
                 analysis["force_independent"] = True
                 analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
                 results.append(analysis)
+            if not _candidate_prefilter(pair):
+                continue
             fusion = build_consensus_signal(token_addr, pair)
             if fusion:
                 fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
@@ -3594,8 +3716,11 @@ def _evaluate_token_for_active_modes(token_addr):
         if "Analysis" in active:
             analysis = _analysis_engine_candidate(token_addr, pair)
             if analysis:
+                V12_REAL_AUDIT["analysis_candidates"] += 1
                 analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
                 results.append(analysis)
+        if not _candidate_prefilter(pair):
+            continue
         for engine_name in active:
             if engine_name == "Analysis":
                 continue
@@ -3673,7 +3798,6 @@ def unified_market_scanner_loop(app):
                     analysis_best = best_by_lane.get("ANALYSIS")
                     if analysis_best:
                         _, token_addr_a, fusion_a = analysis_best
-                        V12_REAL_AUDIT["analysis_signals_submitted"] += 1
                         SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr_a, fusion_a)
                     max_candidates = {k: v for k, v in best_by_lane.items() if k != "ANALYSIS"}
                     if max_candidates:
@@ -4578,7 +4702,20 @@ def start_telegram_bot():
                     f"🪙 توکن‌های دیده‌شده: `{h['tokens_seen']}`\n"
                     f"📊 Pairهای واقعی بررسی‌شده: `{h['pairs_seen']}`\n"
                     f"🎯 کاندیداهای Fusion: `{h['fusion_candidates']}`\n"
-                    f"📈 کاندیداهای موتور تحلیل: `{h['analysis_candidates']}`\n\n"
+                    f"📈 کاندیداهای موتور تحلیل: `{h['analysis_candidates']}`\n"
+                    f"🧠 **اسکن واقعی موتور تحلیل**\n"
+                    f"اسکن: `{V13_SIGNAL_DIAGNOSTICS['analysis']['scanned']}` | داده‌دار: `{V13_SIGNAL_DIAGNOSTICS['analysis']['data_ready']}`\n"
+                    f"Warmup: `{V13_SIGNAL_DIAGNOSTICS['analysis']['warmup_checked']}` | ساختار کامل: `{V13_SIGNAL_DIAGNOSTICS['analysis']['full_structure_checked']}`\n"
+                    f"کف: `{V13_SIGNAL_DIAGNOSTICS['analysis']['support_setups']}` | شکست سقف: `{V13_SIGNAL_DIAGNOSTICS['analysis']['breakout_setups']}` | ادامه‌روند: `{V13_SIGNAL_DIAGNOSTICS['analysis']['continuation_setups']}`\n"
+                    f"کاندید تحلیل: `{V13_SIGNAL_DIAGNOSTICS['analysis']['candidates']}` | ارسال: `{V13_SIGNAL_DIAGNOSTICS['analysis']['submitted']}`\n"
+                    f"خرید موفق: `{V13_SIGNAL_DIAGNOSTICS['analysis']['real_buy_success']}` | خرید ناموفق: `{V13_SIGNAL_DIAGNOSTICS['analysis']['real_buy_failed']}`\n"
+                    f"کانال موفق: `{V13_SIGNAL_DIAGNOSTICS['analysis']['channel_sent']}` | کانال ناموفق: `{V13_SIGNAL_DIAGNOSTICS['analysis']['channel_failed']}`\n"
+                    f"آخرین مانع موتور تحلیل: `{V13_SIGNAL_DIAGNOSTICS['analysis']['last_reason'] or '—'}`\n"
+                    f"۱۰ علت موتور تحلیل: "
+                    + (" | ".join(f"`{r}`:{n}" for r, n in sorted(V13_SIGNAL_DIAGNOSTICS['analysis']['reasons'].items(), key=lambda x: x[1], reverse=True)[:10]) or "هنوز ثبت نشده")
+                    + "\n\n"
+                    f"🟡 عبور از پیش‌فیلتر کاندید: `{V13_SIGNAL_DIAGNOSTICS['candidate_prefilter_pass']}`\n"
+                    f"🔻 رد پیش‌فیلتر کاندید: `{V13_SIGNAL_DIAGNOSTICS['candidate_prefilter_reject']}`\n\n"
                     f"🩺 **آخرین مانع واقعی**\n"
                     f"مرحله: `{V13_SIGNAL_DIAGNOSTICS['last_stage'] or '—'}`\n"
                     f"دلیل: `{V13_SIGNAL_DIAGNOSTICS['last_blocker'] or '—'}`\n"
@@ -4606,6 +4743,8 @@ def start_telegram_bot():
                     f"🤝 اتحاد: `{SYNCHRONIZED_MODE}`\n\n"
                     "🔍 **۱۰ علت پرتکرار رد شدن:**\n"
                     + ("\n".join(f"• `{r}` → `{n}`" for r, n in _diag_top_reasons(10)) or "• هنوز ثبت نشده")
+                    + "\n\n🔎 **پیش‌فیلتر کاندید:**\n"
+                    + ("\n".join(f"• `{r}` → `{n}`" for r, n in sorted(V13_SIGNAL_DIAGNOSTICS["candidate_prefilter_reasons"].items(), key=lambda x: x[1], reverse=True)[:6]) or "• هنوز ثبت نشده")
                     + "\n\n"
                     "این پنل فقط آمار واقعی Pipeline را می‌خواند؛ "
                     "هیچ سیگنال، معامله یا Win Rate ساختگی تولید نمی‌کند."
