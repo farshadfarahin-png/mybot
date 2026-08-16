@@ -4029,7 +4029,11 @@ def _engine_table_stats():
 
 
 def engine_comparison_table_text():
-    """Stable Telegram-mobile comparison table. Real closed BUY/SELL stats only."""
+    """Clean fixed-width Telegram-mobile comparison table.
+
+    IMPORTANT: this function only renders the table. It does not touch any
+    glass-button callbacks or navigation handlers.
+    """
     s = _engine_table_stats()
 
     specs = [
@@ -4038,7 +4042,7 @@ def engine_comparison_table_text():
         ("🛡 فروش", "sells", "int"),
         ("🟢 سودده", "wins", "int"),
         ("🔴 ضررده", "losses", "int"),
-        ("📊 Win Rate", "win_rate", "pct"),
+        ("📊 Win Rate واقعی", "win_rate", "pct"),
         ("📈 میانگین سود", "avg_win", "signed_pct"),
         ("📉 میانگین ضرر", "avg_loss", "negative_pct"),
         ("⭐ بهترین معامله", "best", "signed_pct"),
@@ -4049,40 +4053,68 @@ def engine_comparison_table_text():
 
     def val(engine, key, kind):
         x = s.get(engine, {}).get(key, 0) or 0
-        if kind == "int": return str(int(x))
-        if kind == "pct": return f"{float(x):.2f}%"
-        if kind == "signed_pct": return f"{float(x):+.2f}%"
-        if kind == "negative_pct": return f"{-abs(float(x)):.2f}%"
-        if kind == "float": return f"{float(x):.2f}"
+        if kind == "int":
+            return str(int(x))
+        if kind == "pct":
+            return f"{float(x):.2f}%"
+        if kind == "signed_pct":
+            return f"{float(x):+.2f}%"
+        if kind == "negative_pct":
+            return f"{-abs(float(x)):.2f}%"
+        if kind == "float":
+            return f"{float(x):.2f}"
         return str(x)
 
-    # LTR isolate makes the three engine columns stay directly underneath their headers.
-    LRE, PDF = "\u202A", "\u202C"
-    metric_w, col_w = 19, 10
-    border = "─" * (metric_w + 3 + (col_w + 3) * 3)
+    # Telegram's RTL renderer can move Persian/emoji cells even inside <pre>.
+    # LRI/PDI around EVERY cell keeps each value physically under its header.
+    LRI, PDI = "\u2066", "\u2069"
+    W = 10
+    MW = 20
+    SEP = "│"
+    BORDER = "─" * (W * 3 + 3 + MW + 9)
 
-    def c(text, width):
-        text = str(text)
-        if len(text) > width:
-            text = text[:width]
-        return f"{text:^{width}}"
+    def cell(text, width):
+        text = f"{LRI}{str(text)}{PDI}"
+        # Padding is outside the bidi isolate so alignment remains LTR.
+        raw = str(text)[1:-1]
+        if len(raw) > width:
+            raw = raw[:width]
+        pad = width - len(raw)
+        left = pad // 2
+        right = pad - left
+        return (" " * left) + text + (" " * right)
 
-    def r(metric, smart, union, maxv):
-        # Metric is deliberately last so it renders on the right side in the Telegram RTL bubble.
-        return f"{c(maxv,col_w)} │ {c(union,col_w)} │ {c(smart,col_w)} │ {c(metric,metric_w)}"
+    def row(metric, smart, union, maxv):
+        # Deliberately LTR: MAX | اتحاد | هوشمند | معیار.
+        return (
+            LRI
+            + cell(maxv, W) + f" {SEP} "
+            + cell(union, W) + f" {SEP} "
+            + cell(smart, W) + f" {SEP} "
+            + cell(metric, MW)
+            + PDI
+        )
 
     lines = [
-        LRE + "📊 مقایسه عملکرد موتورها" + PDF,
-        border,
-        LRE + r("معیار", "🧠 هوشمند", "🤝 اتحاد", "🚀 MAX") + PDF,
-        border,
+        LRI + "📊 مقایسه عملکرد موتورها" + PDI,
+        BORDER,
+        row("معیار", "🧠 هوشمند", "🤝 اتحاد", "🚀 MAX"),
+        BORDER,
     ]
+
     for label, key, kind in specs:
-        lines.append(LRE + r(label, val("SMART",key,kind), val("UNION",key,kind), val("MAX",key,kind)) + PDF)
+        lines.append(
+            row(
+                label,
+                val("SMART", key, kind),
+                val("UNION", key, kind),
+                val("MAX", key, kind),
+            )
+        )
 
     lines += [
-        border,
-        LRE + "ℹ️ فقط آمار معاملات BUY/SELL واقعی؛ بدون داده ساختگی یا رتبه‌بندی مصنوعی." + PDF,
+        BORDER,
+        LRI + "ℹ️ فقط آمار BUY/SELL واقعی؛ بدون داده ساختگی یا رتبه‌بندی مصنوعی." + PDI,
     ]
     return "<pre>" + "\n".join(lines) + "</pre>"
 
