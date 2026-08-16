@@ -3792,6 +3792,9 @@ def unified_market_scanner_loop(app):
 
             V12_REAL_AUDIT["tokens_seen"] += len(scan_tokens)
             best_by_lane = {}
+            # Analysis must have its own selection slot. Do not derive it from
+            # MAX/Fusion and do not rely on a second, undefined candidate pool.
+            analysis_best = None
             with ThreadPoolExecutor(max_workers=PAIR_SCAN_WORKERS, thread_name_prefix="RocketHunter") as ex:
                 futures = [ex.submit(_evaluate_token_for_active_modes, t) for t in scan_tokens if t and not _token_lock_is_open(t)]
                 for fut in __import__('concurrent.futures').as_completed(futures):
@@ -3814,8 +3817,17 @@ def unified_market_scanner_loop(app):
                         current = best_by_lane.get(lane)
                         if current is None or rank > current[0]:
                             best_by_lane[lane] = (rank, token_addr, fusion)
-                            if lane == "ANALYSIS":
-                                _analysis_diag("selected", token_addr=token_addr)
+                        if lane == "ANALYSIS":
+                            # Keep the strongest Analysis candidate separately.
+                            # This guarantees Analysis cannot disappear because the
+                            # MAX lane was selected/rebuilt independently.
+                            if analysis_best is None or rank > analysis_best[0]:
+                                analysis_best = (rank, token_addr, fusion)
+
+            if analysis_best is not None:
+                _analysis_diag("selected", token_addr=analysis_best[1])
+            else:
+                _diag_reject("ANALYSIS", "NO_ANALYSIS_CANDIDATE_SELECTED")
 
             if not best_by_lane:
                 _diag_reject("SYSTEM", "NO_CANDIDATE_IN_BATCH")
@@ -3825,19 +3837,17 @@ def unified_market_scanner_loop(app):
             if best_by_lane:
                 if MAX_FUSION_ENABLED:
                     # Analysis is always independent, even while MAX is ON.
-                    analysis_best = best_by_lane.get("ANALYSIS")
-
-                    # Independent Analysis fallback: do not require Fusion to select it.
-                    if analysis_best is None:
-                        _analysis_pool = candidates_by_lane.get("ANALYSIS") or []
-                        if _analysis_pool:
-                            analysis_best = max(_analysis_pool, key=lambda x: x[0])
+                    # It is selected from the dedicated Analysis slot above;
+                    # there is deliberately no Fusion vote requirement here.
                     if analysis_best:
-                        # Analysis lane is independent of Fusion selection.
                         _, token_addr_a, fusion_a = analysis_best
-                        _analysis_diag("selected", token_addr=token_addr_a)
                         _analysis_diag("submit_called", token_addr=token_addr_a)
-                        SIGNAL_EXECUTOR.submit(_analysis_submit_worker, token_addr_a, fusion_a)
+                        try:
+                            SIGNAL_EXECUTOR.submit(_analysis_submit_worker, token_addr_a, fusion_a)
+                        except Exception as e:
+                            _diag_reject("ANALYSIS", f"SUBMIT_EXCEPTION:{e}", token_addr_a)
+                    else:
+                        _diag_reject("ANALYSIS", "NO_ANALYSIS_SUBMIT_CANDIDATE")
                     max_candidates = {k: v for k, v in best_by_lane.items() if k != "ANALYSIS"}
                     if max_candidates:
                         selected = max(max_candidates.values(), key=lambda x: x[0])
