@@ -4029,10 +4029,11 @@ def _engine_table_stats():
 
 
 def engine_comparison_table_text():
-    """Clean fixed-width Telegram-mobile comparison table.
+    """Telegram-safe, fixed-width comparison table.
 
-    IMPORTANT: this function only renders the table. It does not touch any
-    glass-button callbacks or navigation handlers.
+    Only the table renderer is changed here. Navigation/glass callbacks are untouched.
+    The table is built in explicit visual order and every row uses the same columns:
+    MAX | اتحاد | هوشمند | معیار
     """
     s = _engine_table_stats()
 
@@ -4042,79 +4043,74 @@ def engine_comparison_table_text():
         ("🛡 فروش", "sells", "int"),
         ("🟢 سودده", "wins", "int"),
         ("🔴 ضررده", "losses", "int"),
-        ("📊 Win Rate واقعی", "win_rate", "pct"),
-        ("📈 میانگین سود", "avg_win", "signed_pct"),
-        ("📉 میانگین ضرر", "avg_loss", "negative_pct"),
-        ("⭐ بهترین معامله", "best", "signed_pct"),
-        ("❌ بدترین معامله", "worst", "signed_pct"),
-        ("Σ مجموع PnL", "net_pnl", "signed_pct"),
-        ("⚖️ Profit Factor", "profit_factor", "float"),
+        ("Win Rate واقعی 📊", "win_rate", "pct"),
+        ("میانگین سود 📈", "avg_win", "signed_pct"),
+        ("میانگین ضرر 📉", "avg_loss", "negative_pct"),
+        ("بهترین معامله ⭐", "best", "signed_pct"),
+        ("بدترین معامله ❌", "worst", "signed_pct"),
+        ("مجموع PnL Σ", "net_pnl", "signed_pct"),
+        ("Profit Factor ⚖️", "profit_factor", "float"),
     ]
 
     def val(engine, key, kind):
         x = s.get(engine, {}).get(key, 0) or 0
-        if kind == "int":
-            return str(int(x))
-        if kind == "pct":
-            return f"{float(x):.2f}%"
-        if kind == "signed_pct":
-            return f"{float(x):+.2f}%"
-        if kind == "negative_pct":
-            return f"{-abs(float(x)):.2f}%"
-        if kind == "float":
-            return f"{float(x):.2f}"
+        if kind == "int": return str(int(x))
+        if kind == "pct": return f"{float(x):.2f}%"
+        if kind == "signed_pct": return f"{float(x):+.2f}%"
+        if kind == "negative_pct": return f"{-abs(float(x)):.2f}%"
+        if kind == "float": return f"{float(x):.2f}"
         return str(x)
 
-    # Telegram's RTL renderer can move Persian/emoji cells even inside <pre>.
-    # LRI/PDI around EVERY cell keeps each value physically under its header.
-    LRI, PDI = "\u2066", "\u2069"
-    W = 10
-    MW = 20
-    SEP = "│"
-    BORDER = "─" * (W * 3 + 3 + MW + 9)
+    # Keep the actual data columns purely LTR.  Persian labels are isolated as
+    # their own RTL cell, so Telegram cannot steal/reorder numeric columns.
+    C = 9
+    M = 24
+    sep = "│"
+    border = "─" * (C * 3 + M + 9)
 
-    def cell(text, width):
-        text = f"{LRI}{str(text)}{PDI}"
-        # Padding is outside the bidi isolate so alignment remains LTR.
-        raw = str(text)[1:-1]
-        if len(raw) > width:
-            raw = raw[:width]
-        pad = width - len(raw)
-        left = pad // 2
-        right = pad - left
-        return (" " * left) + text + (" " * right)
+    def ltr_cell(v, w=C):
+        v = str(v)
+        if len(v) > w: v = v[:w]
+        pad = w - len(v)
+        return " " * (pad // 2) + v + " " * (pad - pad // 2)
 
-    def row(metric, smart, union, maxv):
-        # Deliberately LTR: MAX | اتحاد | هوشمند | معیار.
-        return (
-            LRI
-            + cell(maxv, W) + f" {SEP} "
-            + cell(union, W) + f" {SEP} "
-            + cell(smart, W) + f" {SEP} "
-            + cell(metric, MW)
-            + PDI
+    def rtl_cell(v, w=M):
+        # RLE makes the Persian label occupy exactly one cell; PDF closes it.
+        v = str(v)
+        if len(v) > w: v = v[:w]
+        pad = w - len(v)
+        return "\u202b" + (" " * (pad // 2) + v + " " * (pad - pad // 2)) + "\u202c"
+
+    def visual_row(metric, smart, union, maxv):
+        # IMPORTANT: logical string is written in reverse visual order.
+        # Telegram's RTL paragraph handling then displays exactly:
+        # MAX | اتحاد | هوشمند | معیار
+        raw = (
+            ltr_cell(maxv) + f" {sep} "
+            + ltr_cell(union) + f" {sep} "
+            + ltr_cell(smart) + f" {sep} "
+            + rtl_cell(metric)
         )
+        return "\u202a" + raw + "\u202c"
 
     lines = [
-        LRI + "📊 مقایسه عملکرد موتورها" + PDI,
-        BORDER,
-        row("معیار", "🧠 هوشمند", "🤝 اتحاد", "🚀 MAX"),
-        BORDER,
+        "\u202a📊 مقایسه عملکرد موتورها\u202c",
+        border,
+        visual_row("معیار", "🧠 هوشمند", "🤝 اتحاد", "🚀 MAX"),
+        border,
     ]
 
     for label, key, kind in specs:
-        lines.append(
-            row(
-                label,
-                val("SMART", key, kind),
-                val("UNION", key, kind),
-                val("MAX", key, kind),
-            )
-        )
+        lines.append(visual_row(
+            label,
+            val("SMART", key, kind),
+            val("UNION", key, kind),
+            val("MAX", key, kind),
+        ))
 
     lines += [
-        BORDER,
-        LRI + "ℹ️ فقط آمار BUY/SELL واقعی؛ بدون داده ساختگی یا رتبه‌بندی مصنوعی." + PDI,
+        border,
+        "\u202aℹ️ فقط آمار BUY/SELL واقعی؛ بدون داده ساختگی یا رتبه‌بندی مصنوعی.\u202c",
     ]
     return "<pre>" + "\n".join(lines) + "</pre>"
 
