@@ -8,6 +8,7 @@ import base64
 import base58
 import os
 import math
+from pathlib import Path
 
 VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "-1003840577545")
 import sqlite3
@@ -1923,6 +1924,121 @@ ADAPTIVE_MAX_SCORE_BONUS = 2
 ADAPTIVE_MAX_RATIO_BONUS = 0.10
 consensus_last_signal = {}
 
+# ==========================================================
+# PRO STRUCTURE / LIQUIDITY GATE
+# Price-structure memory built from the real market snapshots already
+# received by the radar. It blocks blind entries at resistance and
+# requires liquidity + buy pressure for support/bottom entries.
+# ==========================================================
+STRUCTURE_FILTER_ENABLED = True
+STRUCTURE_LOOKBACK = 30
+STRUCTURE_MIN_SAMPLES = 4
+STRUCTURE_SAMPLE_MIN_GAP = 0.75
+STRUCTURE_SUPPORT_DISTANCE_PCT = 3.5
+STRUCTURE_RESISTANCE_DISTANCE_PCT = 2.0
+STRUCTURE_BREAKOUT_BUFFER_PCT = 0.75
+STRUCTURE_MIN_SUPPORT_LIQUIDITY = 25000.0
+STRUCTURE_MIN_SUPPORT_VOLUME_5M = 6000.0
+STRUCTURE_MIN_SUPPORT_BUY_RATIO = 1.35
+STRUCTURE_MIN_BREAKOUT_BUY_RATIO = 1.40
+STRUCTURE_HISTORY_TTL_SECONDS = 15 * 60
+_structure_memory = {}
+_structure_lock = Lock()
+
+def _update_structure_memory(token_addr, price):
+    """Store real observed prices; never invents candles or OHLC data."""
+    try:
+        now = time.time()
+        price = float(price or 0)
+        if not token_addr or price <= 0:
+            return []
+        with _structure_lock:
+            rows = _structure_memory.setdefault(token_addr, [])
+            if rows and now - rows[-1][0] < STRUCTURE_SAMPLE_MIN_GAP:
+                # Replace the last snapshot when the radar is polling too fast.
+                rows[-1] = (now, price)
+            else:
+                rows.append((now, price))
+            cutoff = now - STRUCTURE_HISTORY_TTL_SECONDS
+            rows[:] = [x for x in rows[-STRUCTURE_LOOKBACK:] if x[0] >= cutoff]
+            return list(rows)
+    except Exception:
+        return []
+
+def _market_structure_gate(token_addr, pair):
+    """Return structure evidence for a BUY candidate.
+
+    Rules:
+      * no blind 'touch the bottom' entry; support must have liquidity and
+        buy pressure, and price must show a bounce away from the low.
+      * no entry directly under a known resistance unless the resistance
+        is actually broken with strong buy pressure.
+      * continuation entries require an upward trend and healthy flow.
+    """
+    if not STRUCTURE_FILTER_ENABLED:
+        return True, {"structure": "DISABLED", "structure_score": 0.0}
+    try:
+        price = float(pair.get("priceUsd", 0) or 0)
+        chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+        liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+        vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
+        tx = (pair.get("txns") or {}).get("m5", {}) or {}
+        buys = int(tx.get("buys", 0) or 0)
+        sells = int(tx.get("sells", 0) or 0)
+        buy_ratio = buys / max(1, sells)
+        samples = _update_structure_memory(token_addr, price)
+        if price <= 0 or len(samples) < STRUCTURE_MIN_SAMPLES:
+            return False, {"structure": "BUILDING_HISTORY", "structure_score": 0.0, "samples": len(samples)}
+
+        prices = [x[1] for x in samples]
+        prior = prices[:-1]
+        local_low = min(prices)
+        local_high = max(prior) if prior else price
+        recent_low = min(prices[-min(8, len(prices)):])
+        recent_high = max(prices[-min(8, len(prices)):])
+        bounce_from_low = ((price - recent_low) / recent_low * 100.0) if recent_low > 0 else 0.0
+        below_resistance = price < local_high * (1.0 - STRUCTURE_RESISTANCE_DISTANCE_PCT / 100.0)
+        at_resistance = price >= local_high * (1.0 - STRUCTURE_RESISTANCE_DISTANCE_PCT / 100.0)
+        breakout = price >= local_high * (1.0 + STRUCTURE_BREAKOUT_BUFFER_PCT / 100.0)
+        near_support = price <= recent_low * (1.0 + STRUCTURE_SUPPORT_DISTANCE_PCT / 100.0)
+
+        # Direct resistance entries are forbidden unless a real breakout is confirmed.
+        if at_resistance and not breakout:
+            return False, {"structure": "RESISTANCE_REJECTION", "structure_score": 0.0,
+                           "support": recent_low, "resistance": local_high, "breakout": False}
+
+        # A bottom entry is valid only after a bounce and with real liquidity/flow.
+        if near_support:
+            support_ok = (liq >= STRUCTURE_MIN_SUPPORT_LIQUIDITY and
+                          vol >= STRUCTURE_MIN_SUPPORT_VOLUME_5M and
+                          buy_ratio >= STRUCTURE_MIN_SUPPORT_BUY_RATIO and
+                          chg > 0 and bounce_from_low >= 0.35)
+            if not support_ok:
+                return False, {"structure": "UNCONFIRMED_SUPPORT", "structure_score": 0.0,
+                               "support": recent_low, "resistance": local_high, "breakout": False}
+            return True, {"structure": "SUPPORT_BOUNCE", "structure_score": 3.0,
+                          "support": recent_low, "resistance": local_high, "breakout": False}
+
+        # Breakout is allowed only with stronger buy pressure and enough market depth.
+        if breakout:
+            if liq < STRUCTURE_MIN_SUPPORT_LIQUIDITY or vol < STRUCTURE_MIN_SUPPORT_VOLUME_5M or buy_ratio < STRUCTURE_MIN_BREAKOUT_BUY_RATIO:
+                return False, {"structure": "WEAK_BREAKOUT", "structure_score": 0.0,
+                               "support": recent_low, "resistance": local_high, "breakout": True}
+            return True, {"structure": "RESISTANCE_BREAKOUT", "structure_score": 3.5,
+                          "support": recent_low, "resistance": local_high, "breakout": True}
+
+        # Trend continuation away from support/resistance.
+        trend_ok = chg >= 4.0 and buy_ratio >= 1.25 and liq >= 20000 and vol >= 6000
+        if trend_ok and below_resistance:
+            return True, {"structure": "TREND_CONTINUATION", "structure_score": 2.0,
+                          "support": recent_low, "resistance": local_high, "breakout": False}
+
+        return False, {"structure": "NO_HIGH_QUALITY_STRUCTURE", "structure_score": 0.0,
+                       "support": recent_low, "resistance": local_high, "breakout": False}
+    except Exception as e:
+        logger.debug(f"Structure gate error {token_addr}: {e}")
+        return False, {"structure": "STRUCTURE_ERROR", "structure_score": 0.0}
+
 # سرعت رصد فقط — هیچ آستانه کیفیت، تعداد سیگنال یا منطق موتور تغییر نمی‌کند.
 FAST_SCAN_INTERVAL_SECONDS = 0.20
 MARKET_DISCOVERY_WORKERS = 16
@@ -2113,6 +2229,10 @@ def build_consensus_signal(token_addr, pair):
         if not q:
             return None
 
+        structure_ok, structure = _market_structure_gate(token_addr, pair)
+        if not structure_ok:
+            return None
+
         evidence = _active_subengine_votes(token_addr, pair)
         adv = evidence["advanced_count"]
         hulk = evidence["hulk_count"]
@@ -2156,6 +2276,7 @@ def build_consensus_signal(token_addr, pair):
         buy_ratio = q["buys"] / max(1, q["sells"])
         score = strength + min(5.0, q["chg"] / 5.0) + min(4.0, q["vol"] / 10000.0) + min(3.0, q["liq"] / 50000.0)
         score += min(3.0, max(0.0, buy_ratio - 1.0))
+        score += float(structure.get("structure_score", 0.0) or 0.0)
 
         now = time.time()
         if now - consensus_last_signal.get(token_addr, 0) < CONSENSUS_COOLDOWN_SECONDS:
@@ -2173,6 +2294,10 @@ def build_consensus_signal(token_addr, pair):
             "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
             "tp": max(15.0, min(30.0, 14.0 + min(12.0, score))),
             "sl": -8.0,
+            "structure": structure.get("structure", "UNKNOWN"),
+            "support": float(structure.get("support", 0.0) or 0.0),
+            "resistance": float(structure.get("resistance", 0.0) or 0.0),
+            "breakout": bool(structure.get("breakout", False)),
         }
     except Exception as e:
         logger.debug(f"Mode engine evaluation error {token_addr}: {e}")
@@ -3110,6 +3235,9 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
     q = _mode_market_quality(pair)
     if not q:
         return None
+    structure_ok, structure = _market_structure_gate(token_addr, pair)
+    if not structure_ok:
+        return None
     chg, vol, liq = q["chg"], q["vol"], q["liq"]
     buys, sells = q["buys"], q["sells"]
     try:
@@ -3161,6 +3289,10 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
             "hunter_group": group, **q,
             "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
             "tp": max(15.0, min(30.0, 14.0 + min(12.0, score))), "sl": -8.0,
+            "structure": structure.get("structure", "UNKNOWN"),
+            "support": float(structure.get("support", 0.0) or 0.0),
+            "resistance": float(structure.get("resistance", 0.0) or 0.0),
+            "breakout": bool(structure.get("breakout", False)),
             "rank_bonus": _sentinel_rank_bonus(token_addr, {"score": score, **q}),
         }
     except Exception as e:
