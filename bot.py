@@ -2584,6 +2584,8 @@ V12_REAL_AUDIT = {
     "tokens_seen": 0,
     "pairs_seen": 0,
     "fusion_candidates": 0,
+    "analysis_candidates": 0,
+    "analysis_signals_submitted": 0,
     "quality_rejected": 0,
     "duplicate_rejected": 0,
     "daily_cap_rejected": 0,
@@ -2940,10 +2942,11 @@ def send_fused_signal(token_addr, fusion):
             logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
             _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
             return False, "LEARNING_CIRCUIT_BREAKER"
-        if not fusion_quality_gate(fusion):
-            logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
-            _audit_signal_decision("QUALITY_GATE_REJECTED")
-            return False, "QUALITY_GATE_REJECTED"
+        if not (fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS"):
+            if not fusion_quality_gate(fusion):
+                logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
+                _audit_signal_decision("QUALITY_GATE_REJECTED")
+                return False, "QUALITY_GATE_REJECTED"
         now_global = time.time()
         # MAX is a single attack and therefore uses the global cooldown.
         # Outside MAX, Advanced/Hulk/individual engines have their own lane
@@ -3344,22 +3347,25 @@ def _analysis_engine_candidate(token_addr, pair):
         buy_ratio = buys / max(1, sells)
         if price <= 0 or liq < STRUCTURE_MIN_SUPPORT_LIQUIDITY or vol < STRUCTURE_MIN_SUPPORT_VOLUME_5M:
             return None
-        if buys < 1 or buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO or chg <= 0:
+        # Do not require positive 5m change before evaluating structure: a valid
+        # support bounce can occur while the raw 5m change is still flat/negative.
+        if buys < 1 or buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO:
             return None
 
         samples = _update_structure_memory(token_addr, price)
         # Fresh tokens need a first-pass signal path; full structure activates
         # after enough samples are collected.
         if len(samples) < STRUCTURE_MIN_SAMPLES:
-            if chg < 0.50 or buy_ratio < 1.30 or liq < 15000 or vol < 3000:
+            # Provisional path: real liquidity + volume + stronger buyers. It is
+            # intentionally independent of MAX/consensus so the Analysis engine
+            # can emit while its own structure history is still warming up.
+            if buy_ratio < 1.25 or liq < 12000 or vol < 2500:
                 return None
             score = 6.0 + min(2.0, buy_ratio - 1.0) + min(1.5, vol / 10000.0) + min(1.0, liq / 50000.0)
             now = time.time()
             if now - consensus_last_signal.get(f"{token_addr}:Analysis", 0) < CONSENSUS_COOLDOWN_SECONDS:
                 return None
-            q = _mode_market_quality(pair)
-            if not q:
-                return None
+            q = {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
             return {
                 "score": float(score), "strength": float(score),
                 "votes": ["Analysis"], "advanced_votes": [], "hulk_votes": [],
@@ -3558,6 +3564,7 @@ def unified_market_scanner_loop(app):
                     analysis_best = best_by_lane.get("ANALYSIS")
                     if analysis_best:
                         _, token_addr_a, fusion_a = analysis_best
+                        V12_REAL_AUDIT["analysis_signals_submitted"] += 1
                         SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr_a, fusion_a)
                     max_candidates = {k: v for k, v in best_by_lane.items() if k != "ANALYSIS"}
                     if max_candidates:
