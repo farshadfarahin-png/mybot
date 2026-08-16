@@ -3509,7 +3509,6 @@ def _control_keyboard():
             f"🎯 سقف روزانه سیگنال: {daily_signal_status_text()}",
             callback_data="daily_signal_limit"
         )],
-        [InlineKeyboardButton("📊 مرکز تحلیل و مقایسه موتورهای واقعی", callback_data="engine_lab")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ]
     return InlineKeyboardMarkup(rows)
@@ -4066,7 +4065,7 @@ def engine_comparison_table_text():
         sep,
     ]
     for label, key in rows:
-        lines.append(f"{label:<{metric_w}}│{val('SMART'):^{num_w}}│{val('UNION'):^{num_w}}│{val('MAX'):^{num_w}}")
+        lines.append(f"{label:<{metric_w}}│{val('SMART', key):^{num_w}}│{val('UNION', key):^{num_w}}│{val('MAX', key):^{num_w}}")
     lines.append(sep)
     lines.append("ℹ️ آمار فقط از BUY/SELL واقعی ثبت‌شده می‌آید؛ رتبه‌بندی وجود ندارد.")
     return "<pre>" + "\n".join(lines) + "</pre>"
