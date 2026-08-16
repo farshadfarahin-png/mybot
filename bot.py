@@ -435,7 +435,7 @@ def get_real_market_trending_tokens():
         "https://api.dexscreener.com/latest/dex/search?q=USDC",
         "https://api.dexscreener.com/latest/dex/search?q=SOL"
     ]
-    
+
     # مدیریت حافظه RAM: پاک‌سازی اتوماتیک مجموعه توکن‌ها هنگام بزرگ شدن بیش از حد
     with state_lock:
         if len(processed_tokens) > 3000:
@@ -447,26 +447,37 @@ def get_real_market_trending_tokens():
             ultra_processed_tokens.clear()
             logger.info("🧹 حافظه رم از توکن‌های قدیمی پردازش‌شده پاک‌سازی شد.")
 
-    for url in endpoints:
+    def fetch_endpoint(url):
         try:
             res_obj = http_session.get(url, timeout=4)
-            if res_obj.status_code == 200:
-                res = res_obj.json()
-                if isinstance(res, list):
-                    for t in res:
-                        if t.get('chainId') == 'solana':
-                            addr = t.get('tokenAddress')
-                            if addr and addr not in tokens:
-                                tokens.append(addr)
-                elif isinstance(res, dict):
-                    for p in res.get("pairs", []):
-                        if p.get("chainId") == "solana":
-                            addr = p.get("baseToken", {}).get("address")
-                            if addr and addr not in tokens:
-                                tokens.append(addr)
+            if res_obj.status_code != 200:
+                return []
+            res = res_obj.json()
+            found = []
+            if isinstance(res, list):
+                for t in res:
+                    if t.get('chainId') == 'solana':
+                        addr = t.get('tokenAddress')
+                        if addr:
+                            found.append(addr)
+            elif isinstance(res, dict):
+                for pair in res.get("pairs", []):
+                    if pair.get("chainId") == "solana":
+                        addr = pair.get("baseToken", {}).get("address")
+                        if addr:
+                            found.append(addr)
+            return found
         except Exception as e:
-            logger.debug(f"Fetch endpoints error ({url}): {e}")
-            continue
+            logger.debug(f"Fetch endpoint error ({url}): {e}")
+            return []
+
+    # فقط سرعت جمع‌آوری داده بالا می‌رود؛ منابع و فیلترها همان قبلی هستند.
+    with ThreadPoolExecutor(max_workers=MARKET_DISCOVERY_WORKERS, thread_name_prefix="MarketDiscovery") as ex:
+        for found in ex.map(fetch_endpoint, endpoints):
+            for addr in found:
+                if addr not in tokens:
+                    tokens.append(addr)
+
     return tokens
 
 def ultra_accuracy_scanner_loop(app):
@@ -1910,6 +1921,11 @@ ADAPTIVE_MAX_SCORE_BONUS = 2
 ADAPTIVE_MAX_RATIO_BONUS = 0.10
 consensus_last_signal = {}
 
+# سرعت رصد فقط — هیچ آستانه کیفیت، تعداد سیگنال یا منطق موتور تغییر نمی‌کند.
+FAST_SCAN_INTERVAL_SECONDS = 1.0
+MARKET_DISCOVERY_WORKERS = 8
+PAIR_SCAN_WORKERS = 10
+
 
 def _active_subengine_votes(token_addr, pair):
     """Evaluate the existing sub-engines independently on one real market pair.
@@ -2900,12 +2916,34 @@ def daily_signal_status_text():
         return f"0/{DAILY_SIGNAL_LIMIT}"
 
 
+def _fetch_best_solana_pair(token_addr):
+    """Fetch the deepest Solana pair for one token; used only to speed up the radar."""
+    try:
+        res = http_session.get(
+            f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=5
+        )
+        if res.status_code != 200:
+            return token_addr, None
+        pairs = (res.json() or {}).get("pairs") or []
+        pairs = [p for p in pairs if p.get("chainId") == "solana"]
+        if not pairs:
+            return token_addr, None
+        pair = max(
+            pairs,
+            key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0)
+        )
+        return token_addr, pair
+    except Exception as token_error:
+        logger.debug(f"Mode radar token error {token_addr}: {token_error}")
+        return token_addr, None
+
+
 def unified_market_scanner_loop(app):
     logger.info(f"{UNIFIED_ENGINE_NAME} / Top-Level Mode Radar فعال شد؛ هر حالت به‌صورت مستقل بازار را رصد می‌کند.")
     send_telegram_msg("📡 رادار سه‌حالته فعال شد: سیستم پیشرفته / اتحاد هالک / MAX FUSION")
     while True:
         if not new_trade_system_enabled():
-            time.sleep(3)
+            time.sleep(FAST_SCAN_INTERVAL_SECONDS)
             continue
         try:
             V12_REAL_AUDIT["scans"] += 1
@@ -2919,40 +2957,35 @@ def unified_market_scanner_loop(app):
                 logger.warning(f"V11 periodic analysis failed: {e}")
 
             if daily_signal_cap_reached():
-                time.sleep(10)
+                time.sleep(FAST_SCAN_INTERVAL_SECONDS)
                 continue
 
             tokens = get_real_market_trending_tokens()
             V12_REAL_AUDIT["tokens_seen"] += len(tokens)
             candidates = []
 
-            # Scan the complete real-token list returned by the market collector,
-            # not just the first 80.  The collector already combines several
-            # DexScreener market discovery endpoints.
+            # همان فهرست کامل بازار قبلی حفظ می‌شود؛ فقط واکشی جفت‌ها موازی شده
+            # تا موتورهای فعال فرصت‌های خوب را خیلی سریع‌تر بررسی کنند.
+            scan_tokens = []
             for token_addr in tokens:
-                try:
-                    with state_lock:
-                        if not token_addr or _token_lock_is_open(token_addr):
-                            continue
-                    res = http_session.get(
-                        f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=5
-                    )
-                    if res.status_code != 200:
+                with state_lock:
+                    if not token_addr or _token_lock_is_open(token_addr):
                         continue
-                    pairs = (res.json() or {}).get("pairs") or []
-                    pairs = [p for p in pairs if p.get("chainId") == "solana"]
-                    if not pairs:
+                scan_tokens.append(token_addr)
+
+            with ThreadPoolExecutor(max_workers=PAIR_SCAN_WORKERS, thread_name_prefix="PairRadar") as ex:
+                for token_addr, pair in ex.map(_fetch_best_solana_pair, scan_tokens):
+                    if not pair:
                         continue
-                    # Best executable pair for this token: deepest liquidity.
-                    pair = max(pairs, key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
-                    V12_REAL_AUDIT["pairs_seen"] += 1
-                    fusion = build_consensus_signal(token_addr, pair)
-                    if fusion:
-                        V12_REAL_AUDIT["fusion_candidates"] += 1
-                        V12_REAL_AUDIT["last_candidate"] = time.time()
-                        candidates.append((float(fusion.get("score", 0.0)), token_addr, fusion))
-                except Exception as token_error:
-                    logger.debug(f"Mode radar token error {token_addr}: {token_error}")
+                    try:
+                        V12_REAL_AUDIT["pairs_seen"] += 1
+                        fusion = build_consensus_signal(token_addr, pair)
+                        if fusion:
+                            V12_REAL_AUDIT["fusion_candidates"] += 1
+                            V12_REAL_AUDIT["last_candidate"] = time.time()
+                            candidates.append((float(fusion.get("score", 0.0)), token_addr, fusion))
+                    except Exception as token_error:
+                        logger.debug(f"Mode radar evaluation error {token_addr}: {token_error}")
 
             if candidates:
                 # Never fire the first mediocre candidate.  Pick the strongest
@@ -2966,7 +2999,7 @@ def unified_market_scanner_loop(app):
         except Exception as e:
             V12_REAL_AUDIT["last_error"] = str(e)
             logger.error(f"⚠️ خطای رادار سه‌حالته: {e}")
-        time.sleep(3)
+        time.sleep(FAST_SCAN_INTERVAL_SECONDS)
 
 
 web_app = Flask(__name__)
