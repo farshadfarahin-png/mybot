@@ -2774,6 +2774,10 @@ v7_compact_learning_memory(force=False)
 
 def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
+    # V17 FIX: non-MAX engines emit independently. MAX keeps one global lane.
+    emit_lane = "MAX" if MAX_FUSION_ENABLED else str(fusion.get("hunter_group", "ENGINE"))
+    emit_engine = (fusion.get("engines") or fusion.get("votes") or [emit_lane])[0]
+    emit_key = f"{emit_lane}:{emit_engine}"
     # فقط تصمیم ورود/سهمیه را قفل می‌کنیم؛ خرید شبکه و Telegram خارج از قفل انجام می‌شوند.
     with SIGNAL_EMIT_LOCK:
         if _token_lock_is_open(token_addr):
@@ -2792,17 +2796,28 @@ def send_fused_signal(token_addr, fusion):
             _audit_signal_decision("QUALITY_GATE_REJECTED")
             return False, "QUALITY_GATE_REJECTED"
         now_global = time.time()
-        if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
-            _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
-            return False, "GLOBAL_SIGNAL_COOLDOWN"
+        # MAX is a single attack and therefore uses the global cooldown.
+        # Outside MAX, Advanced/Hulk/individual engines have their own lane
+        # cooldown so one engine cannot suppress another engine's valid signal.
+        if MAX_FUSION_ENABLED:
+            if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
+                _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
+                return False, "GLOBAL_SIGNAL_COOLDOWN"
+        else:
+            lane_last = consensus_last_signal.get(emit_key, 0)
+            if now_global - lane_last < CONSENSUS_COOLDOWN_SECONDS:
+                _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
+                return False, "ENGINE_COOLDOWN"
         if EMERGENCY_STOP:
             logger.info("Emergency stop active: new signal execution skipped.")
             _audit_signal_decision("EMERGENCY_STOP")
             return False, "EMERGENCY_STOP"
 
         # سهمیه در لحظه صدور سیگنال واقعی رزرو می‌شود؛ شکست خرید/کانال سهمیه را دور نمی‌زند.
-        last_global_signal_time = now_global
-        UNIFIED_LAST_EMIT_TIME = now_global
+        if MAX_FUSION_ENABLED:
+            last_global_signal_time = now_global
+            UNIFIED_LAST_EMIT_TIME = now_global
+        consensus_last_signal[emit_key] = now_global
         V12_REAL_AUDIT["last_signal"] = now_global
         _increment_daily_signal_count()
         _lock_token_entry(token_addr, "OPEN_PENDING")
@@ -3234,7 +3249,7 @@ def unified_market_scanner_loop(app):
                         V12_REAL_AUDIT["pairs_seen"] += 1
                         V12_REAL_AUDIT["fusion_candidates"] += 1
                         V12_REAL_AUDIT["last_candidate"] = time.time()
-                        lane = "MAX" if MAX_FUSION_ENABLED else str(fusion.get("hunter_group", "UNKNOWN"))
+                        lane = "MAX" if MAX_FUSION_ENABLED else str((fusion.get("hunter_group", "UNKNOWN"), (fusion.get("engines") or ["ENGINE"])[0]))
                         rank = (float(fusion.get("rank_score", fusion.get("score", 0))),
                                 float(fusion.get("score", 0)),
                                 float(fusion.get("chg", 0)),
@@ -3244,16 +3259,25 @@ def unified_market_scanner_loop(app):
                         if current is None or rank > current[0]:
                             best_by_lane[lane] = (rank, token_addr, fusion)
 
-            # Non-MAX lanes stay independent. When both lanes happen to be ON,
-            # the stronger lane is selected; they never vote for each other.
-            # MAX has exactly one unified candidate.
+            # V17 FIX: independent mode really emits independently.
+            # Each active engine/group gets its own best candidate. No cross-engine
+            # vote is manufactured and no stronger lane suppresses another lane.
             if best_by_lane:
-                selected = max(best_by_lane.values(), key=lambda x: x[0])
-                _, token_addr, fusion = selected
-                engine_key = (fusion.get("engines") or ["ENGINE"])[0]
-                consensus_last_signal[f"{token_addr}:{engine_key}"] = time.time()
-                consensus_last_signal[token_addr] = time.time()
-                SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
+                if MAX_FUSION_ENABLED:
+                    selected = max(best_by_lane.values(), key=lambda x: x[0])
+                    _, token_addr, fusion = selected
+                    SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
+                else:
+                    # In non-MAX mode every independent engine candidate is eligible.
+                    # De-duplicate only the exact same token+engine pair.
+                    emitted = set()
+                    ordered = sorted(best_by_lane.values(), key=lambda x: x[0], reverse=True)
+                    for _, token_addr, fusion in ordered:
+                        engine_key = (fusion.get("hunter_group", "ENGINE"), (fusion.get("engines") or ["ENGINE"])[0])
+                        if engine_key in emitted:
+                            continue
+                        emitted.add(engine_key)
+                        SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
         except Exception as e:
             V12_REAL_AUDIT["last_error"] = str(e); logger.error(f"⚠️ TRUE HUNTER radar error: {e}")
         time.sleep(FAST_SCAN_INTERVAL_SECONDS)
