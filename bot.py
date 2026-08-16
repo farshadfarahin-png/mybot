@@ -4029,11 +4029,10 @@ def _engine_table_stats():
 
 
 def engine_comparison_table_text():
-    """Telegram-safe, fixed-width comparison table.
+    """Compact fixed-width Telegram table matching the reference layout.
 
-    Only the table renderer is changed here. Navigation/glass callbacks are untouched.
-    The table is built in explicit visual order and every row uses the same columns:
-    MAX | اتحاد | هوشمند | معیار
+    IMPORTANT: this function only controls the comparison-table text. It does
+    not touch any glass buttons, callbacks, engine controls, or navigation.
     """
     s = _engine_table_stats()
 
@@ -4041,15 +4040,15 @@ def engine_comparison_table_text():
         ("🎯 سیگنال", "signals", "int"),
         ("🛒 خرید", "buys", "int"),
         ("🛡 فروش", "sells", "int"),
-        ("🟢 سودده", "wins", "int"),
-        ("🔴 ضررده", "losses", "int"),
-        ("Win Rate واقعی 📊", "win_rate", "pct"),
-        ("میانگین سود 📈", "avg_win", "signed_pct"),
-        ("میانگین ضرر 📉", "avg_loss", "negative_pct"),
-        ("بهترین معامله ⭐", "best", "signed_pct"),
-        ("بدترین معامله ❌", "worst", "signed_pct"),
-        ("مجموع PnL Σ", "net_pnl", "signed_pct"),
-        ("Profit Factor ⚖️", "profit_factor", "float"),
+        ("🟢 معاملات سودده", "wins", "int"),
+        ("🔴 معاملات ضررده", "losses", "int"),
+        ("٪ Win Rate واقعی", "win_rate", "pct"),
+        ("📈 میانگین سود", "avg_win", "signed_pct"),
+        ("📉 میانگین ضرر", "avg_loss", "negative_pct"),
+        ("⭐ بهترین معامله", "best", "signed_pct"),
+        ("❌ بدترین معامله", "worst", "signed_pct"),
+        ("Σ مجموع PnL", "net_pnl", "signed_pct"),
+        ("⚖️ Profit Factor", "profit_factor", "float"),
     ]
 
     def val(engine, key, kind):
@@ -4058,59 +4057,57 @@ def engine_comparison_table_text():
         if kind == "pct": return f"{float(x):.2f}%"
         if kind == "signed_pct": return f"{float(x):+.2f}%"
         if kind == "negative_pct": return f"{-abs(float(x)):.2f}%"
-        if kind == "float": return f"{float(x):.2f}"
-        return str(x)
+        return f"{float(x):.2f}"
 
-    # Keep the actual data columns purely LTR.  Persian labels are isolated as
-    # their own RTL cell, so Telegram cannot steal/reorder numeric columns.
-    C = 9
-    M = 24
-    sep = "│"
-    border = "─" * (C * 3 + M + 9)
+    # Deliberately compact: this must fit a phone Telegram <pre> bubble
+    # without automatic wrapping. Values are centered; metric is right aligned.
+    EW = 8   # each engine column
+    MW = 17  # metric column
+    SEP = "│"
+    HLINE = "─" * (EW * 3 + MW + 3)
 
-    def ltr_cell(v, w=C):
-        v = str(v)
-        if len(v) > w: v = v[:w]
-        pad = w - len(v)
-        return " " * (pad // 2) + v + " " * (pad - pad // 2)
+    def cell(text, width, align="center"):
+        text = str(text)
+        if len(text) > width:
+            text = text[:width]
+        if align == "right":
+            return text.rjust(width)
+        if align == "left":
+            return text.ljust(width)
+        left = (width - len(text)) // 2
+        return (" " * left) + text + (" " * (width - len(text) - left))
 
-    def rtl_cell(v, w=M):
-        # RLE makes the Persian label occupy exactly one cell; PDF closes it.
-        v = str(v)
-        if len(v) > w: v = v[:w]
-        pad = w - len(v)
-        return "\u202b" + (" " * (pad // 2) + v + " " * (pad - pad // 2)) + "\u202c"
-
-    def visual_row(metric, smart, union, maxv):
-        # IMPORTANT: logical string is written in reverse visual order.
-        # Telegram's RTL paragraph handling then displays exactly:
-        # MAX | اتحاد | هوشمند | معیار
-        raw = (
-            ltr_cell(maxv) + f" {sep} "
-            + ltr_cell(union) + f" {sep} "
-            + ltr_cell(smart) + f" {sep} "
-            + rtl_cell(metric)
-        )
-        return "\u202a" + raw + "\u202c"
+    def row(metric, smart, union, maxv):
+        # Force the complete row into LTR direction. The metric is wrapped in
+        # an RTL isolate so its Persian text stays on the rightmost column.
+        parts = [
+            cell(maxv, EW),
+            cell(union, EW),
+            cell(smart, EW),
+            "\u2067" + cell(metric, MW, "right") + "\u2069",
+        ]
+        return "\u202a" + SEP.join(parts) + "\u202c"
 
     lines = [
         "\u202a📊 مقایسه عملکرد موتورها\u202c",
-        border,
-        visual_row("معیار", "🧠 هوشمند", "🤝 اتحاد", "🚀 MAX"),
-        border,
+        HLINE,
+        row("معیار", "🧠 هوشمند", "🤝 اتحاد", "🚀 MAX"),
+        HLINE,
     ]
 
     for label, key, kind in specs:
-        lines.append(visual_row(
+        lines.append(row(
             label,
             val("SMART", key, kind),
             val("UNION", key, kind),
             val("MAX", key, kind),
         ))
+        if key == "losses":
+            lines.append(HLINE)
 
     lines += [
-        border,
-        "\u202aℹ️ فقط آمار BUY/SELL واقعی؛ بدون داده ساختگی یا رتبه‌بندی مصنوعی.\u202c",
+        HLINE,
+        "\u202aℹ️ آمار هر موتور مستقل و فقط بر اساس BUY/SELL واقعی است.\u202c",
     ]
     return "<pre>" + "\n".join(lines) + "</pre>"
 
