@@ -3348,8 +3348,32 @@ def _analysis_engine_candidate(token_addr, pair):
             return None
 
         samples = _update_structure_memory(token_addr, price)
+        # Fresh tokens need a first-pass signal path; full structure activates
+        # after enough samples are collected.
         if len(samples) < STRUCTURE_MIN_SAMPLES:
-            return None
+            if chg < 0.50 or buy_ratio < 1.30 or liq < 15000 or vol < 3000:
+                return None
+            score = 6.0 + min(2.0, buy_ratio - 1.0) + min(1.5, vol / 10000.0) + min(1.0, liq / 50000.0)
+            now = time.time()
+            if now - consensus_last_signal.get(f"{token_addr}:Analysis", 0) < CONSENSUS_COOLDOWN_SECONDS:
+                return None
+            q = _mode_market_quality(pair)
+            if not q:
+                return None
+            return {
+                "score": float(score), "strength": float(score),
+                "votes": ["Analysis"], "advanced_votes": [], "hulk_votes": [],
+                "engines": ["Analysis"], "hunter_group": "ANALYSIS",
+                "mode": "📈 موتور تحلیل",
+                "reason": "تأیید اولیه: نقدینگی مناسب + فشار خریدار + حجم سالم",
+                **q,
+                "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
+                "tp": max(15.0, min(28.0, 16.0 + min(10.0, score))),
+                "sl": -8.0, "structure": "ANALYSIS_INITIAL_BUY_FLOW",
+                "support": float(price), "resistance": float(price),
+                "breakout": False, "trend_slope_pct": float(chg),
+                "rank_bonus": _sentinel_rank_bonus(token_addr, {"score": score, **q})
+            }
         prices = [x[1] for x in samples]
         n = len(prices)
         xs = list(range(n))
@@ -3440,7 +3464,8 @@ def _evaluate_token_for_active_modes(token_addr):
         # MAX remains a unified lane, while Analysis stays explicitly independent.
         for pair in pairs:
             analysis = _analysis_engine_candidate(token_addr, pair)
-            if analysis and fusion_quality_gate(analysis):
+            # Analysis has its own quality rules and must not be blocked by MAX consensus.
+            if analysis:
                 analysis["force_independent"] = True
                 analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
                 results.append(analysis)
@@ -3458,7 +3483,7 @@ def _evaluate_token_for_active_modes(token_addr):
         # Analysis is a separate lane and never requires another engine's vote.
         if "Analysis" in active:
             analysis = _analysis_engine_candidate(token_addr, pair)
-            if analysis and fusion_quality_gate(analysis):
+            if analysis:
                 analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
                 results.append(analysis)
         for engine_name in active:
@@ -4610,7 +4635,8 @@ def start_telegram_bot():
                     name = engine_map.get(data)
                     if not name:
                         return
-                    if MAX_FUSION_ENABLED:
+                    # Analysis remains independently switchable even while MAX is ON.
+                    if MAX_FUSION_ENABLED and name != "ANALYSIS_ENGINE_ENABLED":
                         await q.edit_message_text(
                             "🔒 کنترل تکی موتورها در حالت MAX FUSION قفل است. ابتدا MAX FUSION را خاموش کن.",
                             reply_markup=_control_keyboard(), parse_mode="Markdown"
