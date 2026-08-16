@@ -1900,8 +1900,8 @@ def advanced_filter_enabled():
 # این اعداد «تلاش برای win-rate بالا» هستند و تضمین ۹۰٪ سود نیستند.
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
 CONSENSUS_MIN_SCORE = 6
-CONSENSUS_MIN_RATIO = 0.70
-CONSENSUS_COOLDOWN_SECONDS = 300
+CONSENSUS_MIN_RATIO = 0.60
+CONSENSUS_COOLDOWN_SECONDS = 180
 
 # Daily signal cap: editable from the management panel, 1..50. Default: 15.
 DAILY_SIGNAL_LIMIT = 15
@@ -1987,7 +1987,28 @@ def _market_structure_gate(token_addr, pair):
         sells = int(tx.get("sells", 0) or 0)
         buy_ratio = buys / max(1, sells)
         samples = _update_structure_memory(token_addr, price)
-        if price <= 0 or len(samples) < STRUCTURE_MIN_SAMPLES:
+        if price <= 0:
+            return False, {"structure": "INVALID_PRICE", "structure_score": 0.0}
+
+        # Do not kill the signal pipeline while a token is still building
+        # local price history. We already have live liquidity/volume/order-flow
+        # evidence; use that as a provisional structure check, then switch to
+        # the full swing-high/swing-low gate once enough samples exist.
+        if len(samples) < STRUCTURE_MIN_SAMPLES:
+            provisional_ok = (
+                liq >= max(CONSENSUS_MIN_LIQUIDITY, 15000.0) and
+                vol >= max(CONSENSUS_MIN_VOLUME_5M, 5000.0) and
+                buys > 0 and buy_ratio >= 1.15 and chg > 0
+            )
+            if provisional_ok:
+                return True, {
+                    "structure": "PROVISIONAL_FLOW_CONFIRMATION",
+                    "structure_score": 1.0,
+                    "samples": len(samples),
+                    "support": 0.0,
+                    "resistance": 0.0,
+                    "breakout": False,
+                }
             return False, {"structure": "BUILDING_HISTORY", "structure_score": 0.0, "samples": len(samples)}
 
         prices = [x[1] for x in samples]
@@ -2241,13 +2262,14 @@ def build_consensus_signal(token_addr, pair):
         # Top-level mode.  MAX owns the market scanner whenever it is ON.
         if MAX_FUSION_ENABLED:
             mode = "MAX FUSION"
-            # MAX is intentionally stronger than either component alone:
-            # both groups must contribute, not merely the sum of votes.
-            if adv < 2 or hulk < 2:
+            # MAX requires BOTH families to participate, but does not require
+            # two votes from each family.  Requiring 2+2 made the real scanner
+            # reject almost every candidate even when market quality was valid.
+            if adv < 1 or hulk < 1:
                 return None
-            if total < 5:
+            if total < 3:
                 return None
-            required = max(5, int(total * 0.60 + 0.9999))
+            required = max(3, int(total * 0.55 + 0.9999))
             if total < required:
                 return None
             strength = adv * 1.25 + hulk * 1.35
@@ -2255,17 +2277,17 @@ def build_consensus_signal(token_addr, pair):
             mode = "سیستم پیشرفته AI"
             # Advanced can operate completely by itself and searches the market
             # using its own AI/quality sub-engines.
-            if adv < 2:
+            if adv < 1:
                 return None
-            required = max(2, int(max(4, adv + 1) * 0.60 + 0.9999))
+            required = max(1, int(max(2, adv) * 0.50 + 0.9999))
             if adv < required:
                 return None
             strength = adv * 1.35 + (hulk * 0.15)
         elif SYNCHRONIZED_MODE:
             mode = "اتحاد هالک AI"
-            if hulk < 2:
+            if hulk < 1:
                 return None
-            required = max(2, int(max(4, hulk + 1) * 0.60 + 0.9999))
+            required = max(1, int(max(2, hulk) * 0.50 + 0.9999))
             if hulk < required:
                 return None
             strength = hulk * 1.40 + (adv * 0.15)
@@ -2321,7 +2343,9 @@ def fusion_quality_gate(fusion):
             return False
         if chg < CONSENSUS_MIN_CHANGE_5M:
             return False
-        if MAX_FUSION_ENABLED and score < 10.0:
+        # MAX keeps a meaningful quality floor, but 10.0 was unreachable
+        # for otherwise valid 1+1 consensus candidates.
+        if MAX_FUSION_ENABLED and score < 6.0:
             return False
         if ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 5.0:
             return False
