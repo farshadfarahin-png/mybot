@@ -147,7 +147,9 @@ MOONBAG_HULK_ENABLED = True
 ANTI_WASH_TRADING_ENABLED = True
 
 SMART_MONEY_COPY_ENABLED = True      
-SOCIAL_SENTIMENT_ENABLED = True      
+SOCIAL_SENTIMENT_ENABLED = True
+# موتور تحلیل مستقل: روند خطی + کف/سقف + نقدینگی/فشار خرید
+ANALYSIS_ENGINE_ENABLED = True      
 DYNAMIC_TRAILING_TP_ENABLED = True
 # مدیریت سود پله‌ای بر پایه سقف سود: حدضرر فقط بالا می‌رود و هیچ‌وقت پایین نمی‌آید.
 # مثال: اگر سقف سود به +1000% برسد، حدضرر روی حدود +950% قفل می‌شود.
@@ -2922,7 +2924,7 @@ v7_compact_learning_memory(force=False)
 def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
     # V17 FIX: non-MAX engines emit independently. MAX keeps one global lane.
-    emit_lane = "MAX" if MAX_FUSION_ENABLED else str(fusion.get("hunter_group", "ENGINE"))
+    emit_lane = "ANALYSIS" if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS" else ("MAX" if MAX_FUSION_ENABLED else str(fusion.get("hunter_group", "ENGINE")))
     emit_engine = (fusion.get("engines") or fusion.get("votes") or [emit_lane])[0]
     emit_key = f"{emit_lane}:{emit_engine}"
     # فقط تصمیم ورود/سهمیه را قفل می‌کنیم؛ خرید شبکه و Telegram خارج از قفل انجام می‌شوند.
@@ -3321,11 +3323,108 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
         logger.debug(f"Independent engine {engine_name} failed for {token_addr}: {e}")
         return None
 
+def _analysis_engine_candidate(token_addr, pair):
+    """Independent market-structure engine.
+
+    It does not borrow votes from Hulk/Advanced/MAX. It waits for enough real
+    price samples, estimates the linear trend, validates a liquid buyer-backed
+    support bounce, or a high-volume breakout above the previous resistance.
+    Touching resistance alone is never a BUY trigger.
+    """
+    if not ANALYSIS_ENGINE_ENABLED:
+        return None
+    try:
+        price = float(pair.get("priceUsd", 0) or 0)
+        liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+        vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
+        chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+        tx = (pair.get("txns") or {}).get("m5", {}) or {}
+        buys = int(tx.get("buys", 0) or 0)
+        sells = int(tx.get("sells", 0) or 0)
+        buy_ratio = buys / max(1, sells)
+        if price <= 0 or liq < STRUCTURE_MIN_SUPPORT_LIQUIDITY or vol < STRUCTURE_MIN_SUPPORT_VOLUME_5M:
+            return None
+        if buys < 1 or buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO or chg <= 0:
+            return None
+
+        samples = _update_structure_memory(token_addr, price)
+        if len(samples) < STRUCTURE_MIN_SAMPLES:
+            return None
+        prices = [x[1] for x in samples]
+        n = len(prices)
+        xs = list(range(n))
+        mx = sum(xs) / n
+        my = sum(prices) / n
+        den = sum((x - mx) ** 2 for x in xs) or 1.0
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, prices)) / den
+        slope_pct = (slope / max(1e-18, my)) * 100.0
+
+        prior = prices[:-1]
+        recent = prices[-min(8, n):]
+        support = min(recent)
+        resistance = max(prior) if prior else max(recent)
+        bounce_pct = (price - support) / max(1e-18, support) * 100.0
+        near_support = price <= support * (1.0 + STRUCTURE_SUPPORT_DISTANCE_PCT / 100.0)
+        near_resistance = price >= resistance * (1.0 - STRUCTURE_RESISTANCE_DISTANCE_PCT / 100.0)
+        breakout = price >= resistance * (1.0 + STRUCTURE_BREAKOUT_BUFFER_PCT / 100.0)
+
+        # A resistance touch is explicitly rejected. Breakout needs both
+        # meaningful volume and stronger buyer pressure.
+        if near_resistance and not breakout:
+            return None
+
+        if breakout:
+            if slope_pct <= 0 or vol < max(STRUCTURE_MIN_SUPPORT_VOLUME_5M, 5000.0) or buy_ratio < STRUCTURE_MIN_BREAKOUT_BUY_RATIO:
+                return None
+            structure = "ANALYSIS_RESISTANCE_BREAKOUT"
+            structure_score = 4.0
+            reason = "روند صعودی + شکست پرقدرت سقف قبلی + حجم/خریدار قوی"
+        elif near_support:
+            if slope_pct <= 0 or bounce_pct < 0.35 or buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO:
+                return None
+            structure = "ANALYSIS_SUPPORT_BOUNCE"
+            structure_score = 4.0
+            reason = "روند صعودی + کف معتبر + نقدینگی + برگشت با خریدار"
+        else:
+            # Continuation is allowed only when the linear trend is clearly up
+            # and price is not sitting at resistance.
+            if slope_pct < 0.20 or buy_ratio < 1.20 or vol < 4000 or liq < 15000:
+                return None
+            structure = "ANALYSIS_TREND_CONTINUATION"
+            structure_score = 2.5
+            reason = "روند خطی صعودی + جریان خرید سالم"
+
+        score = 4.0 + structure_score
+        score += min(2.0, max(0.0, slope_pct))
+        score += min(2.0, max(0.0, buy_ratio - 1.0))
+        score += min(2.0, vol / 10000.0)
+        score += min(1.5, liq / 50000.0)
+        now = time.time()
+        if now - consensus_last_signal.get(f"{token_addr}:Analysis", 0) < CONSENSUS_COOLDOWN_SECONDS:
+            return None
+        return {
+            "score": float(score), "strength": float(score),
+            "votes": ["Analysis"], "advanced_votes": [], "hulk_votes": [],
+            "engines": ["Analysis"], "hunter_group": "ANALYSIS",
+            "mode": "📈 موتور تحلیل", "reason": reason, **_mode_market_quality(pair),
+            "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
+            "tp": max(15.0, min(30.0, 16.0 + min(12.0, score))), "sl": -8.0,
+            "structure": structure, "support": float(support),
+            "resistance": float(resistance), "breakout": bool(breakout),
+            "trend_slope_pct": float(slope_pct),
+            "rank_bonus": _sentinel_rank_bonus(token_addr, {"score": score, **_mode_market_quality(pair)})
+        }
+    except Exception as e:
+        logger.debug(f"Analysis engine failed for {token_addr}: {e}")
+        return None
+
 def _active_independent_engine_names():
     adv_names = ["Technical", "UltimateAI/21", "Social/Hype", "SmartFilter"]
+    # Analysis is intentionally outside both families. It remains independent even in MAX.
+    special_names = ["Analysis"]
     hulk_names = ["Fire", "Trend", "Combo", "Golden", "Mempool/SmartMoney", "Whale", "Anti-Wash"]
     active = []
-    for name in adv_names + hulk_names:
+    for name in adv_names + hulk_names + special_names:
         var = next((v for n, v, _ in ENGINE_SWITCHES if n == name), None)
         if var and bool(globals().get(var)):
             active.append(name)
@@ -3338,9 +3437,13 @@ def _evaluate_token_for_active_modes(token_addr):
         return token_addr, []
     results = []
     if MAX_FUSION_ENABLED:
-        # MAX = one unified attack. All active engine evidence enters the same
-        # consensus function; no independent emission is allowed in MAX.
+        # MAX remains a unified lane, while Analysis stays explicitly independent.
         for pair in pairs:
+            analysis = _analysis_engine_candidate(token_addr, pair)
+            if analysis and fusion_quality_gate(analysis):
+                analysis["force_independent"] = True
+                analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
+                results.append(analysis)
             fusion = build_consensus_signal(token_addr, pair)
             if fusion:
                 fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
@@ -3352,7 +3455,15 @@ def _evaluate_token_for_active_modes(token_addr):
     # hunts independently; there is no cross-group vote or score borrowing.
     active = _active_independent_engine_names()
     for pair in pairs:
+        # Analysis is a separate lane and never requires another engine's vote.
+        if "Analysis" in active:
+            analysis = _analysis_engine_candidate(token_addr, pair)
+            if analysis and fusion_quality_gate(analysis):
+                analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
+                results.append(analysis)
         for engine_name in active:
+            if engine_name == "Analysis":
+                continue
             is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
             if is_adv and not ADVANCED_AI_ENABLED:
                 continue
@@ -3403,7 +3514,7 @@ def unified_market_scanner_loop(app):
                         V12_REAL_AUDIT["pairs_seen"] += 1
                         V12_REAL_AUDIT["fusion_candidates"] += 1
                         V12_REAL_AUDIT["last_candidate"] = time.time()
-                        lane = "MAX" if MAX_FUSION_ENABLED else str((fusion.get("hunter_group", "UNKNOWN"), (fusion.get("engines") or ["ENGINE"])[0]))
+                        lane = "ANALYSIS" if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS" else ("MAX" if MAX_FUSION_ENABLED else str((fusion.get("hunter_group", "UNKNOWN"), (fusion.get("engines") or ["ENGINE"])[0])))
                         rank = (float(fusion.get("rank_score", fusion.get("score", 0))),
                                 float(fusion.get("score", 0)),
                                 float(fusion.get("chg", 0)),
@@ -3418,9 +3529,16 @@ def unified_market_scanner_loop(app):
             # vote is manufactured and no stronger lane suppresses another lane.
             if best_by_lane:
                 if MAX_FUSION_ENABLED:
-                    selected = max(best_by_lane.values(), key=lambda x: x[0])
-                    _, token_addr, fusion = selected
-                    SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
+                    # Analysis is always independent, even while MAX is ON.
+                    analysis_best = best_by_lane.get("ANALYSIS")
+                    if analysis_best:
+                        _, token_addr_a, fusion_a = analysis_best
+                        SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr_a, fusion_a)
+                    max_candidates = {k: v for k, v in best_by_lane.items() if k != "ANALYSIS"}
+                    if max_candidates:
+                        selected = max(max_candidates.values(), key=lambda x: x[0])
+                        _, token_addr, fusion = selected
+                        SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
                 else:
                     # In non-MAX mode every independent engine candidate is eligible.
                     # De-duplicate only the exact same token+engine pair.
@@ -3811,6 +3929,7 @@ def _engine_status_lines():
         ("UltimateAI/21", ULTIMATE_21_ENGINE_ENABLED), ("Mempool/SmartMoney", MEMPOOL_SMART_MONEY_ENABLED),
         ("Whale", BOTTOM_WHALE_RUNNING), ("Social/Hype", SOCIAL_SENTIMENT_ENABLED),
         ("Anti-Wash", ANTI_WASH_TRADING_ENABLED), ("SmartFilter", SMART_FILTER_ENABLED),
+        ("Analysis", ANALYSIS_ENGINE_ENABLED),
     ]
     active = sum(1 for _, state in components if state)
     detail = " | ".join(f"{name}:{'🟢' if state else '🔴'}" for name, state in components)
@@ -3855,10 +3974,15 @@ def _main_keyboard(is_admin=False):
             f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}",
             callback_data="daily_signal_limit"
         )])
+        rows.append([InlineKeyboardButton(
+            f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}",
+            callback_data="toggle_engine_analysis"
+        )])
         rows.append([InlineKeyboardButton("🎁 عضویت رایگان کاربر",callback_data="free_users")])
     return InlineKeyboardMarkup(rows)
 
 ENGINE_SWITCHES = [
+    ("Analysis", "ANALYSIS_ENGINE_ENABLED", "toggle_engine_analysis"),
     ("Fire", "IS_RUNNING", "toggle_engine_fire"),
     ("Trend", "TREND_ALERT_RUNNING", "toggle_engine_trend"),
     ("Combo", "COMBO_RUNNING", "toggle_engine_combo"),
