@@ -3427,7 +3427,7 @@ def _admin_free_panel_text():
     return text
 
 def _main_keyboard(is_admin=False):
-    rows=[[InlineKeyboardButton("📊 مقایسه عملکرد موتورها",callback_data="engine_lab")],[InlineKeyboardButton("🔬 مرکز تحلیل",callback_data="analysis_center")],[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
+    rows=[[InlineKeyboardButton("📊 مقایسه عملکرد موتورها",callback_data="glass_engine_lab")],[InlineKeyboardButton("🔬 مرکز تحلیل",callback_data="glass_analysis_center")],[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
     elif CHANNEL_INVITE_LINK: rows.append([InlineKeyboardButton("📢 کانال VIP",url=CHANNEL_INVITE_LINK)])
     if is_admin:
@@ -4029,45 +4029,61 @@ def _engine_table_stats():
 
 
 def engine_comparison_table_text():
-    """Monospace grid intentionally mirrors the supplied reference image."""
+    """Stable Telegram-mobile comparison table. Real closed BUY/SELL stats only."""
     s = _engine_table_stats()
-    headers = ("معیار", "🧠 هوشمند", "🤝 اتحاد", "🚀 MAX")
-    rows = [
-        ("🎯 سیگنال‌ها", "signals"),
-        ("🛒 خریدها", "buys"),
-        ("🛡 فروش‌ها", "sells"),
-        ("🟢 معاملات سودده", "wins"),
-        ("🔴 معاملات ضررده", "losses"),
-        ("٪ Win Rate واقعی", "win_rate"),
-        ("📈 میانگین سود", "avg_win"),
-        ("📉 میانگین ضرر", "avg_loss"),
-        ("⭐ بهترین معامله", "best"),
-        ("❌ بدترین معامله", "worst"),
-        ("Σ مجموع PnL", "net_pnl"),
-        ("⚖️ Profit Factor", "profit_factor"),
+
+    specs = [
+        ("🎯 سیگنال", "signals", "int"),
+        ("🛒 خرید", "buys", "int"),
+        ("🛡 فروش", "sells", "int"),
+        ("🟢 سودده", "wins", "int"),
+        ("🔴 ضررده", "losses", "int"),
+        ("📊 Win Rate", "win_rate", "pct"),
+        ("📈 میانگین سود", "avg_win", "signed_pct"),
+        ("📉 میانگین ضرر", "avg_loss", "negative_pct"),
+        ("⭐ بهترین معامله", "best", "signed_pct"),
+        ("❌ بدترین معامله", "worst", "signed_pct"),
+        ("Σ مجموع PnL", "net_pnl", "signed_pct"),
+        ("⚖️ Profit Factor", "profit_factor", "float"),
     ]
-    def val(engine, key):
-        x = s[engine].get(key, 0)
-        if key == "win_rate": return f"{float(x):.2f}%"
-        if key == "avg_win": return f"{float(x):+.2f}%"
-        if key == "avg_loss": return f"{-abs(float(x)):.2f}%"
-        if key in ("best", "worst", "net_pnl"): return f"{float(x):+.2f}%"
-        if key == "profit_factor": return f"{float(x):.2f}"
-        return str(int(x or 0))
-    # Persian text is kept in the metric column; numeric columns are fixed-width.
-    metric_w = 22
-    num_w = 12
-    sep = "─" * (metric_w + 3 * (num_w + 3) + 4)
+
+    def val(engine, key, kind):
+        x = s.get(engine, {}).get(key, 0) or 0
+        if kind == "int": return str(int(x))
+        if kind == "pct": return f"{float(x):.2f}%"
+        if kind == "signed_pct": return f"{float(x):+.2f}%"
+        if kind == "negative_pct": return f"{-abs(float(x)):.2f}%"
+        if kind == "float": return f"{float(x):.2f}"
+        return str(x)
+
+    # LTR isolate makes the three engine columns stay directly underneath their headers.
+    LRE, PDF = "\u202A", "\u202C"
+    metric_w, col_w = 19, 10
+    border = "─" * (metric_w + 3 + (col_w + 3) * 3)
+
+    def c(text, width):
+        text = str(text)
+        if len(text) > width:
+            text = text[:width]
+        return f"{text:^{width}}"
+
+    def r(metric, smart, union, maxv):
+        # Metric is deliberately last so it renders on the right side in the Telegram RTL bubble.
+        return f"{c(maxv,col_w)} │ {c(union,col_w)} │ {c(smart,col_w)} │ {c(metric,metric_w)}"
+
     lines = [
-        "📊 مقایسه عملکرد موتورها",
-        sep,
-        f"{'معیار':<{metric_w}}│{'🧠 هوشمند':^{num_w}}│{'🤝 اتحاد':^{num_w}}│{'🚀 MAX':^{num_w}}",
-        sep,
+        LRE + "📊 مقایسه عملکرد موتورها" + PDF,
+        border,
+        LRE + r("معیار", "🧠 هوشمند", "🤝 اتحاد", "🚀 MAX") + PDF,
+        border,
     ]
-    for label, key in rows:
-        lines.append(f"{label:<{metric_w}}│{val('SMART', key):^{num_w}}│{val('UNION', key):^{num_w}}│{val('MAX', key):^{num_w}}")
-    lines.append(sep)
-    lines.append("ℹ️ آمار فقط از BUY/SELL واقعی ثبت‌شده می‌آید؛ رتبه‌بندی وجود ندارد.")
+    for label, key, kind in specs:
+        lines.append(LRE + r(label, val("SMART",key,kind), val("UNION",key,kind), val("MAX",key,kind)) + PDF)
+
+    lines += [
+        border,
+        LRE + "ℹ️ فقط آمار معاملات BUY/SELL واقعی؛ بدون داده ساختگی یا رتبه‌بندی مصنوعی." + PDF,
+    ]
     return "<pre>" + "\n".join(lines) + "</pre>"
 
 
@@ -4084,9 +4100,8 @@ async def _glass_engine_lab(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 بروزرسانی جدول", callback_data="engine_lab")],
-        [InlineKeyboardButton("🔬 مرکز تحلیل", callback_data="analysis_center")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+        [InlineKeyboardButton("🔄 بروزرسانی جدول", callback_data="glass_engine_lab")],
+        [InlineKeyboardButton("🔙 بازگشت به مرکز تحلیل", callback_data="glass_engine_lab_to_analysis")],
     ])
     try:
         body = engine_comparison_table_text()
@@ -4114,8 +4129,8 @@ async def _glass_analysis_center(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
         [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
         [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
-        [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="engine_lab")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+        [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="glass_engine_lab")],
+        [InlineKeyboardButton("🔙 بازگشت به پنل اصلی", callback_data="glass_analysis_to_home")],
     ])
     try:
         await q.edit_message_text(
@@ -4131,6 +4146,42 @@ async def _glass_analysis_center(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=kb
         )
 
+
+
+async def _glass_engine_lab_to_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Return from comparison directly to the analytics center."""
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📈 داشبورد PRO MAX", callback_data="v7_dashboard")],
+        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
+        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
+        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
+        [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="glass_engine_lab")],
+        [InlineKeyboardButton("🔙 بازگشت به پنل اصلی", callback_data="glass_analysis_to_home")],
+    ])
+    await q.edit_message_text(
+        "🔬 <b>مرکز تحلیل سیستم</b>\n\nهمه ابزارهای تحلیل و عیب‌یابی در این بخش قرار دارند:",
+        parse_mode="HTML", reply_markup=kb
+    )
+
+
+async def _glass_analysis_to_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Return from analytics center directly to the real main keyboard."""
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    cid = str(q.from_user.id)
+    is_admin = bool(TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID))
+    await q.edit_message_text(
+        "🤖⚡ <b>هالک AI — مرکز ربات هوشمند ترید</b>",
+        parse_mode="HTML", reply_markup=_main_keyboard(is_admin)
+    )
 
 def start_telegram_bot():
     try:
@@ -4329,41 +4380,6 @@ def start_telegram_bot():
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
-                    ])
-                )
-                return
-
-            elif data == "analysis_center":
-                try:
-                    await q.answer()
-                except Exception:
-                    pass
-                await q.edit_message_text(
-                    "🔬 <b>مرکز تحلیل سیستم</b>\n\n"
-                    "همه ابزارهای تحلیل و عیب‌یابی در این بخش قرار دارند:",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📈 داشبورد PRO MAX", callback_data="v7_dashboard")],
-                        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
-                        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
-                        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
-                        [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="engine_lab")],
-                        [InlineKeyboardButton("🔙 بازگشت به پنل اصلی", callback_data="home")]
-                    ])
-                )
-                return
-
-            elif data == "engine_lab":
-                if not is_admin:
-                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
-                    return
-                await q.edit_message_text(
-                    engine_comparison_table_text(),
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 بروزرسانی جدول", callback_data="engine_lab")],
-                        [InlineKeyboardButton("🔬 مرکز تحلیل", callback_data="analysis_center")],
-                        [InlineKeyboardButton("🔙 بازگشت به پنل اصلی", callback_data="home")],
                     ])
                 )
                 return
@@ -4733,8 +4749,10 @@ def start_telegram_bot():
         app.add_handler(CommandHandler("cancel",cancel_trade_limit_cmd))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
         # Exact glass-button handlers come first; generic router comes last.
-        app.add_handler(CallbackQueryHandler(_glass_engine_lab, pattern=r"^engine_lab$"))
-        app.add_handler(CallbackQueryHandler(_glass_analysis_center, pattern=r"^analysis_center$"))
+        app.add_handler(CallbackQueryHandler(_glass_engine_lab, pattern=r"^glass_engine_lab$"))
+        app.add_handler(CallbackQueryHandler(_glass_engine_lab_to_analysis, pattern=r"^glass_engine_lab_to_analysis$"))
+        app.add_handler(CallbackQueryHandler(_glass_analysis_center, pattern=r"^glass_analysis_center$"))
+        app.add_handler(CallbackQueryHandler(_glass_analysis_to_home, pattern=r"^glass_analysis_to_home$"))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
         app.run_polling(drop_pending_updates=False)
