@@ -3427,7 +3427,7 @@ def _admin_free_panel_text():
     return text
 
 def _main_keyboard(is_admin=False):
-    rows=[[InlineKeyboardButton("📊 مقایسه عملکرد موتورها",callback_data="engine_lab")],[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
+    rows=[[InlineKeyboardButton("📊 مقایسه عملکرد موتورها",callback_data="engine_lab")],[InlineKeyboardButton("🔬 مرکز تحلیل",callback_data="analysis_center")],[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
     elif CHANNEL_INVITE_LINK: rows.append([InlineKeyboardButton("📢 کانال VIP",url=CHANNEL_INVITE_LINK)])
     if is_admin:
@@ -4277,6 +4277,26 @@ def start_telegram_bot():
                 )
                 return
 
+            elif data == "analysis_center":
+                try:
+                    await q.answer()
+                except Exception:
+                    pass
+                await q.edit_message_text(
+                    "🔬 <b>مرکز تحلیل سیستم</b>\n\n"
+                    "همه ابزارهای تحلیل و عیب‌یابی در این بخش قرار دارند:",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📈 داشبورد PRO MAX", callback_data="v7_dashboard")],
+                        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
+                        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
+                        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
+                        [InlineKeyboardButton("📊 مقایسه عملکرد موتورها", callback_data="engine_lab")],
+                        [InlineKeyboardButton("🔙 بازگشت به پنل اصلی", callback_data="home")]
+                    ])
+                )
+                return
+
             elif data == "engine_lab":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
@@ -4286,11 +4306,8 @@ def start_telegram_bot():
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 بروزرسانی جدول", callback_data="engine_lab")],
-                        [InlineKeyboardButton("📊 داشبورد PRO MAX", callback_data="v7_dashboard")],
-                        [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
-                        [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
-                        [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")],
+                        [InlineKeyboardButton("🔬 مرکز تحلیل", callback_data="analysis_center")],
+                        [InlineKeyboardButton("🔙 بازگشت به پنل اصلی", callback_data="home")],
                     ])
                 )
                 return
