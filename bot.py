@@ -6,6 +6,7 @@ import json
 import base64
 import base58
 import os
+import math
 
 VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "-1003840577545")
 import sqlite3
@@ -1922,19 +1923,98 @@ ADAPTIVE_MAX_RATIO_BONUS = 0.10
 consensus_last_signal = {}
 
 # سرعت رصد فقط — هیچ آستانه کیفیت، تعداد سیگنال یا منطق موتور تغییر نمی‌کند.
-FAST_SCAN_INTERVAL_SECONDS = 1.0
-MARKET_DISCOVERY_WORKERS = 8
-PAIR_SCAN_WORKERS = 10
+FAST_SCAN_INTERVAL_SECONDS = 0.25
+MARKET_DISCOVERY_WORKERS = 16
+PAIR_SCAN_WORKERS = 24
+
+# ELITE RADAR + HULK SENTINEL: فقط معماری رصد/رتبه‌بندی ارتقا یافته؛ هیچ آستانه کیفیت، سقف سیگنال یا کلید کنترلی تغییر نمی‌کند.
+# بازار در پس‌زمینه تازه می‌شود تا رادار منتظر HTTP discovery نماند.
+ELITE_DISCOVERY_REFRESH_SECONDS = 0.50
+ELITE_DISCOVERY_MAX_AGE_SECONDS = 4.0
+ELITE_PAIR_TIMEOUT_SECONDS = 1.50
+ELITE_VOTE_WORKERS = 12
+ELITE_MAX_UNIQUE_TOKENS = 1200
+_elite_market_cache = []
+_elite_market_cache_time = 0.0
+_elite_market_refresh_lock = Lock()
+_elite_market_refresh_thread = None
+
+# ==========================================================
+# HULK SENTINEL — ranking intelligence only
+# Does NOT alter signal count, quality gates, engine switches,
+# consensus thresholds, cooldowns, or user controls.
+# It only ranks already-valid candidates faster and smarter.
+# ==========================================================
+_SENTINEL_MEMORY_TTL = 120.0
+_SENTINEL_MAX_TOKENS = 5000
+_SENTINEL_PAIR_CHOICES = 3
+_sentinel_memory = {}
+_sentinel_lock = Lock()
+
+def _sentinel_ratio(buys, sells):
+    return float(buys) / max(1.0, float(sells))
+
+def _sentinel_rank_pair(pair):
+    """Cheap ranking of Solana pairs from one DexScreener token response.
+    This is a ranking heuristic only; fixed quality gates remain authoritative.
+    """
+    try:
+        liq = float(((pair.get("liquidity") or {}).get("usd")) or 0)
+        vol = float(((pair.get("volume") or {}).get("m5")) or 0)
+        chg = float(((pair.get("priceChange") or {}).get("m5")) or 0)
+        tx = (pair.get("txns") or {}).get("m5", {}) or {}
+        buys = int(tx.get("buys", 0) or 0)
+        sells = int(tx.get("sells", 0) or 0)
+        br = _sentinel_ratio(buys, sells)
+        # Log scaling prevents a huge pool from dominating every other signal.
+        return (
+            min(5.0, math.log10(max(1.0, liq)) - 3.0) +
+            min(5.0, math.log10(max(1.0, vol)) - 2.0) +
+            min(4.0, max(0.0, chg) / 5.0) +
+            min(3.0, max(0.0, br - 1.0))
+        )
+    except Exception:
+        return -999.0
+
+def _sentinel_rank_bonus(token_addr, fusion):
+    """Reward acceleration/persistence only after a candidate passed all gates."""
+    try:
+        now = time.time()
+        chg = float(fusion.get("chg", 0) or 0)
+        vol = float(fusion.get("vol", 0) or 0)
+        liq = float(fusion.get("liq", 0) or 0)
+        br = _sentinel_ratio(fusion.get("buys", 0), fusion.get("sells", 0))
+        base = float(fusion.get("score", 0) or 0)
+        with _sentinel_lock:
+            old = _sentinel_memory.get(token_addr)
+            _sentinel_memory[token_addr] = {
+                "ts": now, "score": base, "chg": chg, "vol": vol,
+                "liq": liq, "br": br
+            }
+            if len(_sentinel_memory) > _SENTINEL_MAX_TOKENS:
+                cutoff = now - _SENTINEL_MEMORY_TTL
+                stale = [k for k,v in _sentinel_memory.items() if v.get("ts",0) < cutoff]
+                for k in stale[:1000]:
+                    _sentinel_memory.pop(k, None)
+        if not old or now - old.get("ts", 0) > _SENTINEL_MEMORY_TTL:
+            return 0.0
+        # Ranking bonus: acceleration, sustained score and buy-pressure improvement.
+        chg_accel = max(-2.0, min(2.0, chg - old.get("chg", chg)))
+        vol_accel = 0.0
+        if old.get("vol", 0) > 0:
+            vol_accel = max(-1.5, min(1.5, (vol / old["vol"]) - 1.0))
+        br_accel = max(-1.0, min(1.0, br - old.get("br", br)))
+        persistence = 1.0 if base >= old.get("score", base) else 0.0
+        return max(-2.0, min(4.5, chg_accel * 0.8 + vol_accel * 0.9 + br_accel * 0.8 + persistence * 1.0))
+    except Exception:
+        return 0.0
 
 
 def _active_subengine_votes(token_addr, pair):
-    """Evaluate the existing sub-engines independently on one real market pair.
+    """Evaluate active sub-engines concurrently without changing their rules.
 
-    This does NOT place a trade.  It only returns evidence that the top-level
-    mode can use.  The three top-level modes are:
-      ADVANCED = quality/AI-oriented sub-engines
-      HULK     = momentum/flow-oriented sub-engines
-      MAX      = both groups must independently agree
+    Every existing predicate is preserved; only independent checks run in parallel
+    so one slow engine cannot hold up the other active engines.
     """
     chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
     vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
@@ -1945,38 +2025,32 @@ def _active_subengine_votes(token_addr, pair):
 
     advanced_votes = []
     hulk_votes = []
-    all_votes = []
 
-    # Advanced / AI-oriented group.
+    def run_advanced(name, fn):
+        try:
+            ok = fn()
+            return name if ok else None
+        except Exception:
+            return None
+
+    advanced_jobs = []
     if TECHNICAL_RUNNING:
-        try:
-            ok, _ = check_major_support_resistance_pa(pair)
-            if ok:
-                advanced_votes.append("Technical")
-        except Exception:
-            pass
+        advanced_jobs.append(("Technical", lambda: check_major_support_resistance_pa(pair)[0]))
     if ULTIMATE_21_ENGINE_ENABLED:
-        try:
-            ok, *_ = evaluate_ultimate_super_signal(token_addr, pair)
-            if ok:
-                advanced_votes.append("UltimateAI/21")
-        except Exception:
-            pass
+        advanced_jobs.append(("UltimateAI/21", lambda: evaluate_ultimate_super_signal(token_addr, pair)[0]))
     if SOCIAL_SENTIMENT_ENABLED:
-        try:
-            ok, _ = check_social_sentiment_and_hype(pair)
-            if ok:
-                advanced_votes.append("Social/Hype")
-        except Exception:
-            pass
+        advanced_jobs.append(("Social/Hype", lambda: check_social_sentiment_and_hype(pair)[0]))
     if SMART_FILTER_ENABLED:
-        try:
-            if is_token_worthy(pair):
-                advanced_votes.append("SmartFilter")
-        except Exception:
-            pass
+        advanced_jobs.append(("SmartFilter", lambda: is_token_worthy(pair)))
 
-    # Hulk / momentum-flow group.
+    if advanced_jobs:
+        workers = min(ELITE_VOTE_WORKERS, len(advanced_jobs))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="AdvVote") as ex:
+            for result in ex.map(lambda job: run_advanced(job[0], job[1]), advanced_jobs):
+                if result:
+                    advanced_votes.append(result)
+
+    # Hulk predicates are pure local calculations, so evaluate them immediately.
     if IS_RUNNING and chg >= 3 and vol >= 3000:
         hulk_votes.append("Fire")
     if TREND_ALERT_RUNNING and chg >= 5 and buys >= max(1, sells):
@@ -2916,91 +2990,236 @@ def daily_signal_status_text():
         return f"0/{DAILY_SIGNAL_LIMIT}"
 
 
+def _elite_refresh_market_cache(force=False):
+    """Refresh the market universe independently from the signal decision loop."""
+    global _elite_market_cache, _elite_market_cache_time
+    now = time.time()
+    if not force and now - _elite_market_cache_time < ELITE_DISCOVERY_REFRESH_SECONDS:
+        return
+    if not _elite_market_refresh_lock.acquire(blocking=False):
+        return
+    try:
+        found = get_real_market_trending_tokens()
+        # Stable de-duplication; keep the complete discovered universe.
+        unique = list(dict.fromkeys(found))
+        if len(unique) > ELITE_MAX_UNIQUE_TOKENS:
+            unique = unique[:ELITE_MAX_UNIQUE_TOKENS]
+        with state_lock:
+            _elite_market_cache = unique
+            _elite_market_cache_time = time.time()
+    except Exception as e:
+        logger.debug(f"Elite market refresh error: {e}")
+    finally:
+        _elite_market_refresh_lock.release()
+
+
+def _elite_market_refresh_loop():
+    logger.info("⚡ ELITE RADAR discovery worker فعال شد؛ discovery از تصمیم‌گیری جداست.")
+    while True:
+        try:
+            _elite_refresh_market_cache(force=True)
+        except Exception as e:
+            logger.debug(f"Elite discovery loop error: {e}")
+        time.sleep(ELITE_DISCOVERY_REFRESH_SECONDS)
+
+
+def _elite_get_market_tokens():
+    global _elite_market_refresh_thread
+    if _elite_market_refresh_thread is None or not _elite_market_refresh_thread.is_alive():
+        _elite_market_refresh_thread = Thread(target=_elite_market_refresh_loop, name="EliteDiscovery", daemon=True)
+        _elite_market_refresh_thread.start()
+    _elite_refresh_market_cache(force=False)
+    with state_lock:
+        return list(_elite_market_cache)
+
+
 def _fetch_best_solana_pair(token_addr):
-    """Fetch the deepest Solana pair for one token; used only to speed up the radar."""
+    """Fetch one token once, then consider several strong Solana pairs.
+
+    The previous radar selected only the deepest-liquidity pair. Sentinel keeps
+    the same HTTP cost but evaluates up to three promising pairs from the same
+    response, so a thin/secondary pool cannot hide a better setup.
+    """
     try:
         res = http_session.get(
-            f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=5
+            f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}",
+            timeout=ELITE_PAIR_TIMEOUT_SECONDS
         )
         if res.status_code != 200:
-            return token_addr, None
+            return token_addr, []
         pairs = (res.json() or {}).get("pairs") or []
         pairs = [p for p in pairs if p.get("chainId") == "solana"]
         if not pairs:
-            return token_addr, None
-        pair = max(
-            pairs,
-            key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0)
-        )
-        return token_addr, pair
+            return token_addr, []
+        pairs.sort(key=_sentinel_rank_pair, reverse=True)
+        return token_addr, pairs[:_SENTINEL_PAIR_CHOICES]
     except Exception as token_error:
-        logger.debug(f"Mode radar token error {token_addr}: {token_error}")
-        return token_addr, None
+        logger.debug(f"Sentinel token error {token_addr}: {token_error}")
+        return token_addr, []
+
+def _evaluate_elite_token(token_addr):
+    """Fetch + evaluate one token entirely inside one worker."""
+    token_addr, pairs = _fetch_best_solana_pair(token_addr)
+    best = None
+    for pair in pairs:
+        try:
+            fusion = build_consensus_signal(token_addr, pair)
+            if not fusion:
+                continue
+            rank_bonus = _sentinel_rank_bonus(token_addr, fusion)
+            # Keep the real fusion score untouched; rank_score is selection-only.
+            fusion["rank_bonus"] = float(rank_bonus)
+            fusion["rank_score"] = float(fusion.get("score", 0.0)) + float(rank_bonus)
+            if best is None or fusion["rank_score"] > best["rank_score"]:
+                best = fusion
+        except Exception as token_error:
+            logger.debug(f"Sentinel evaluation error {token_addr}: {token_error}")
+    return token_addr, best
+
+
+def _independent_engine_candidate(token_addr, pair, engine_name):
+    """One-engine hunter. It never borrows a vote from another engine.
+    MAX is the only mode that intentionally fuses these hunters into one attack.
+    """
+    q = _mode_market_quality(pair)
+    if not q:
+        return None
+    chg, vol, liq = q["chg"], q["vol"], q["liq"]
+    buys, sells = q["buys"], q["sells"]
+    ok = False
+    strength = 0.0
+    try:
+        if engine_name == "Technical":
+            ok = bool(TECHNICAL_RUNNING and check_major_support_resistance_pa(pair)[0]); strength = 6.0
+        elif engine_name == "UltimateAI/21":
+            ok = bool(ULTIMATE_21_ENGINE_ENABLED and evaluate_ultimate_super_signal(token_addr, pair)[0]); strength = 7.0
+        elif engine_name == "Social/Hype":
+            ok = bool(SOCIAL_SENTIMENT_ENABLED and check_social_sentiment_and_hype(pair)[0]); strength = 6.0
+        elif engine_name == "SmartFilter":
+            ok = bool(SMART_FILTER_ENABLED and is_token_worthy(pair)); strength = 6.0
+        elif engine_name == "Fire":
+            ok = bool(IS_RUNNING and chg >= 3 and vol >= 3000); strength = 5.5
+        elif engine_name == "Trend":
+            ok = bool(TREND_ALERT_RUNNING and chg >= 5 and buys >= max(1, sells)); strength = 6.0
+        elif engine_name == "Combo":
+            ok = bool(COMBO_RUNNING and buys > sells and vol >= 5000 and liq >= 15000); strength = 6.5
+        elif engine_name == "Golden":
+            ok = bool(GOLDEN_OPTION and chg >= 8 and vol >= 7000 and liq >= 18000); strength = 7.0
+        elif engine_name == "Mempool/SmartMoney":
+            ok = bool(MEMPOOL_SMART_MONEY_ENABLED and buys >= max(2, int(sells * 1.20) + 1) and vol >= 5000 and liq >= 15000); strength = 7.0
+        elif engine_name == "Whale":
+            ok = bool(BOTTOM_WHALE_RUNNING and buys >= max(3, sells + 2) and vol >= 5000); strength = 7.0
+        elif engine_name == "Anti-Wash":
+            ok = bool(ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * 0.8)); strength = 5.5
+        if not ok:
+            return None
+        buy_ratio = buys / max(1, sells)
+        score = strength + min(5.0, chg / 5.0) + min(4.0, vol / 10000.0) + min(3.0, liq / 50000.0) + min(3.0, max(0.0, buy_ratio - 1.0))
+        if score < 8.0:
+            return None
+        now = time.time()
+        cooldown_key = f"{token_addr}:{engine_name}"
+        if now - consensus_last_signal.get(cooldown_key, 0) < CONSENSUS_COOLDOWN_SECONDS:
+            return None
+        return {
+            "score": float(score), "strength": float(strength),
+            "votes": [engine_name], "advanced_votes": [engine_name] if engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter") else [],
+            "hulk_votes": [engine_name] if engine_name in ("Fire", "Trend", "Combo", "Golden", "Mempool/SmartMoney", "Whale", "Anti-Wash") else [],
+            "engines": [engine_name], "mode": f"موتور مستقل — {engine_name}", **q,
+            "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
+            "tp": max(15.0, min(30.0, 14.0 + min(12.0, score))), "sl": -8.0,
+            "rank_bonus": _sentinel_rank_bonus(token_addr, {"score": score, **q}),
+        }
+    except Exception as e:
+        logger.debug(f"Independent engine {engine_name} failed for {token_addr}: {e}")
+        return None
+
+
+def _active_independent_engine_names():
+    adv_names = ["Technical", "UltimateAI/21", "Social/Hype", "SmartFilter"]
+    hulk_names = ["Fire", "Trend", "Combo", "Golden", "Mempool/SmartMoney", "Whale", "Anti-Wash"]
+    active = []
+    for name in adv_names + hulk_names:
+        var = next((v for n, v, _ in ENGINE_SWITCHES if n == name), None)
+        if var and bool(globals().get(var)):
+            active.append(name)
+    return active
+
+
+def _evaluate_token_for_active_modes(token_addr):
+    token_addr, pairs = _fetch_best_solana_pair(token_addr)
+    if not pairs:
+        return token_addr, []
+    results = []
+    # MAX is the one deliberate fusion path: all active engines feed the single consensus attack.
+    if MAX_FUSION_ENABLED:
+        for pair in pairs:
+            fusion = build_consensus_signal(token_addr, pair)
+            if fusion:
+                fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
+                fusion["rank_score"] = float(fusion.get("score", 0)) + float(fusion.get("rank_bonus", 0))
+                results.append(fusion)
+        return token_addr, results
+
+    # Advanced and Hulk/Unified remain separate. Each active engine hunts independently.
+    for pair in pairs:
+        for engine_name in _active_independent_engine_names():
+            # Advanced engines are only allowed when Advanced mode is ON; Hulk engines only when Unified is ON.
+            is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
+            is_hulk = not is_adv
+            if is_adv and not ADVANCED_AI_ENABLED:
+                continue
+            if is_hulk and not SYNCHRONIZED_MODE:
+                continue
+            fusion = _independent_engine_candidate(token_addr, pair, engine_name)
+            if fusion and fusion_quality_gate(fusion):
+                results.append(fusion)
+    return token_addr, results
 
 
 def unified_market_scanner_loop(app):
-    logger.info(f"{UNIFIED_ENGINE_NAME} / Top-Level Mode Radar فعال شد؛ هر حالت به‌صورت مستقل بازار را رصد می‌کند.")
-    send_telegram_msg("📡 رادار سه‌حالته فعال شد: سیستم پیشرفته / اتحاد هالک / MAX FUSION")
+    logger.info(f"{UNIFIED_ENGINE_NAME} / HULK SENTINEL: independent hunter architecture active.")
+    send_telegram_msg("📡 رادار فوق‌سریع فعال شد: شکارچی مستقل / اتحاد هالک / سیستم پیشرفته / MAX")
     while True:
         if not new_trade_system_enabled():
-            time.sleep(FAST_SCAN_INTERVAL_SECONDS)
-            continue
+            time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
         try:
-            V12_REAL_AUDIT["scans"] += 1
-            V12_REAL_AUDIT["last_scan"] = time.time()
-            v7_compact_learning_memory(force=False)
-            try:
-                v11_rebuild_statistics()
-                if time.time() - float(v11_state.get("last_tuning", 0) or 0) >= V11_TUNING_INTERVAL:
-                    v11_tune_weights()
-            except Exception as e:
-                logger.warning(f"V11 periodic analysis failed: {e}")
-
+            V12_REAL_AUDIT["scans"] += 1; V12_REAL_AUDIT["last_scan"] = time.time()
             if daily_signal_cap_reached():
-                time.sleep(FAST_SCAN_INTERVAL_SECONDS)
-                continue
-
-            tokens = get_real_market_trending_tokens()
+                time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
+            tokens = _elite_get_market_tokens()
             V12_REAL_AUDIT["tokens_seen"] += len(tokens)
-            candidates = []
-
-            # همان فهرست کامل بازار قبلی حفظ می‌شود؛ فقط واکشی جفت‌ها موازی شده
-            # تا موتورهای فعال فرصت‌های خوب را خیلی سریع‌تر بررسی کنند.
-            scan_tokens = []
-            for token_addr in tokens:
-                with state_lock:
-                    if not token_addr or _token_lock_is_open(token_addr):
-                        continue
-                scan_tokens.append(token_addr)
-
-            with ThreadPoolExecutor(max_workers=PAIR_SCAN_WORKERS, thread_name_prefix="PairRadar") as ex:
-                for token_addr, pair in ex.map(_fetch_best_solana_pair, scan_tokens):
-                    if not pair:
-                        continue
+            scan_tokens = [t for t in tokens if t and not _token_lock_is_open(t)]
+            best = None
+            with ThreadPoolExecutor(max_workers=PAIR_SCAN_WORKERS, thread_name_prefix="RocketRadar") as ex:
+                futures = [ex.submit(_evaluate_token_for_active_modes, t) for t in scan_tokens]
+                for fut in __import__('concurrent.futures').as_completed(futures):
                     try:
-                        V12_REAL_AUDIT["pairs_seen"] += 1
-                        fusion = build_consensus_signal(token_addr, pair)
-                        if fusion:
-                            V12_REAL_AUDIT["fusion_candidates"] += 1
-                            V12_REAL_AUDIT["last_candidate"] = time.time()
-                            candidates.append((float(fusion.get("score", 0.0)), token_addr, fusion))
-                    except Exception as token_error:
-                        logger.debug(f"Mode radar evaluation error {token_addr}: {token_error}")
-
-            if candidates:
-                # Never fire the first mediocre candidate.  Pick the strongest
-                # candidate from the current market sweep.
-                candidates.sort(key=lambda x: x[0], reverse=True)
-                _, token_addr, fusion = candidates[0]
-                consensus_last_signal[token_addr] = time.time()
-                fusion["engines"] = list(fusion.get("engines") or [])
+                        token_addr, fusions = fut.result()
+                    except Exception:
+                        continue
+                    for fusion in fusions:
+                        V12_REAL_AUDIT["pairs_seen"] += 1; V12_REAL_AUDIT["fusion_candidates"] += 1; V12_REAL_AUDIT["last_candidate"] = time.time()
+                        rank = (float(fusion.get("score",0)), float(fusion.get("rank_bonus",0)), float(fusion.get("chg",0)), float(fusion.get("vol",0)), float(fusion.get("liq",0)))
+                        if best is None or rank > best[0]:
+                            best = (rank, token_addr, fusion)
+            if best:
+                _, token_addr, fusion = best
+                for key in (token_addr, f"{token_addr}:{(fusion.get('engines') or ['ENGINE'])[0]}"):
+                    consensus_last_signal[key] = time.time()
                 SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
-
         except Exception as e:
-            V12_REAL_AUDIT["last_error"] = str(e)
-            logger.error(f"⚠️ خطای رادار سه‌حالته: {e}")
+            V12_REAL_AUDIT["last_error"] = str(e); logger.error(f"⚠️ Rocket radar error: {e}")
         time.sleep(FAST_SCAN_INTERVAL_SECONDS)
 
+
+# Start the discovery worker once. It only accelerates market observation;
+# all existing signal gates and UI controls remain authoritative.
+try:
+    _elite_market_refresh_thread = Thread(target=_elite_market_refresh_loop, name="EliteDiscovery", daemon=True)
+    _elite_market_refresh_thread.start()
+except Exception as e:
+    logger.warning(f"Elite discovery worker startup failed: {e}")
 
 web_app = Flask(__name__)
 
