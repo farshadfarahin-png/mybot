@@ -2657,6 +2657,12 @@ async def _tg_bg(fn, *args, **kwargs):
 # Real scanner observability. Counters describe actual pipeline
 # decisions only; no synthetic signals/trades are generated.
 # ==========================================================
+# ==========================================================
+# BUILD MARKER — V18 DIAG FIX
+# Single-source Analysis candidate accounting + clean audit consistency.
+# ==========================================================
+BOT_BUILD_VERSION = "V18-DIAG-FIX-2026-08-17"
+
 V12_REAL_AUDIT = {
     "scans": 0,
     "tokens_seen": 0,
@@ -2737,6 +2743,11 @@ def _analysis_diag(action=None, reason=None, token_addr=""):
         a=V13_SIGNAL_DIAGNOSTICS["analysis"]
         if action in ("scanned","data_ready","warmup_checked","full_structure_checked","support_setups","breakout_setups","continuation_setups","candidates","selected","submit_called","worker_started","blocked_duplicate","blocked_daily_cap","blocked_circuit","blocked_cooldown","execution_started","submitted","real_buy_success","real_buy_failed","channel_sent","channel_failed","rejected"):
             a[action]=a.get(action,0)+1
+            # V18 FIX: Analysis candidate count has ONE source of truth.
+            # Do not increment V12_REAL_AUDIT from outer scanner loops.
+            if action == "candidates":
+                V12_REAL_AUDIT["analysis_candidates"] += 1
+                V12_REAL_AUDIT["last_candidate"] = time.time()
         if action=="reject":
             a["rejected"]+=1
             if reason:
@@ -3714,7 +3725,6 @@ def _evaluate_token_for_active_modes(token_addr):
             analysis = _analysis_engine_candidate(token_addr, pair)
             # Analysis has its own quality rules and must not be blocked by MAX consensus.
             if analysis:
-                V12_REAL_AUDIT["analysis_candidates"] += 1
                 analysis["force_independent"] = True
                 analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
                 results.append(analysis)
@@ -3735,7 +3745,6 @@ def _evaluate_token_for_active_modes(token_addr):
         if "Analysis" in active:
             analysis = _analysis_engine_candidate(token_addr, pair)
             if analysis:
-                V12_REAL_AUDIT["analysis_candidates"] += 1
                 analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
                 results.append(analysis)
         if not _candidate_prefilter(pair):
@@ -4743,7 +4752,7 @@ def start_telegram_bot():
                     return f"{sec//3600} ساعت"
 
                 msg = (
-                    "🩺 **REAL SIGNAL AUDIT — V12**\n\n"
+                    f"🩺 **REAL SIGNAL AUDIT — V12 / {BOT_BUILD_VERSION}**\n\n"
                     f"🔄 آخرین اسکن: `{ago(h['last_scan'])} پیش`\n"
                     f"🔎 آخرین کاندیدای Fusion: `{ago(h['last_candidate'])} پیش`\n"
                     f"📡 آخرین سیگنال صادرشده: `{ago(h['last_signal'])} پیش`\n\n"
