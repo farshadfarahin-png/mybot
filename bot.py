@@ -66,15 +66,7 @@ VIP_PRICE_USDC = 50.0  # قیمت ثابت اشتراک ۳۰ روزه: 50 USDC
 COPY_TRADING_FEE_PERCENT = 1.0  # کارمزد سرویس کپی‌ترید؛ از بودجه همان معامله کاربر محاسبه می‌شود.
 COPY_DEFAULT_ASSET = "USDC"
 UNIFIED_ENGINE_NAME = "🤖⚡ هالک AI — موتور متحد بازار"
-BOT_BUILD_VERSION = "V24-CLEAN-SIGNAL-CORE-2026-08-17"
-
-# V24 explicit pipeline counters (initialized without replacing legacy audit fields).
-for _k in (
-    "analysis_candidates", "analysis_selected", "analysis_submit_attempted",
-    "analysis_submit_called", "analysis_submit_failed", "analysis_worker_exception",
-    "analysis_execution_success", "analysis_execution_failed"
-):
-    V12_REAL_AUDIT.setdefault(_k, 0)
+BOT_BUILD_VERSION = "V25-RENDER-STARTUP-FIX-2026-08-17"
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -2684,6 +2676,15 @@ V12_REAL_AUDIT = {
     "last_signal": 0.0,
     "last_error": "",
 }
+
+# V25 FIX: add extended counters only after the base audit dictionary exists.
+for _k in (
+    "analysis_selected", "analysis_submit_attempted",
+    "analysis_submit_called", "analysis_submit_failed", "analysis_worker_exception",
+    "analysis_execution_success", "analysis_execution_failed"
+):
+    V12_REAL_AUDIT.setdefault(_k, 0)
+
 
 V13_SIGNAL_DIAGNOSTICS = {
     "total": 0,
