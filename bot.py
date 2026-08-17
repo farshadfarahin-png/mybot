@@ -48,6 +48,7 @@ http_session.mount("http://", adapter)
 
 # کارهای سنگین بازار از اسکنر جدا می‌شوند تا Telegram سریع بماند.
 SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="SignalExec")
+ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisExec")
 SIGNAL_EMIT_LOCK = Lock()
 
 # تنظیمات کلیدی محیطی و کانال انتشار سیگنال
@@ -65,6 +66,7 @@ VIP_PRICE_USDC = 50.0  # قیمت ثابت اشتراک ۳۰ روزه: 50 USDC
 COPY_TRADING_FEE_PERCENT = 1.0  # کارمزد سرویس کپی‌ترید؛ از بودجه همان معامله کاربر محاسبه می‌شود.
 COPY_DEFAULT_ASSET = "USDC"
 UNIFIED_ENGINE_NAME = "🤖⚡ هالک AI — موتور متحد بازار"
+BOT_BUILD_VERSION = "V22-FINAL-PIPELINE-AUDIT-2026-08-17"
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -1783,15 +1785,16 @@ def check_positions_loop():
 
                     # اگر فروش ناموفق بود پوزیشن را حذف نکن؛ در دور بعد دوباره تلاش می‌شود.
                     if success:
-                        tokens_to_close.append(token_addr)
+                        tokens_to_close.append((token_addr, current_price))
 
                 except Exception as inner_e:
                     logger.error(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
 
             if tokens_to_close:
                 with state_lock:
-                    for t_addr in tokens_to_close:
-                        learning_record_exit(t_addr, None, active_positions.get(t_addr, None), price, "POSITION_CLOSED")
+                    for t_addr, exit_price in tokens_to_close:
+                        pos_snapshot = active_positions.get(t_addr)
+                        learning_record_exit(t_addr, pos_snapshot, exit_price, "POSITION_CLOSED")
                         active_positions.pop(t_addr, None)
                         # قفل همان توکن فقط پس از فروش کامل آزاد می‌شود.
                         _mark_token_closed(t_addr)
@@ -2657,12 +2660,6 @@ async def _tg_bg(fn, *args, **kwargs):
 # Real scanner observability. Counters describe actual pipeline
 # decisions only; no synthetic signals/trades are generated.
 # ==========================================================
-# ==========================================================
-# BUILD MARKER — V18 DIAG FIX
-# Single-source Analysis candidate accounting + clean audit consistency.
-# ==========================================================
-BOT_BUILD_VERSION = "V18-DIAG-FIX-2026-08-17"
-
 V12_REAL_AUDIT = {
     "scans": 0,
     "tokens_seen": 0,
@@ -2713,6 +2710,7 @@ V13_SIGNAL_DIAGNOSTICS = {
         "real_buy_failed": 0,
         "channel_sent": 0,
         "channel_failed": 0,
+        "worker_failed": 0,
         "rejected": 0,
         "reasons": {},
         "last_reason": "",
@@ -2743,11 +2741,6 @@ def _analysis_diag(action=None, reason=None, token_addr=""):
         a=V13_SIGNAL_DIAGNOSTICS["analysis"]
         if action in ("scanned","data_ready","warmup_checked","full_structure_checked","support_setups","breakout_setups","continuation_setups","candidates","selected","submit_called","worker_started","blocked_duplicate","blocked_daily_cap","blocked_circuit","blocked_cooldown","execution_started","submitted","real_buy_success","real_buy_failed","channel_sent","channel_failed","rejected"):
             a[action]=a.get(action,0)+1
-            # V18 FIX: Analysis candidate count has ONE source of truth.
-            # Do not increment V12_REAL_AUDIT from outer scanner loops.
-            if action == "candidates":
-                V12_REAL_AUDIT["analysis_candidates"] += 1
-                V12_REAL_AUDIT["last_candidate"] = time.time()
         if action=="reject":
             a["rejected"]+=1
             if reason:
@@ -2755,8 +2748,8 @@ def _analysis_diag(action=None, reason=None, token_addr=""):
                 a["last_reason"]=reason
         if token_addr:
             a["last_token"]=str(token_addr)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.exception("Analysis diagnostic update failed: %s", exc)
 
 def _diag_reject(stage, reason, token_addr=""):
     """Record the exact last blocking point and aggregate every rejection reason."""
@@ -3684,6 +3677,7 @@ def _analysis_engine_candidate(token_addr, pair):
         if now - consensus_last_signal.get(f"{token_addr}:Analysis", 0) < CONSENSUS_COOLDOWN_SECONDS:
             _diag_reject("ANALYSIS", "ANALYSIS_COOLDOWN", token_addr)
             return None
+        V12_REAL_AUDIT["analysis_candidates"] += 1
         _analysis_diag("candidates", token_addr=token_addr)
         return {
             "score": float(score), "strength": float(score),
@@ -3714,167 +3708,250 @@ def _active_independent_engine_names():
     return active
 
 
-def _evaluate_token_for_active_modes(token_addr):
-    token_addr, pairs = _fetch_best_solana_pair(token_addr)
-    if not pairs:
-        return token_addr, []
-    results = []
-    if MAX_FUSION_ENABLED:
-        # Analysis is independent and scans every fetched pair before the generic prefilter.
-        for pair in pairs:
-            analysis = _analysis_engine_candidate(token_addr, pair)
-            # Analysis has its own quality rules and must not be blocked by MAX consensus.
-            if analysis:
-                analysis["force_independent"] = True
-                analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
-                results.append(analysis)
-            if not _candidate_prefilter(pair):
-                continue
-            fusion = build_consensus_signal(token_addr, pair)
-            if fusion:
-                fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
-                fusion["rank_score"] = float(fusion.get("score", 0)) + float(fusion.get("rank_bonus", 0))
-                results.append(fusion)
-        return token_addr, results
+def _candidate_rank_tuple(item):
+    """Selection-only rank. Never changes the candidate's actual quality score."""
+    _, c = item
+    return (
+        float(c.get("rank_score", c.get("score", 0.0)) or 0.0),
+        float(c.get("score", 0.0) or 0.0),
+        float(c.get("chg", 0.0) or 0.0),
+        float(c.get("vol", 0.0) or 0.0),
+        float(c.get("liq", 0.0) or 0.0),
+    )
 
-    # Non-MAX: Advanced and Hulk are separate lanes. Each enabled sub-engine
-    # hunts independently; there is no cross-group vote or score borrowing.
+
+def _evaluate_token_for_active_modes(token_addr):
+    """Evaluate one token into two isolated lanes: Analysis and Fusion.
+
+    Contract:
+      - Analysis never passes through the Fusion prefilter.
+      - Fusion never enters the Analysis candidate pool.
+      - The return object has explicit lane names, so a later stage cannot
+        accidentally reinterpret an Analysis candidate as a Fusion candidate.
+    """
+    token_addr, pairs = _fetch_best_solana_pair(token_addr)
+    lanes = {"analysis": [], "fusion": []}
+    if not pairs:
+        return token_addr, lanes
+
     active = _active_independent_engine_names()
+    analysis_enabled = "Analysis" in active and ANALYSIS_ENGINE_ENABLED
+
     for pair in pairs:
-        # Analysis is a separate lane and never requires another engine's vote.
-        if "Analysis" in active:
-            analysis = _analysis_engine_candidate(token_addr, pair)
-            if analysis:
-                analysis["rank_score"] = float(analysis.get("score", 0)) + float(analysis.get("rank_bonus", 0))
-                results.append(analysis)
+        # ------------------------------ ANALYSIS LANE -------------------
+        if analysis_enabled:
+            try:
+                analysis = _analysis_engine_candidate(token_addr, pair)
+                if analysis:
+                    analysis["force_independent"] = True
+                    analysis["hunter_group"] = "ANALYSIS"
+                    analysis["rank_score"] = float(analysis.get("score", 0.0) or 0.0) + float(analysis.get("rank_bonus", 0.0) or 0.0)
+                    lanes["analysis"].append((token_addr, analysis))
+            except Exception as exc:
+                _diag_reject("ANALYSIS", f"ANALYSIS_EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
+                logger.exception("Analysis evaluator failed for %s", token_addr)
+
+        # ------------------------------ FUSION LANE ---------------------
         if not _candidate_prefilter(pair):
             continue
-        for engine_name in active:
-            if engine_name == "Analysis":
-                continue
-            is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
-            if is_adv and not ADVANCED_AI_ENABLED:
-                continue
-            if (not is_adv) and not SYNCHRONIZED_MODE:
-                continue
-            fusion = _independent_engine_candidate(token_addr, pair, engine_name)
-            if fusion and fusion_quality_gate(fusion):
-                fusion["rank_score"] = float(fusion.get("score", 0)) + float(fusion.get("rank_bonus", 0))
-                results.append(fusion)
-    return token_addr, results
 
-def _analysis_submit_worker(token_addr, fusion):
+        try:
+            if MAX_FUSION_ENABLED:
+                fusion = build_consensus_signal(token_addr, pair)
+                if fusion:
+                    fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
+                    fusion["rank_score"] = float(fusion.get("score", 0.0) or 0.0) + float(fusion.get("rank_bonus", 0.0) or 0.0)
+                    lanes["fusion"].append((token_addr, fusion))
+            else:
+                # Non-MAX mode: each enabled engine remains an independent lane.
+                for engine_name in active:
+                    if engine_name == "Analysis":
+                        continue
+                    is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
+                    if is_adv and not ADVANCED_AI_ENABLED:
+                        continue
+                    if (not is_adv) and not SYNCHRONIZED_MODE:
+                        continue
+                    fusion = _independent_engine_candidate(token_addr, pair, engine_name)
+                    if fusion and fusion_quality_gate(fusion):
+                        fusion["rank_score"] = float(fusion.get("score", 0.0) or 0.0) + float(fusion.get("rank_bonus", 0.0) or 0.0)
+                        lanes["fusion"].append((token_addr, fusion))
+        except Exception as exc:
+            _diag_reject("FUSION", f"FUSION_EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
+            logger.exception("Fusion evaluator failed for %s", token_addr)
+
+    return token_addr, lanes
+
+
+def _select_best_analysis(candidates):
+    if not candidates:
+        return None
+    return max(candidates, key=_candidate_rank_tuple)
+
+
+def _select_fusion_candidates(candidates):
+    if not candidates:
+        return []
+    if MAX_FUSION_ENABLED:
+        return [max(candidates, key=_candidate_rank_tuple)]
+
+    # One best candidate per independent engine/group. This prevents one engine
+    # from suppressing another, while still preventing duplicate emission from
+    # the same engine lane in one sweep.
+    best_by_lane = {}
+    for item in candidates:
+        _, candidate = item
+        engine = (candidate.get("engines") or candidate.get("votes") or ["ENGINE"])[0]
+        group = candidate.get("hunter_group", "ENGINE")
+        lane = (group, engine)
+        old = best_by_lane.get(lane)
+        if old is None or _candidate_rank_tuple(item) > _candidate_rank_tuple(old):
+            best_by_lane[lane] = item
+    return sorted(best_by_lane.values(), key=_candidate_rank_tuple, reverse=True)
+
+
+def _analysis_submit_worker(token_addr, candidate):
+    """Short-lived worker. All exceptions become visible in diagnostics."""
     _analysis_diag("worker_started", token_addr=token_addr)
     _analysis_diag("execution_started", token_addr=token_addr)
     try:
-        return send_fused_signal(token_addr, fusion)
-    except Exception as e:
-        _diag_reject("EXECUTION", f"ANALYSIS_WORKER_EXCEPTION:{e}", token_addr)
-        return False, f"ANALYSIS_WORKER_EXCEPTION:{e}"
+        ok, result = send_fused_signal(token_addr, candidate)
+        if not ok:
+            V13_SIGNAL_DIAGNOSTICS["analysis"]["worker_failed"] += 1
+            _diag_reject("EXECUTION", str(result or "ANALYSIS_EXECUTION_REJECTED"), token_addr)
+        return ok, result
+    except Exception as exc:
+        _diag_reject("EXECUTION", f"ANALYSIS_WORKER_EXCEPTION:{type(exc).__name__}:{exc}", token_addr)
+        logger.exception("Analysis execution worker failed for %s", token_addr)
+        return False, f"ANALYSIS_WORKER_EXCEPTION:{exc}"
+
+
+def _submit_analysis_selected(selected):
+    """Submit exactly one selected Analysis candidate; surface worker exceptions."""
+    if selected is None:
+        _diag_reject("ANALYSIS", "NO_ANALYSIS_SELECTED")
+        return False
+    token_addr, candidate = selected
+    _analysis_diag("selected", token_addr=token_addr)
+    try:
+        future = ANALYSIS_EXECUTOR.submit(_analysis_submit_worker, token_addr, candidate)
+        _analysis_diag("submit_called", token_addr=token_addr)
+
+        def _analysis_future_done(done_future, addr=token_addr):
+            try:
+                result = done_future.result()
+                if isinstance(result, tuple) and result and result[0] is False:
+                    V13_SIGNAL_DIAGNOSTICS["analysis"]["worker_failed"] = V13_SIGNAL_DIAGNOSTICS["analysis"].get("worker_failed", 0) + 1
+            except Exception as exc:
+                _diag_reject("EXECUTION", f"ANALYSIS_FUTURE_EXCEPTION:{type(exc).__name__}:{exc}", addr)
+                logger.exception("Analysis future failed for %s", addr)
+
+        future.add_done_callback(_analysis_future_done)
+        return True
+    except Exception as exc:
+        _diag_reject("EXECUTION", f"ANALYSIS_SUBMIT_EXCEPTION:{type(exc).__name__}:{exc}", token_addr)
+        logger.exception("Analysis submit failed for %s", token_addr)
+        return False
+
 
 def unified_market_scanner_loop(app):
+    """Single authoritative live scanner.
+
+    Sweep lifecycle:
+        discovery -> pair fetch -> independent evaluation -> independent selection
+        -> submit -> execution.
+
+    The scanner never mixes Analysis and Fusion candidate containers. This is the
+    key architectural invariant that the previous versions violated.
+    """
     global _TRUE_HUNTER_CURSOR
-    logger.info(f"{UNIFIED_ENGINE_NAME} / V17 TRUE HUNTER: مستقل + MAX unified attack فعال شد.")
-    send_telegram_msg("🚀 رادار V17 TRUE HUNTER فعال شد: شکار مستقل + MAX Attack")
+    logger.info("%s / %s: rebuilt signal core started", UNIFIED_ENGINE_NAME, BOT_BUILD_VERSION)
+    logger.info("PIPELINE INVARIANT: ANALYSIS -> SELECT -> SUBMIT -> WORKER is independent of FUSION")
+    send_telegram_msg(f"🚀 رادار {BOT_BUILD_VERSION} فعال شد")
+
     while True:
         if not new_trade_system_enabled():
             _diag_reject("SYSTEM", "TRADE_SYSTEM_DISABLED")
-            time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
+            time.sleep(FAST_SCAN_INTERVAL_SECONDS)
+            continue
+
         try:
-            V12_REAL_AUDIT["scans"] += 1; V12_REAL_AUDIT["last_scan"] = time.time()
+            V12_REAL_AUDIT["scans"] += 1
+            V12_REAL_AUDIT["last_scan"] = time.time()
+
             if daily_signal_cap_reached():
                 _diag_reject("EXECUTION", "DAILY_SIGNAL_CAP_REACHED")
-                time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
+                time.sleep(FAST_SCAN_INTERVAL_SECONDS)
+                continue
+
             tokens = _elite_get_market_tokens()
             if not tokens:
-                time.sleep(FAST_SCAN_INTERVAL_SECONDS); continue
+                _diag_reject("DISCOVERY", "NO_MARKET_TOKENS")
+                time.sleep(FAST_SCAN_INTERVAL_SECONDS)
+                continue
 
-            # Rotating micro-batch: never wait for the whole universe.
             with _TRUE_HUNTER_CURSOR_LOCK:
                 start_i = _TRUE_HUNTER_CURSOR % len(tokens)
                 batch_n = min(TRUE_HUNTER_BATCH_SIZE, len(tokens))
                 if start_i + batch_n <= len(tokens):
                     scan_tokens = tokens[start_i:start_i + batch_n]
                 else:
-                    scan_tokens = tokens[start_i:] + tokens[:(start_i + batch_n) % len(tokens)]
+                    wrap = (start_i + batch_n) % len(tokens)
+                    scan_tokens = tokens[start_i:] + tokens[:wrap]
                 _TRUE_HUNTER_CURSOR = (start_i + batch_n) % len(tokens)
 
             V12_REAL_AUDIT["tokens_seen"] += len(scan_tokens)
-            best_by_lane = {}
-            # Analysis must have its own selection slot. Do not derive it from
-            # MAX/Fusion and do not rely on a second, undefined candidate pool.
-            analysis_best = None
-            with ThreadPoolExecutor(max_workers=PAIR_SCAN_WORKERS, thread_name_prefix="RocketHunter") as ex:
-                futures = [ex.submit(_evaluate_token_for_active_modes, t) for t in scan_tokens if t and not _token_lock_is_open(t)]
-                for fut in __import__('concurrent.futures').as_completed(futures):
+            analysis_candidates = []
+            fusion_candidates = []
+
+            # One batch executor per sweep; every Future is consumed and its
+            # exception is surfaced, following the Future contract in Python's
+            # concurrent.futures implementation.
+            with ThreadPoolExecutor(max_workers=PAIR_SCAN_WORKERS, thread_name_prefix="RadarEval") as ex:
+                future_to_token = {
+                    ex.submit(_evaluate_token_for_active_modes, token): token
+                    for token in scan_tokens
+                    if token and not _token_lock_is_open(token)
+                }
+                for future in __import__('concurrent.futures').as_completed(future_to_token):
+                    token = future_to_token[future]
                     try:
-                        token_addr, fusions = fut.result()
-                    except Exception as e:
-                        _diag_reject("SYSTEM", "HUNTER_WORKER_EXCEPTION")
-                        logger.debug(f"Hunter worker failed: {e}")
+                        token_addr, lanes = future.result()
+                    except Exception as exc:
+                        _diag_reject("SYSTEM", f"RADAR_FUTURE_EXCEPTION:{type(exc).__name__}", token)
+                        logger.exception("Radar future failed for %s", token)
                         continue
-                    for fusion in fusions:
+
+                    for item in lanes.get("analysis", []):
+                        analysis_candidates.append(item)
                         V12_REAL_AUDIT["pairs_seen"] += 1
+                        V12_REAL_AUDIT["last_candidate"] = time.time()
+                    for item in lanes.get("fusion", []):
+                        fusion_candidates.append(item)
                         V12_REAL_AUDIT["fusion_candidates"] += 1
                         V12_REAL_AUDIT["last_candidate"] = time.time()
-                        lane = "ANALYSIS" if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS" else ("MAX" if MAX_FUSION_ENABLED else str((fusion.get("hunter_group", "UNKNOWN"), (fusion.get("engines") or ["ENGINE"])[0])))
-                        rank = (float(fusion.get("rank_score", fusion.get("score", 0))),
-                                float(fusion.get("score", 0)),
-                                float(fusion.get("chg", 0)),
-                                float(fusion.get("vol", 0)),
-                                float(fusion.get("liq", 0)))
-                        current = best_by_lane.get(lane)
-                        if current is None or rank > current[0]:
-                            best_by_lane[lane] = (rank, token_addr, fusion)
-                        if lane == "ANALYSIS":
-                            # Keep the strongest Analysis candidate separately.
-                            # This guarantees Analysis cannot disappear because the
-                            # MAX lane was selected/rebuilt independently.
-                            if analysis_best is None or rank > analysis_best[0]:
-                                analysis_best = (rank, token_addr, fusion)
 
-            if analysis_best is not None:
-                _analysis_diag("selected", token_addr=analysis_best[1])
-            else:
+            # ------------------------------ ANALYSIS ---------------------
+            # HARD INVARIANT: Fusion=0 must never suppress an Analysis candidate.
+            selected_analysis = _select_best_analysis(analysis_candidates)
+            if selected_analysis is None:
                 _diag_reject("ANALYSIS", "NO_ANALYSIS_CANDIDATE_SELECTED")
+            else:
+                _submit_analysis_selected(selected_analysis)
 
-            if not best_by_lane:
-                _diag_reject("SYSTEM", "NO_CANDIDATE_IN_BATCH")
-            # V17 FIX: independent mode really emits independently.
-            # Each active engine/group gets its own best candidate. No cross-engine
-            # vote is manufactured and no stronger lane suppresses another lane.
-            if best_by_lane:
-                if MAX_FUSION_ENABLED:
-                    # Analysis is always independent, even while MAX is ON.
-                    # It is selected from the dedicated Analysis slot above;
-                    # there is deliberately no Fusion vote requirement here.
-                    if analysis_best:
-                        _, token_addr_a, fusion_a = analysis_best
-                        _analysis_diag("submit_called", token_addr=token_addr_a)
-                        try:
-                            SIGNAL_EXECUTOR.submit(_analysis_submit_worker, token_addr_a, fusion_a)
-                        except Exception as e:
-                            _diag_reject("ANALYSIS", f"SUBMIT_EXCEPTION:{e}", token_addr_a)
-                    else:
-                        _diag_reject("ANALYSIS", "NO_ANALYSIS_SUBMIT_CANDIDATE")
-                    max_candidates = {k: v for k, v in best_by_lane.items() if k != "ANALYSIS"}
-                    if max_candidates:
-                        selected = max(max_candidates.values(), key=lambda x: x[0])
-                        _, token_addr, fusion = selected
-                        SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
-                else:
-                    # In non-MAX mode every independent engine candidate is eligible.
-                    # De-duplicate only the exact same token+engine pair.
-                    emitted = set()
-                    ordered = sorted(best_by_lane.values(), key=lambda x: x[0], reverse=True)
-                    for _, token_addr, fusion in ordered:
-                        engine_key = (fusion.get("hunter_group", "ENGINE"), (fusion.get("engines") or ["ENGINE"])[0])
-                        if engine_key in emitted:
-                            continue
-                        emitted.add(engine_key)
-                        SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, fusion)
-        except Exception as e:
-            V12_REAL_AUDIT["last_error"] = str(e); logger.error(f"⚠️ TRUE HUNTER radar error: {e}")
+            # ------------------------------ FUSION -----------------------
+            for item in _select_fusion_candidates(fusion_candidates):
+                token_addr, candidate = item
+                try:
+                    SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, candidate)
+                except Exception as exc:
+                    _diag_reject("EXECUTION", f"FUSION_SUBMIT_EXCEPTION:{type(exc).__name__}:{exc}", token_addr)
+                    logger.exception("Fusion submit failed for %s", token_addr)
+
+        except Exception as exc:
+            V12_REAL_AUDIT["last_error"] = str(exc)
+            logger.exception("Rebuilt signal radar error")
+
         time.sleep(FAST_SCAN_INTERVAL_SECONDS)
 
 
@@ -4752,7 +4829,7 @@ def start_telegram_bot():
                     return f"{sec//3600} ساعت"
 
                 msg = (
-                    f"🩺 **REAL SIGNAL AUDIT — V12 / {BOT_BUILD_VERSION}**\n\n"
+                    "🩺 **REAL SIGNAL AUDIT — V12**\n\n"
                     f"🔄 آخرین اسکن: `{ago(h['last_scan'])} پیش`\n"
                     f"🔎 آخرین کاندیدای Fusion: `{ago(h['last_candidate'])} پیش`\n"
                     f"📡 آخرین سیگنال صادرشده: `{ago(h['last_signal'])} پیش`\n\n"
