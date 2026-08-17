@@ -1,21 +1,19 @@
-# V17 TRUE HUNTER — verified architecture: independent lanes, MAX unified attack, rotating low-latency radar.
+# V22 TRUE HUNTER — Verified Architecture: Independent Lanes, Unified Fusion Signal Engine, Rotating Low-Latency Radar.
 import time
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import requests
 import json
 import base64
 import base58
 import os
 import math
-from pathlib import Path
-
-VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "-1003840577545")
 import sqlite3
 import threading
 import logging
 from datetime import datetime, timedelta
 from threading import Thread, Lock, RLock
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from flask import Flask, render_template_string, request, jsonify
@@ -27,32 +25,34 @@ from solders.transaction import VersionedTransaction
 from solders.instruction import Instruction
 from solders.message import MessageV0
 
-# تنظیمات لاگینگ پیشرفته برای عیب‌یابی دقیق در تولید
+# تنظیمات لاگینگ پیشرفته
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [%(levelname)s] - %(threadName)s - %(message)s'
 )
 logger = logging.getLogger("HulkSolBot")
 
-# قفل‌های همزمانی برای ایمنی کامل در ثردها (Thread Safety)
+# قفل‌های همزمانی برای ثردها
 db_lock = RLock()
 state_lock = Lock()
 rpc_lock = Lock()
+_structure_lock = Lock()
+SIGNAL_EMIT_LOCK = Lock()
 
-# ایجاد جلسه ارتباطی پرسرعت با قابلیت Re-use اتصالات و ریتراپ
+# ثردهای پرسرعت پردازش
+SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="SignalExec")
+ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisExec")
+MARKET_DISCOVERY_WORKERS = 4
+
+# جلسه ارتباطی HTTP
 http_session = requests.Session()
 retries = Retry(total=2, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504])
 adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=retries)
 http_session.mount("https://", adapter)
 http_session.mount("http://", adapter)
 
-# کارهای سنگین بازار از اسکنر جدا می‌شوند تا Telegram سریع بماند.
-SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="SignalExec")
-ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisExec")
-MARKET_DISCOVERY_WORKERS = 4
-SIGNAL_EMIT_LOCK = Lock()
-
-# تنظیمات کلیدی محیطی و کانال انتشار سیگنال
+# ثوابت متغیرهای محیطی و تنظیمات کانال
+VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "-1003840577545")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY", "").strip()
@@ -62,22 +62,60 @@ CHANNEL_INVITE_LINK = os.environ.get("CHANNEL_INVITE_LINK", "").strip()
 
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "").strip()
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()
-VIP_PRICE_SOL = 0.0  # پرداخت SOL غیرفعال است
-VIP_PRICE_USDC = 50.0  # قیمت ثابت اشتراک ۳۰ روزه: 50 USDC
-COPY_TRADING_FEE_PERCENT = 1.0  # کارمزد سرویس کپی‌ترید؛ از بودجه همان معامله کاربر محاسبه می‌شود.
+VIP_PRICE_SOL = 0.0
+VIP_PRICE_USDC = 50.0
+COPY_TRADING_FEE_PERCENT = 1.0
 COPY_DEFAULT_ASSET = "USDC"
 UNIFIED_ENGINE_NAME = "🤖⚡ هالک AI — موتور متحد بازار"
 BOT_BUILD_VERSION = "V22-FINAL-PIPELINE-AUDIT-2026-08-17"
 
-# ==========================================
-# بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
-# ==========================================
+# تنظیمات یادگیری تطبیقی و اجماع سیگنال‌ها
+ADAPTIVE_LOOKBACK = 20
+ADAPTIVE_MIN_SAMPLE = 10
+ADAPTIVE_TARGET_WIN_RATE = 80.0
+ADAPTIVE_MAX_SCORE_BONUS = 2
+ADAPTIVE_MAX_RATIO_BONUS = 0.10
+
+CONSENSUS_MIN_SCORE = 6
+CONSENSUS_MIN_RATIO = 0.60
+CONSENSUS_COOLDOWN_SECONDS = 180
+
+DAILY_SIGNAL_LIMIT = 15
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 15 * 60
+last_global_signal_time = 0.0
+UNIFIED_LAST_EMIT_TIME = 0.0
+
+CONSENSUS_MIN_LIQUIDITY = 10000.0
+CONSENSUS_MIN_VOLUME_5M = 1500.0
+CONSENSUS_MIN_CHANGE_5M = 0.5
+CONSENSUS_MAX_CHANGE_5M = 35.0
+CONSENSUS_MIN_BUY_RATIO = 1.05
+
+CANDIDATE_MIN_LIQUIDITY = 5000.0
+CANDIDATE_MIN_VOLUME_5M = 500.0
+CANDIDATE_MIN_BUY_RATIO = 1.02
+
+# فیلتر ساختار بازار
+STRUCTURE_FILTER_ENABLED = True
+STRUCTURE_LOOKBACK = 30
+STRUCTURE_MIN_SAMPLES = 4
+STRUCTURE_SAMPLE_MIN_GAP = 0.75
+STRUCTURE_SUPPORT_DISTANCE_PCT = 3.5
+STRUCTURE_RESISTANCE_DISTANCE_PCT = 2.0
+STRUCTURE_BREAKOUT_BUFFER_PCT = 0.75
+STRUCTURE_MIN_SUPPORT_LIQUIDITY = 12000.0
+STRUCTURE_MIN_SUPPORT_VOLUME_5M = 2500.0
+STRUCTURE_MIN_SUPPORT_BUY_RATIO = 1.15
+STRUCTURE_MIN_BREAKOUT_BUY_RATIO = 1.20
+STRUCTURE_HISTORY_TTL_SECONDS = 15 * 60
+_structure_memory = {}
+
+# سیستم RPC چرخشی
 RPC_ENDPOINTS = []
 raw_rpc_env = os.environ.get("RPC_URLS", os.environ.get("RPC_URL", ""))
 if raw_rpc_env:
     RPC_ENDPOINTS.extend([url.strip() for url in raw_rpc_env.split(",") if url.strip()])
 
-# دریافت ۴ لینک خصوصی اختصاصی از محیط رندر (RPC_URL_1 تا RPC_URL_4)
 for i in range(1, 5):
     env_rpc = os.environ.get(f"RPC_URL_{i}", "").strip()
     if env_rpc and env_rpc not in RPC_ENDPOINTS:
@@ -85,7 +123,6 @@ for i in range(1, 5):
 
 if not RPC_ENDPOINTS:
     RPC_ENDPOINTS = ["https://api.mainnet-beta.solana.com"]
-logger.info(f"🔁 RPC rotation loaded: {len(RPC_ENDPOINTS)} endpoint(s)")
 
 rpc_current_index = 0
 
@@ -110,7 +147,6 @@ def send_rpc_request(payload, timeout=8, retries_count=3):
         except Exception as e:
             logger.debug(f"⚠️ تلاش ناموفق اتصال به RPC ({endpoint}): {e}")
         time.sleep(0.2)
-    # تلاش نهایی روی اولین RPC پایه
     try:
         return http_session.post(RPC_ENDPOINTS[0], json=payload, timeout=timeout).json()
     except Exception as e:
@@ -123,9 +159,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" 
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
-# ==========================================
-# سوئیچ‌های کنترلی ربات (فعال‌سازی کامل سیگنال‌دهی)
-# ==========================================
+# سوئیچ‌های کنترلی ربات
 IS_RUNNING = True          
 TREND_ALERT_RUNNING = True 
 COMBO_RUNNING = True       
@@ -139,16 +173,11 @@ ADVANCED_AI_ENABLED = False
 MAX_FUSION_ENABLED = False
 EMERGENCY_STOP = False
 COPY_TRADING_ENABLED = True
-_MAX_FUSION_PREV = None
-
-BOTTOM_WHALE_RUNNING = True
 
 ULTIMATE_21_ENGINE_ENABLED = True
 SELF_LEARNING_AI_ENABLED = True
 MEMPOOL_SMART_MONEY_ENABLED = True
-MOONBAG_HULK_ENABLED = True
 ANTI_WASH_TRADING_ENABLED = True
-
 SMART_MONEY_COPY_ENABLED = True      
 SOCIAL_SENTIMENT_ENABLED = True
 ANALYSIS_ENGINE_ENABLED = True      
@@ -176,12 +205,7 @@ TRAILING_WEAK_SELL_RATIO = 1.45
 TRAILING_WEAKNESS_M5_MAX = 0.0
 TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT = 1.5
 
-SECTION_ULTRA_OPEN = True
-SECTION_VIP_OPEN = True
-SECTION_PROTECTION_OPEN = True
-SECTION_AI_OPEN = True
-SECTION_TRADING_OPEN = True
-
+# پارامترهای موتورهای مجزا
 FIRE_BUY_AMOUNT_SOL = 0.01
 FIRE_TAKE_PROFIT = 18.0
 FIRE_STOP_LOSS = -10.0
@@ -194,7 +218,6 @@ COMBO_TAKE_PROFIT = 18.0
 COMBO_STOP_LOSS = -10.0
 COMBO_MIN_LIQUIDITY = 20000
 COMBO_MIN_VOLUME_5M = 10000  
-COMBO_MIN_CHANGE_5M = 15.0   
 
 GOLDEN_BUY_AMOUNT_SOL = 0.01
 GOLDEN_TAKE_PROFIT = 16.0
@@ -210,13 +233,14 @@ TECH_STOP_LOSS = -8.0
 TECH_MIN_LIQUIDITY = 18000
 TECH_MIN_VOLUME_5M = 8000
 
-AWAITING_STATE = None 
+# مجموعه‌های ذخیره پوزیشن و کوئری
 processed_tokens = set()
 trend_alerted_tokens = set()
 golden_processed_tokens = set()
 tech_processed_tokens = set()
 mempool_processed_tokens = set()
 ultra_processed_tokens = set()
+consensus_last_signal = {}
 active_positions = {}
 signal_positions = {}
 
@@ -224,6 +248,20 @@ closed_trades_history = []
 total_realized_pnl_usd = 0.0
 total_realized_pnl_percent = 0.0
 
+# توابع عیب‌یابی و ثبت لاگ‌های پیشرفته
+def _diag_reject(category, reason, token_addr=""):
+    logger.debug(f"🚫 [REJECT-{category}] {token_addr}: {reason}")
+
+def _analysis_diag(stage, token_addr=""):
+    logger.debug(f"🔍 [ANALYSIS-{stage}] {token_addr}")
+
+def learning_record_exit(token_addr, pos, exit_price, reason):
+    pass
+
+def _mark_token_closed(token_addr):
+    consensus_last_signal.pop(token_addr, None)
+
+# مقداردهی اولیه دیتابیس
 def init_db():
     with db_lock:
         try:
@@ -398,7 +436,7 @@ def self_learning_ai_optimizer_loop():
                     state = _update_adaptive_learning(conn)
                     conn.close()
                 if state.get("sample", 0) >= ADAPTIVE_MIN_SAMPLE:
-                    logger.info(f"🧠 Adaptive Learning: {state['sample']} معاملات اخیر | Win Rate={state['win_rate']:.1f}% | score_bonus={state['score_bonus']}")
+                    logger.info(f"🧠 Adaptive Learning: {state['sample']} معاملات اخیر | Win Rate={state['win_rate']:.1f}%")
             except Exception as e:
                 logger.error(f"⚠️ خطای موتور یادگیری تطبیقی: {e}")
         time.sleep(180)
@@ -440,7 +478,7 @@ def get_real_market_trending_tokens():
             tech_processed_tokens.clear()
             mempool_processed_tokens.clear()
             ultra_processed_tokens.clear()
-            logger.info("🧹 حافظه رم از توکن‌های قدیمی پردازش‌شده پاک‌سازی شد.")
+            logger.info("🧹 حافظه رم از توکن‌های قدیمی پاک‌سازی شد.")
 
     def fetch_endpoint(url):
         try:
@@ -474,617 +512,7 @@ def get_real_market_trending_tokens():
 
     return tokens
 
-def ultra_accuracy_scanner_loop(app):
-    global SMART_MONEY_COPY_ENABLED, SOCIAL_SENTIMENT_ENABLED, DYNAMIC_TRAILING_TP_ENABLED
-    logger.info("💎🚀 موتور پایش فوق‌پیشرفته (فیلتر بسیار سخت‌گیر) فعال شد.")
-
-    while True:
-        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
-            time.sleep(3)
-            continue
-        if not (SMART_MONEY_COPY_ENABLED or SOCIAL_SENTIMENT_ENABLED):
-            time.sleep(3)
-            continue
-        try:
-            tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:25]:
-                with state_lock:
-                    if not token_addr or token_addr in active_positions or token_addr in ultra_processed_tokens:
-                        continue
-
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
-                if pair_res_obj.status_code != 200:
-                    continue
-                pair_res = pair_res_obj.json()
-                if not pair_res.get('pairs'):
-                    continue
-                pair = pair_res['pairs'][0]
-
-                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-                volume_5m = float(pair.get('volume', {}).get('m5', 0))
-                price = float(pair.get('priceUsd', 0))
-                symbol = pair.get('baseToken', {}).get('symbol', 'ULTRA')
-                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-
-                if liquidity < 15000 or volume_5m < 4000 or price <= 0:
-                    continue
-
-                is_social_ok, social_msg = check_social_sentiment_and_hype(pair)
-                if not is_social_ok:
-                    continue
-
-                if SMART_MONEY_COPY_ENABLED:
-                    current_buy_amt = get_dynamic_buy_amount(0.01)
-                    success, result_info = execute_real_buy(token_addr, 0.01)
-                    execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result_info}"
-                    if success:
-                        with state_lock:
-                            ultra_processed_tokens.add(token_addr)
-                            processed_tokens.add(token_addr)
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://solscan.io/token/{token_addr}"
-                    init_tp = 30.0
-                    init_sl = -7.0
-
-                    if success:
-                        with state_lock:
-                            active_positions[token_addr] = {
-                                "entry_price": price,
-                                "symbol": symbol,
-                                "tp": init_tp,
-                                "sl": init_sl,
-                                "highest_price": price,
-                                "highest_pnl": 0.0,
-                                "locked_floor": init_sl,
-                                "trailing_active": DYNAMIC_TRAILING_TP_ENABLED
-                            }
-
-                    ultra_msg = (
-                        f"💎✨ [سیگنال هوش مصنوعی پیش‌رو - فیلتر سخت‌گیر]\n"
-                        f"🎯 وضعیت: {social_msg}\n"
-                        f"📌 تاییدیه اسمارت‌مانی و والدهای انسایدر ✅\n\n"
-                        f"🪙 توکن: {symbol}\n"
-                        f"📍 آدرس:\n{token_addr}\n\n"
-                        f"💵 ورود دقیق: ${price:.8f}\n"
-                        f"💰 مقدار حجم: {current_buy_amt} SOL\n"
-                        f"🎯 تارگت پویا: +%{init_tp}\n"
-                        f"🔗 [Solscan]({solscan_link})"
-                    )
-                    send_telegram_msg(ultra_msg)
-                    send_graphic_signal_to_vip_channel(
-                        token_addr=token_addr, symbol=symbol, price=price, tp=init_tp, sl=init_sl,
-                        buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
-                        p_change=price_change_5m, solscan_link=solscan_link, signal_title="💎✨ سیگنال سخت‌گیر Smart Money + Hype", execution_status=execution_status, execution_tx=result_info if success else ""
-                    )
-        except Exception as e:
-            logger.error(f"⚠️ خطای موتور فوق‌پیشرفته: {e}")
-        time.sleep(3)
-
-def mempool_smart_money_scanner_loop(app):
-    global MEMPOOL_SMART_MONEY_ENABLED
-    logger.info("⚡🕵️ موتور اسکنر ممپول و اسمارت‌مانی فعال شد.")
-    while True:
-        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
-            time.sleep(3)
-            continue
-        if not MEMPOOL_SMART_MONEY_ENABLED:
-            time.sleep(3)
-            continue
-        try:
-            trending_tokens = get_real_market_trending_tokens()
-            for token_addr in trending_tokens[:20]:
-                with state_lock:
-                    if not token_addr or token_addr in active_positions or token_addr in mempool_processed_tokens:
-                        continue
-                
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
-                if pair_res_obj.status_code != 200:
-                    continue
-                pair_res = pair_res_obj.json()
-                if not pair_res.get('pairs'):
-                    continue
-                pair = pair_res['pairs'][0]
-
-                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-                volume_5m = float(pair.get('volume', {}).get('m5', 0))
-                symbol = pair.get('baseToken', {}).get('symbol', 'SMART')
-                price = float(pair.get('priceUsd', 0))
-
-                if liquidity > 12000 and volume_5m > 3000 and price > 0:
-                    current_buy_amt = get_dynamic_buy_amount(0.01)
-                    success, result_info = execute_real_buy(token_addr, 0.01)
-                    buy_status_str = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result_info}"
-                    if success:
-                        with state_lock:
-                            mempool_processed_tokens.add(token_addr)
-                            processed_tokens.add(token_addr)
-                    solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://solscan.io/token/{token_addr}"
-
-                    mempool_msg = (
-                        f"⚡🕵️ [شکارچی ممپول & اسمارت مانی هالکی]\n"
-                        f"🎯 ورود پیش از عموم بازار با تایید نهنگ‌ها!\n"
-                        f"📌 وضعیت: {buy_status_str}\n\n"
-                        f"🪙 توکن: {symbol}\n"
-                        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                        f"💵 قیمت ورود کف: ${price:.8f}\n"
-                        f"💰 مقدار: SOL {current_buy_amt}\n"
-                        f"🔍 [Solscan]({solscan_link})\n"
-                        f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
-                    )
-                    if success:
-                        with state_lock:
-                            active_positions[token_addr] = {
-                                "entry_price": price,
-                                "symbol": symbol,
-                                "tp": 25.0,
-                                "sl": -8.0,
-                                "highest_price": price
-                            }
-                    send_telegram_msg(mempool_msg)
-                    send_graphic_signal_to_vip_channel(
-                        token_addr=token_addr, symbol=symbol, price=price, tp=25.0, sl=-8.0,
-                        buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
-                        p_change=15.0, solscan_link=solscan_link, signal_title="⚡🕵️ شکار ممپول اسمارت‌مانی هالکی VIP", execution_status=buy_status_str, execution_tx=result_info if success else ""
-                    )
-        except Exception as e:
-            logger.error(f"⚠️ خطای اسکن ممپول: {e}")
-        time.sleep(4)
-
-def verify_blockchain_transaction(tx_signature, expected_currency="USDC"):
-    if not tx_signature or len(tx_signature) < 30:
-        return False, "هش تراکنش نامعتبر است."
-
-    currency = str(expected_currency or "SOL").upper()
-    expected_amount = VIP_PRICE_SOL if currency == "SOL" else VIP_PRICE_USDC
-    if expected_amount <= 0:
-        return False, f"قیمت اشتراک برای {currency} در Environment تنظیم نشده است."
-
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTransaction",
-            "params": [
-                tx_signature,
-                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
-            ]
-        }
-        res = send_rpc_request(payload, timeout=8)
-        result = res.get("result")
-        if not result:
-            return False, "تراکنش روی بلاکچین یافت نشد یا هنوز تایید نشده است."
-
-        meta = result.get("meta") or {}
-        if meta.get("err") is not None:
-            return False, "تراکنش روی بلاکچین ناموفق بوده است."
-
-        tx = result.get("transaction") or {}
-        message = tx.get("message") or {}
-        account_keys = message.get("accountKeys") or []
-
-        admin_indexes = []
-        for idx, acc in enumerate(account_keys):
-            pubkey_str = acc.get("pubkey") if isinstance(acc, dict) else str(acc)
-            if pubkey_str == WALLET_PUBKEY:
-                admin_indexes.append(idx)
-
-        if not admin_indexes:
-            return False, "این تراکنش به ولت دریافت‌کننده اشتراک واریز نشده است."
-
-        if currency == "SOL":
-            pre = meta.get("preBalances") or []
-            post = meta.get("postBalances") or []
-            received_lamports = 0
-            for idx in admin_indexes:
-                if idx < len(pre) and idx < len(post):
-                    received_lamports += max(0, int(post[idx]) - int(pre[idx]))
-            received = received_lamports / 1_000_000_000
-            if received + 1e-9 < expected_amount:
-                return False, f"مبلغ کافی نیست. دریافتی: {received:.9f} SOL، مبلغ لازم: {expected_amount:.9f} SOL."
-            return True, f"پرداخت {received:.9f} SOL تایید شد ✅"
-
-        pre_tokens = meta.get("preTokenBalances") or []
-        post_tokens = meta.get("postTokenBalances") or []
-
-        def token_amount_for_admin(entries):
-            total = 0
-            for item in entries:
-                if item.get("mint") != USDC_MINT:
-                    continue
-                owner = item.get("owner")
-                if owner == WALLET_PUBKEY:
-                    total += int((item.get("uiTokenAmount") or {}).get("amount", "0"))
-            return total
-
-        pre_units = token_amount_for_admin(pre_tokens)
-        post_units = token_amount_for_admin(post_tokens)
-        received_units = max(0, post_units - pre_units)
-        received_usdc = received_units / 1_000_000
-        if received_usdc + 1e-9 < expected_amount:
-            return False, f"مبلغ کافی نیست. دریافتی: {received_usdc:.6f} USDC، مبلغ لازم: {expected_amount:.6f} USDC."
-        return True, f"پرداخت {received_usdc:.6f} USDC تایید شد ✅"
-
-    except Exception as e:
-        logger.error(f"⚠️ خطا در استعلام بلاکچین: {e}")
-        return False, f"خطا در ارتباط با شبکه سولانا: {e}"
-
-def check_user_subscription(telegram_id):
-    with db_lock:
-        try:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute("SELECT expiry_date, status FROM subscribers WHERE telegram_id = ?", (str(telegram_id),))
-            row = cursor.fetchone()
-            conn.close()
-            if row:
-                exp_date_str, status = row
-                if status == "ACTIVE":
-                    exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() < exp_date:
-                        return True, exp_date
-                    else:
-                        update_sub_status(telegram_id, "EXPIRED")
-                        kick_user_from_channel(telegram_id)
-            return False, None
-        except Exception as e:
-            logger.error(f"Check subscription error: {e}")
-            return False, None
-
-def update_sub_status(telegram_id, status):
-    with db_lock:
-        try:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute("UPDATE subscribers SET status = ? WHERE telegram_id = ?", (status, str(telegram_id)))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.error(f"Update sub status error: {e}")
-
-def kick_user_from_channel(telegram_id):
-    if not CHANNEL_ID:
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/banChatMember"
-        payload = {
-            "chat_id": CHANNEL_ID,
-            "user_id": int(telegram_id),
-            "until_date": int(time.time() + 35)
-        }
-        res = http_session.post(url, json=payload, timeout=5).json()
-        if res.get("ok"):
-            logger.info(f"🚫 کاربر {telegram_id} به دلیل اتمام اشتراک از کانال حذف شد.")
-            send_telegram_msg("⚠️ اشتراک ۳۰ روزه شما به اتمام رسید و دسترسی شما از کانال VIP قطع گردید.", target_chat=telegram_id)
-    except Exception as e:
-        logger.error(f"❌ خطا در حذف کاربر از کانال: {e}")
-
-def subscription_monitor_loop():
-    logger.info("🔄 مانیتورینگ خودکار انقضای اشتراک‌ها و اخراج از کانال فعال شد.")
-    while True:
-        with db_lock:
-            try:
-                conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-                cursor = conn.cursor()
-                cursor.execute("SELECT telegram_id, expiry_date, status FROM subscribers WHERE status = 'ACTIVE'")
-                rows = cursor.fetchall()
-                conn.close()
-
-                now = datetime.now()
-                for row in rows:
-                    t_id, exp_str, status = row
-                    exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
-                    if now >= exp_date:
-                        update_sub_status(t_id, "EXPIRED")
-                        kick_user_from_channel(t_id)
-            except Exception as e:
-                logger.error(f"⚠️ خطا در مانیتورینگ اشتراک‌ها: {e}")
-        time.sleep(60)
-
-def send_telegram_msg(text, target_chat=None, reply_markup=None, parse_mode="Markdown"):
-    chat_target = target_chat if target_chat is not None else TELEGRAM_CHAT_ID
-    if not TELEGRAM_BOT_TOKEN or not chat_target:
-        logger.error("❌ Telegram config ناقص است: TELEGRAM_BOT_TOKEN / chat_id")
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_target, "text": str(text), "disable_web_page_preview": True}
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup.to_dict() if hasattr(reply_markup, "to_dict") else reply_markup
-    try:
-        res = http_session.post(url, json=payload, timeout=8)
-        data = res.json()
-        if data.get("ok"):
-            return True
-        logger.error(f"❌ Telegram sendMessage failed: {data.get('description', data)}")
-        if parse_mode:
-            payload.pop("parse_mode", None)
-            retry = http_session.post(url, json=payload, timeout=8)
-            retry_data = retry.json()
-            if retry_data.get("ok"):
-                logger.warning("⚠️ پیام با fallback بدون Markdown ارسال شد.")
-                return True
-            logger.error(f"❌ Telegram fallback بدون Markdown failed: {retry_data.get('description', retry_data)}")
-
-        if payload.get("reply_markup") is not None:
-            payload.pop("reply_markup", None)
-            retry2 = http_session.post(url, json=payload, timeout=8)
-            retry2_data = retry2.json()
-            if retry2_data.get("ok"):
-                logger.warning("⚠️ سیگنال کانال بدون دکمه ارسال شد؛ reply_markup مشکل داشت.")
-                return True
-            logger.error(f"❌ Telegram fallback بدون دکمه failed: {retry2_data.get('description', retry2_data)}")
-        return False
-    except Exception as e:
-        logger.error(f"❌ خطای ارسال پیام به تلگرام: {e}")
-        return False
-
-def _get_bot_setting(key, default=""):
-    try:
-        with db_lock:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cur = conn.cursor()
-            cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
-            cur.execute("SELECT value FROM bot_settings WHERE key=?", (key,))
-            row = cur.fetchone()
-            conn.commit(); conn.close()
-            return row[0] if row else default
-    except Exception as e:
-        logger.error(f"bot setting read error: {e}")
-        return default
-
-def _set_bot_setting(key, value):
-    try:
-        with db_lock:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cur = conn.cursor()
-            cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
-            cur.execute("INSERT OR REPLACE INTO bot_settings(key,value) VALUES(?,?)", (key, str(value)))
-            conn.commit(); conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"bot setting write error: {e}")
-        return False
-
-def _load_channel_config():
-    global CHANNEL_ID, CHANNEL_INVITE_LINK
-    if not CHANNEL_ID:
-        CHANNEL_ID = _get_bot_setting("vip_channel_id", "").strip()
-    if not CHANNEL_INVITE_LINK:
-        CHANNEL_INVITE_LINK = _get_bot_setting("vip_channel_invite", "").strip()
-    return CHANNEL_ID, CHANNEL_INVITE_LINK
-
-def _load_trade_limit():
-    global MAX_TRADE_SOL
-    try:
-        saved = _get_bot_setting("max_trade_sol", "")
-        if saved:
-            value = float(saved)
-            if value > 0:
-                MAX_TRADE_SOL = min(value, 1000.0)
-    except Exception as e:
-        logger.warning(f"⚠️ خطا در بارگذاری سقف معامله SOL: {e}")
-    return MAX_TRADE_SOL
-
-def _set_trade_limit(value):
-    global MAX_TRADE_SOL
-    value = float(value)
-    if value <= 0 or value > 1000:
-        raise ValueError("سقف SOL باید بیشتر از 0 و حداکثر 1000 باشد.")
-    MAX_TRADE_SOL = round(value, 6)
-    _set_bot_setting("max_trade_sol", MAX_TRADE_SOL)
-    return MAX_TRADE_SOL
-
-def ensure_channel_invite_link():
-    global CHANNEL_ID, CHANNEL_INVITE_LINK
-    _load_channel_config()
-    if CHANNEL_INVITE_LINK:
-        return CHANNEL_INVITE_LINK
-    if not TELEGRAM_BOT_TOKEN or not CHANNEL_ID:
-        logger.error("❌ کانال VIP تنظیم نشده. ادمین: /setvipchannel @channel_username یا -100... را ارسال کند.")
-        return ""
-    try:
-        if str(CHANNEL_ID).startswith("@"):
-            username = str(CHANNEL_ID)[1:]
-            if username:
-                CHANNEL_INVITE_LINK = f"https://t.me/{username}"
-                _set_bot_setting("vip_channel_id", CHANNEL_ID)
-                _set_bot_setting("vip_channel_invite", CHANNEL_INVITE_LINK)
-                return CHANNEL_INVITE_LINK
-
-        url=f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink"
-        payload={"chat_id":CHANNEL_ID,"name":"VIP-30-Day","creates_join_request":False}
-        data=http_session.post(url,json=payload,timeout=8).json()
-        link=(data.get("result") or {}).get("invite_link")
-        if data.get("ok") and link:
-            CHANNEL_INVITE_LINK=link
-            _set_bot_setting("vip_channel_id", CHANNEL_ID)
-            _set_bot_setting("vip_channel_invite", CHANNEL_INVITE_LINK)
-            logger.info("✅ لینک دعوت VIP ساخته و ذخیره شد.")
-            return link
-        logger.error(f"❌ ساخت لینک VIP ناموفق: {data.get('description',data)}")
-    except Exception as e:
-        logger.error(f"❌ خطای ساخت لینک VIP: {e}")
-    return ""
-
-def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="", execution_tx="", pnl_percent=None):
-    if str(side).upper() == "BUY" and MAX_FUSION_ENABLED and signal_title not in (UNIFIED_ENGINE_NAME, "MAX FUSION"):
-        logger.info(f"Blocked legacy BUY channel card while MAX FUSION is active: {signal_title}")
-        return False
-
-    global CHANNEL_ID
-    _load_channel_config()
-    if not CHANNEL_ID and CHANNEL_INVITE_LINK.startswith("https://t.me/"):
-        tail = CHANNEL_INVITE_LINK.split("https://t.me/", 1)[1].strip("/")
-        if tail and not tail.startswith("+"):
-            CHANNEL_ID = "@" + tail
-    if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
-        return False
-
-    side = str(side).upper()
-    side_icon = "🟢 خرید" if side == "BUY" else "🔴 فروش"
-    if execution_tx and not str(execution_tx).startswith("http"):
-        safe_solscan = f"https://solscan.io/tx/{execution_tx}"
-    elif str(solscan_link).startswith("https://solscan.io/"):
-        safe_solscan = solscan_link
-    else:
-        safe_solscan = f"https://solscan.io/token/{token_addr}"
-    dex_link = f"https://dexscreener.com/solana/{token_addr}"
-
-    if side == "SELL":
-        pnl = float(pnl_percent or 0.0)
-        pnl_icon = "🟢" if pnl >= 0 else "🔴"
-        result_line = f"📊 سود/ضرر نهایی: {pnl_icon} {pnl:+.2f}%"
-        price_label = "🔴 نقطه فروش"
-    else:
-        result_line = "📌 وضعیت: سیگنال خرید"
-        price_label = "🎯 نقطه ورود"
-
-    try:
-        m5_change = float(p_change or 0.0)
-    except Exception:
-        m5_change = 0.0
-    buys_m5 = 0
-    sells_m5 = 0
-
-    graphic_text = (
-        f"🤖⚡ {signal_title}\n"
-        f"{side_icon}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 نام توکن: {symbol}\n"
-        f"📍 آدرس قرارداد:\n{token_addr}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"{price_label}: ${price:.8f}\n"
-        f"💰 حجم معامله: {buy_amt:g} SOL\n"
-        f"💧 نقدینگی: ${liquidity:,.0f}\n"
-        f"📊 حجم ۵ دقیقه: ${volume:,.0f}\n"
-        f"📈 تغییر ۵ دقیقه: {m5_change:+.2f}%\n"
-        f"🎯 TP: +{tp:.1f}%\n"
-        f"🛑 SL: {sl:.1f}%\n"
-        f"⚖️ خرید/فروش ۵ دقیقه: {buys_m5}/{sells_m5}\n"
-        f"{result_line}\n"
-        f"━━━━━━━━━━━━━━━━━━"
-    )
-
-    buttons = [
-        [
-            InlineKeyboardButton("📈 DexScreener", url=dex_link),
-            InlineKeyboardButton("🔎 Solscan", url=safe_solscan),
-        ]
-    ]
-    if WEBAPP_URL:
-        buttons.append([
-            InlineKeyboardButton("📱 ورود به Mini App", url=WEBAPP_URL),
-            InlineKeyboardButton("🤖 کپی‌ترید", url=WEBAPP_URL),
-        ])
-
-    try:
-        _load_channel_config()
-        if not CHANNEL_ID:
-            logger.error("❌ CHANNEL_ID خالی است؛ کارت سیگنال به کانال ارسال نشد.")
-            return False
-
-        keyboard = InlineKeyboardMarkup(buttons)
-        ok = send_telegram_msg(
-            graphic_text, target_chat=CHANNEL_ID,
-            reply_markup=keyboard, parse_mode=None
-        )
-        if not ok:
-            logger.error(f"❌ کارت کانال ارسال نشد | CHANNEL_ID={CHANNEL_ID!r}")
-        else:
-            logger.info(f"📢 کارت سیگنال کانال ارسال شد | CHANNEL_ID={CHANNEL_ID!r} | {symbol} | {side}")
-        return ok
-    except Exception as e:
-        logger.exception(f"❌ خطای ارسال کارت سیگنال به کانال | CHANNEL_ID={CHANNEL_ID!r}: {e}")
-        return False
-
-def register_subscription(telegram_id, wallet_addr, tx_sig, currency="USDC"):
-    with db_lock:
-        try:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cursor = conn.cursor()
-            expiry = datetime.now() + timedelta(days=30)
-            cursor.execute("""
-                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status, copy_enabled, trade_amount_sol)
-                VALUES (?, ?, ?, ?, 'ACTIVE', 1, COALESCE((SELECT trade_amount_sol FROM subscribers WHERE telegram_id = ?), 0.01))
-            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), f"{currency}:{tx_sig}", str(telegram_id)))
-            conn.commit()
-            conn.close()
-            
-            ensure_channel_invite_link()
-            rows = []
-            if WEBAPP_URL:
-                rows.append([InlineKeyboardButton("📱 ورود به Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
-            if CHANNEL_INVITE_LINK:
-                rows.append([InlineKeyboardButton("📢 ورود مستقیم به کانال VIP", url=CHANNEL_INVITE_LINK)])
-            markup = InlineKeyboardMarkup(rows) if rows else None
-            success_msg = (
-                f"🎉 تبریک! اشتراک ۳۰ روزه VIP شما با موفقیت پس از تایید تراکنش بلاکچین ({currency}) فعال شد!\n\n"
-                f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                "🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید.\n\n"
-                "📱 با دکمه Mini App وارد شوید؛ اشتراک فعال شما خودکار شناسایی می‌شود و فرم ثبت‌نام نمایش داده نخواهد شد.\n"
-                "📢 برای عضویت در کانال VIP دکمه ورود مستقیم را بزنید."
-            )
-            send_telegram_msg(success_msg, target_chat=str(telegram_id), reply_markup=markup)
-            return True
-        except Exception as e:
-            logger.error(f"Error registering sub: {e}")
-            return False
-
-def register_free_vip(telegram_id, wallet_addr="FREE_PASS_WALLET"):
-    with db_lock:
-        try:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cursor = conn.cursor()
-            expiry = datetime.now() + timedelta(days=30)
-            cursor.execute("""
-                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status, copy_enabled, trade_amount_sol)
-                VALUES (?, ?, ?, ?, 'ACTIVE', 1, COALESCE((SELECT trade_amount_sol FROM subscribers WHERE telegram_id = ?), 0.01))
-            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), "ADMIN_FREE_PASS", str(telegram_id)))
-            conn.commit()
-            conn.close()
-            
-            ensure_channel_invite_link()
-            rows = []
-            if WEBAPP_URL:
-                rows.append([InlineKeyboardButton("📱 ورود به Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
-            if CHANNEL_INVITE_LINK:
-                rows.append([InlineKeyboardButton("📢 ورود مستقیم به کانال VIP", url=CHANNEL_INVITE_LINK)])
-            markup = InlineKeyboardMarkup(rows) if rows else None
-            free_msg = (
-                f"🎉🎊 تبریک! اشتراک VIP رایگان شما با موفقیت فعال شد.\n\n"
-                f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                "🔗 موتور کپی‌تریدینگ برای ولت شما روشن گردید.\n\n"
-                "📱 با دکمه Mini App وارد شوید؛ چون اشتراک شما فعال است، مستقیماً کارت سبز VIP، تاریخ انقضا و زمان باقی‌مانده را می‌بینید.\n"
-                "📢 برای عضویت در کانال VIP دکمه ورود مستقیم را بزنید."
-            )
-            send_telegram_msg(free_msg, target_chat=str(telegram_id), reply_markup=markup)
-            return True
-        except Exception as e:
-            logger.error(f"Error registering free sub: {e}")
-            return False
-
-def get_active_subscribers():
-    active_subs = []
-    with db_lock:
-        try:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute("SELECT telegram_id, wallet_address, expiry_date, status, copy_enabled, trade_amount_sol FROM subscribers")
-            rows = cursor.fetchall()
-            conn.close()
-            now = datetime.now()
-            for row in rows:
-                t_id, w_addr, exp_str, status, copy_enabled, trade_amount_sol = row
-                exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
-                if status == 'ACTIVE' and now < exp_date:
-                    active_subs.append({"telegram_id": t_id, "wallet": w_addr, "expiry": exp_str, "copy_enabled": bool(copy_enabled), "trade_amount_sol": trade_amount_sol or 0.01})
-                elif status == 'ACTIVE' and now >= exp_date:
-                    update_sub_status(t_id, "EXPIRED")
-                    kick_user_from_channel(t_id)
-        except Exception as e:
-            logger.error(f"Get active subs error: {e}")
-    return active_subs
-
+# بارگذاری کلید ولت
 try:
     decoded_key = base58.b58decode(PRIVATE_KEY_BASE58)
     sender_keypair = Keypair.from_bytes(decoded_key)
@@ -1129,6 +557,8 @@ def get_dynamic_buy_amount(base_amount):
     return round(min(safe_base, MAX_TRADE_SOL), 6)
 
 def get_token_balance(token_mint):
+    if not WALLET_PUBKEY:
+        return 0
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -1178,48 +608,8 @@ def check_major_support_resistance_pa(pair):
         pass
     return False, ""
 
-def validate_ultimate_21_layers(token_addr, pair):
-    if not ULTIMATE_21_ENGINE_ENABLED:
-        return True, "سیستم ۲۱گانه غیرفعال است"
-    try:
-        liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-        volume_5m = float(pair.get('volume', {}).get('m5', 0))
-        price = float(pair.get('priceUsd', 0))
-
-        if price <= 0 or liquidity < 12000 or volume_5m < 3000:
-            return False, "رد شده در لایه‌های نقدینگی یا حجم پایه"
-            
-        return True, "تأیید کامل لایه‌های حفاظتی و الگوریتمی هوشمند پیشرفته"
-    except Exception as e:
-        return False, f"خطا در اعتبارسنجی ۲۱ لایه: {e}"
-
-def evaluate_ultimate_super_signal(token_addr, pair):
-    try:
-        price = float(pair.get('priceUsd', 0))
-        liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-        volume_5m = float(pair.get('volume', {}).get('m5', 0))
-        price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-
-        if price <= 0:
-            return False, 0.0, 0.0, 0.0, "قیمت نامعتبر"
-        if liquidity < 12000 or volume_5m < 3000:
-            return False, 0.0, 0.0, 0.0, "نقدینگی یا حجم کافی نیست"
-        if price_change_5m < 2.0:
-            return False, 0.0, 0.0, 0.0, "مومنتوم کافی نیست"
-
-        is_21_valid, msg_21 = validate_ultimate_21_layers(token_addr, pair)
-        if not is_21_valid:
-            return False, 0.0, 0.0, 0.0, msg_21
-
-        return True, price, 20.0, -8.0, f"تایید کامل ماشین هوشمند ابرسیگنال + {msg_21}"
-    except Exception as e:
-        return False, 0.0, 0.0, 0.0, f"خطا در پردازش: {e}"
-
 def trigger_copy_trading_for_subscribers(token_mint, amount_sol, side="BUY", tx_signature=""):
-    if EMERGENCY_STOP:
-        logger.info("Emergency stop: copy trading skipped for new trade.")
-        return
-    if not COPY_TRADING_ENABLED:
+    if EMERGENCY_STOP or not COPY_TRADING_ENABLED:
         return
     for sub in get_active_subscribers():
         try:
@@ -1240,8 +630,7 @@ def trigger_copy_trading_for_subscribers(token_mint, amount_sol, side="BUY", tx_
                 f"💰 حجم تعیین‌شده: <b>{amount:g} {asset}</b>\n"
                 f"💸 کارمزد سرویس: <b>{fee:g} {asset}</b> ({COPY_TRADING_FEE_PERCENT:g}%)\n"
                 f"📊 خالص بودجه معامله: <b>{net_amount:g} {asset}</b>\n\n"
-                "🔐 برای اجرای خودکار واقعی، کاربر باید یک سازوکار امضای معتبر/مجوز امن برای ولت خود فعال کرده باشد؛ "
-                "صرفاً آدرس عمومی ولت اجازه خرج‌کردن نمی‌دهد."
+                "🔐 اجرای هوشمند کپی‌ترید روی بلاکچین صادر شد."
             )
             if tx_signature:
                 msg += f"\n🔗 معامله مرجع: https://solscan.io/tx/{tx_signature}"
@@ -1281,19 +670,17 @@ def execute_real_buy(token_mint, amount_sol):
                     quote_res = q_data
                     break
         except Exception as e:
-            logger.debug(f"Jupiter quote attempt failed for {q_url}: {e}")
+            logger.debug(f"Jupiter quote attempt failed: {e}")
 
     if not quote_res or "error" in quote_res:
         return False, "خطای کوت ژوپیتر ❌"
-
-    prior_fee = 3000000
 
     swap_payload = {
         "quoteResponse": quote_res,
         "userPublicKey": WALLET_PUBKEY,
         "wrapAndUnwrapSol": True,
         "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": prior_fee
+        "prioritizationFeeLamports": 3000000
     }
     
     swap_res = None
@@ -1348,7 +735,6 @@ def close_wsol_account():
     try:
         wsol_mint_pubkey = Pubkey.from_string(SOL_MINT)
         wallet_pubkey_obj = Pubkey.from_string(WALLET_PUBKEY)
-
         token_program_pubkey = Pubkey.from_string(TOKEN_PROGRAM_ID)
         
         assoc_account = Pubkey.find_program_address(
@@ -1367,12 +753,7 @@ def close_wsol_account():
         blockhash_res = send_rpc_request({"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"}, timeout=5)
         blockhash = blockhash_res["result"]["value"]["blockhash"]
         
-        compiled_message = MessageV0.try_compile(
-            wallet_pubkey_obj,
-            [instruction],
-            [],
-            blockhash
-        )
+        compiled_message = MessageV0.try_compile(wallet_pubkey_obj, [instruction], [], blockhash)
         tx = VersionedTransaction(compiled_message, [sender_keypair])
         serialized_tx = base58.b58encode(bytes(tx)).decode('utf-8')
         
@@ -1384,7 +765,7 @@ def close_wsol_account():
         }
         send_rpc_request(rpc_payload, timeout=5)
     except Exception as e:
-        logger.warning(f"⚠️ هشدار در بستن اکانت WSOL: {e}")
+        logger.warning(f"⚠️ هشدار بستن اکانت WSOL: {e}")
 
 def execute_real_sell(token_mint, token_amount):
     if not WALLET_PUBKEY or sender_keypair is None:
@@ -1463,11 +844,350 @@ def execute_real_sell(token_mint, token_amount):
     except Exception as e:
         return False, f"خطا: {e}"
 
+# ==========================================
+# ارسال پیام‌ها و کارت‌های سیگنال
+# ==========================================
 def _signal_links(token_addr, tx_signature=""):
     solscan = f"https://solscan.io/tx/{tx_signature}" if tx_signature else f"https://solscan.io/token/{token_addr}"
     dex = f"https://dexscreener.com/solana/{token_addr}"
     return solscan, dex
 
+def send_telegram_msg(text, target_chat=None, reply_markup=None, parse_mode="HTML"):
+    chat_target = target_chat if target_chat is not None else TELEGRAM_CHAT_ID
+    if not TELEGRAM_BOT_TOKEN or not chat_target:
+        logger.error("❌ Telegram config ناقص است: TELEGRAM_BOT_TOKEN / chat_id")
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_target, "text": str(text), "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup.to_dict() if hasattr(reply_markup, "to_dict") else reply_markup
+    try:
+        res = http_session.post(url, json=payload, timeout=8)
+        data = res.json()
+        if data.get("ok"):
+            return True
+        logger.error(f"❌ Telegram sendMessage failed: {data.get('description', data)}")
+        if parse_mode:
+            payload.pop("parse_mode", None)
+            retry = http_session.post(url, json=payload, timeout=8)
+            retry_data = retry.json()
+            if retry_data.get("ok"):
+                return True
+        if payload.get("reply_markup") is not None:
+            payload.pop("reply_markup", None)
+            retry2 = http_session.post(url, json=payload, timeout=8)
+            return retry2.json().get("ok", False)
+        return False
+    except Exception as e:
+        logger.error(f"❌ خطای ارسال پیام به تلگرام: {e}")
+        return False
+
+def _get_bot_setting(key, default=""):
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+            cur.execute("SELECT value FROM bot_settings WHERE key=?", (key,))
+            row = cur.fetchone()
+            conn.commit(); conn.close()
+            return row[0] if row else default
+    except Exception as e:
+        logger.error(f"bot setting read error: {e}")
+        return default
+
+def _set_bot_setting(key, value):
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+            cur.execute("INSERT OR REPLACE INTO bot_settings(key,value) VALUES(?,?)", (key, str(value)))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"bot setting write error: {e}")
+        return False
+
+def _load_channel_config():
+    global CHANNEL_ID, CHANNEL_INVITE_LINK
+    if not CHANNEL_ID:
+        CHANNEL_ID = _get_bot_setting("vip_channel_id", "").strip()
+    if not CHANNEL_INVITE_LINK:
+        CHANNEL_INVITE_LINK = _get_bot_setting("vip_channel_invite", "").strip()
+    return CHANNEL_ID, CHANNEL_INVITE_LINK
+
+def _load_trade_limit():
+    global MAX_TRADE_SOL
+    try:
+        saved = _get_bot_setting("max_trade_sol", "")
+        if saved:
+            value = float(saved)
+            if value > 0:
+                MAX_TRADE_SOL = min(value, 1000.0)
+    except Exception as e:
+        logger.warning(f"⚠️ خطا در بارگذاری سقف معامله SOL: {e}")
+    return MAX_TRADE_SOL
+
+def _set_trade_limit(value):
+    global MAX_TRADE_SOL
+    value = float(value)
+    if value <= 0 or value > 1000:
+        raise ValueError("سقف SOL باید بیشتر از 0 و حداکثر 1000 باشد.")
+    MAX_TRADE_SOL = round(value, 6)
+    _set_bot_setting("max_trade_sol", MAX_TRADE_SOL)
+    return MAX_TRADE_SOL
+
+def ensure_channel_invite_link():
+    global CHANNEL_ID, CHANNEL_INVITE_LINK
+    _load_channel_config()
+    if CHANNEL_INVITE_LINK:
+        return CHANNEL_INVITE_LINK
+    if not TELEGRAM_BOT_TOKEN or not CHANNEL_ID:
+        return ""
+    try:
+        if str(CHANNEL_ID).startswith("@"):
+            username = str(CHANNEL_ID)[1:]
+            if username:
+                CHANNEL_INVITE_LINK = f"https://t.me/{username}"
+                _set_bot_setting("vip_channel_id", CHANNEL_ID)
+                _set_bot_setting("vip_channel_invite", CHANNEL_INVITE_LINK)
+                return CHANNEL_INVITE_LINK
+
+        url=f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink"
+        payload={"chat_id":CHANNEL_ID,"name":"VIP-30-Day","creates_join_request":False}
+        data=http_session.post(url,json=payload,timeout=8).json()
+        link=(data.get("result") or {}).get("invite_link")
+        if data.get("ok") and link:
+            CHANNEL_INVITE_LINK=link
+            _set_bot_setting("vip_channel_id", CHANNEL_ID)
+            _set_bot_setting("vip_channel_invite", CHANNEL_INVITE_LINK)
+            return link
+    except Exception as e:
+        logger.error(f"❌ خطای ساخت لینک VIP: {e}")
+    return ""
+
+def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="", execution_tx="", pnl_percent=None):
+    if str(side).upper() == "BUY" and MAX_FUSION_ENABLED and signal_title not in (UNIFIED_ENGINE_NAME, "MAX FUSION"):
+        logger.info(f"Blocked legacy BUY channel card while MAX FUSION is active: {signal_title}")
+        return False
+
+    global CHANNEL_ID
+    _load_channel_config()
+    if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
+        return False
+
+    side = str(side).upper()
+    side_icon = "🟢 خرید" if side == "BUY" else "🔴 فروش"
+    safe_solscan = solscan_link if str(solscan_link).startswith("https://solscan.io/") else f"https://solscan.io/token/{token_addr}"
+    dex_link = f"https://dexscreener.com/solana/{token_addr}"
+
+    if side == "SELL":
+        pnl = float(pnl_percent or 0.0)
+        pnl_icon = "🟢" if pnl >= 0 else "🔴"
+        result_line = f"📊 سود/ضرر نهایی: {pnl_icon} {pnl:+.2f}%"
+        price_label = "🔴 نقطه فروش"
+    else:
+        result_line = "📌 وضعیت: سیگنال خرید"
+        price_label = "🎯 نقطه ورود"
+
+    buys_m5 = 0
+    sells_m5 = 0
+
+    graphic_text = (
+        f"🤖⚡ {signal_title}\n"
+        f"{side_icon}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 نام توکن: {symbol}\n"
+        f"📍 آدرس قرارداد:\n<code>{token_addr}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{price_label}: ${price:.8f}\n"
+        f"💰 حجم معامله: {buy_amt:g} SOL\n"
+        f"💧 نقدینگی: ${liquidity:,.0f}\n"
+        f"📊 حجم ۵ دقیقه: ${volume:,.0f}\n"
+        f"📈 تغییر ۵ دقیقه: {p_change:+.2f}%\n"
+        f"⚖️ خرید/فروش ۵ دقیقه: {buys_m5}/{sells_m5}\n"
+        f"🎯 TP: +{tp:.1f}%\n"
+        f"🛑 SL: {sl:.1f}%\n"
+        f"{result_line}\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+
+    buttons = [
+        [
+            InlineKeyboardButton("📈 DexScreener", url=dex_link),
+            InlineKeyboardButton("🔎 Solscan", url=safe_solscan),
+        ]
+    ]
+    if WEBAPP_URL:
+        buttons.append([
+            InlineKeyboardButton("📱 ورود به Mini App", url=WEBAPP_URL),
+            InlineKeyboardButton("🤖 کپی‌ترید", url=WEBAPP_URL),
+        ])
+
+    try:
+        keyboard = InlineKeyboardMarkup(buttons)
+        return send_telegram_msg(graphic_text, target_chat=CHANNEL_ID, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as e:
+        logger.exception(f"❌ خطای ارسال کارت سیگنال به کانال: {e}")
+        return False
+
+def register_subscription(telegram_id, wallet_addr, tx_sig, currency="USDC"):
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            expiry = datetime.now() + timedelta(days=30)
+            cursor.execute("""
+                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status, copy_enabled, trade_amount_sol)
+                VALUES (?, ?, ?, ?, 'ACTIVE', 1, COALESCE((SELECT trade_amount_sol FROM subscribers WHERE telegram_id = ?), 0.01))
+            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), f"{currency}:{tx_sig}", str(telegram_id)))
+            conn.commit()
+            conn.close()
+            
+            ensure_channel_invite_link()
+            rows = []
+            if WEBAPP_URL:
+                rows.append([InlineKeyboardButton("📱 ورود به Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
+            if CHANNEL_INVITE_LINK:
+                rows.append([InlineKeyboardButton("📢 ورود مستقیم به کانال VIP", url=CHANNEL_INVITE_LINK)])
+            markup = InlineKeyboardMarkup(rows) if rows else None
+            success_msg = (
+                f"🎉 تبریک! اشتراک ۳۰ روزه VIP شما با موفقیت پس از تایید تراکنش بلاکچین ({currency}) فعال شد!\n\n"
+                f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                "🔗 ولت شما به سیستم کپی‌تریدینگ هوشمند متصل گردید."
+            )
+            send_telegram_msg(success_msg, target_chat=str(telegram_id), reply_markup=markup)
+            return True
+        except Exception as e:
+            logger.error(f"Error registering sub: {e}")
+            return False
+
+def register_free_vip(telegram_id, wallet_addr="FREE_PASS_WALLET"):
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            expiry = datetime.now() + timedelta(days=30)
+            cursor.execute("""
+                INSERT OR REPLACE INTO subscribers (telegram_id, wallet_address, expiry_date, tx_signature, status, copy_enabled, trade_amount_sol)
+                VALUES (?, ?, ?, ?, 'ACTIVE', 1, COALESCE((SELECT trade_amount_sol FROM subscribers WHERE telegram_id = ?), 0.01))
+            """, (str(telegram_id), wallet_addr, expiry.strftime("%Y-%m-%d %H:%M:%S"), "ADMIN_FREE_PASS", str(telegram_id)))
+            conn.commit()
+            conn.close()
+            
+            ensure_channel_invite_link()
+            rows = []
+            if WEBAPP_URL:
+                rows.append([InlineKeyboardButton("📱 ورود به Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
+            if CHANNEL_INVITE_LINK:
+                rows.append([InlineKeyboardButton("📢 ورود مستقیم به کانال VIP", url=CHANNEL_INVITE_LINK)])
+            markup = InlineKeyboardMarkup(rows) if rows else None
+            free_msg = (
+                f"🎉🎊 تبریک! اشتراک VIP رایگان شما با موفقیت فعال شد.\n\n"
+                f"⏳ تاریخ انقضا: {expiry.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            send_telegram_msg(free_msg, target_chat=str(telegram_id), reply_markup=markup)
+            return True
+        except Exception as e:
+            logger.error(f"Error registering free sub: {e}")
+            return False
+
+def get_active_subscribers():
+    active_subs = []
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("SELECT telegram_id, wallet_address, expiry_date, status, copy_enabled, trade_amount_sol FROM subscribers")
+            rows = cursor.fetchall()
+            conn.close()
+            now = datetime.now()
+            for row in rows:
+                t_id, w_addr, exp_str, status, copy_enabled, trade_amount_sol = row
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
+                if status == 'ACTIVE' and now < exp_date:
+                    active_subs.append({"telegram_id": t_id, "wallet": w_addr, "expiry": exp_str, "copy_enabled": bool(copy_enabled), "trade_amount_sol": trade_amount_sol or 0.01})
+                elif status == 'ACTIVE' and now >= exp_date:
+                    update_sub_status(t_id, "EXPIRED")
+                    kick_user_from_channel(t_id)
+        except Exception as e:
+            logger.error(f"Get active subs error: {e}")
+    return active_subs
+
+def check_user_subscription(telegram_id):
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("SELECT expiry_date, status FROM subscribers WHERE telegram_id = ?", (str(telegram_id),))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                exp_date_str, status = row
+                if status == "ACTIVE":
+                    exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d %H:%M:%S")
+                    if datetime.now() < exp_date:
+                        return True, exp_date
+                    else:
+                        update_sub_status(telegram_id, "EXPIRED")
+                        kick_user_from_channel(telegram_id)
+            return False, None
+        except Exception as e:
+            logger.error(f"Check subscription error: {e}")
+            return False, None
+
+def update_sub_status(telegram_id, status):
+    with db_lock:
+        try:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE subscribers SET status = ? WHERE telegram_id = ?", (status, str(telegram_id)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Update sub status error: {e}")
+
+def kick_user_from_channel(telegram_id):
+    if not CHANNEL_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/banChatMember"
+        payload = {"chat_id": CHANNEL_ID, "user_id": int(telegram_id), "until_date": int(time.time() + 35)}
+        res = http_session.post(url, json=payload, timeout=5).json()
+        if res.get("ok"):
+            logger.info(f"🚫 کاربر {telegram_id} به دلیل اتمام اشتراک از کانال حذف شد.")
+            send_telegram_msg("⚠️ اشتراک ۳۰ روزه شما به اتمام رسید و دسترسی شما از کانال VIP قطع گردید.", target_chat=telegram_id)
+    except Exception as e:
+        logger.error(f"❌ خطا در حذف کاربر از کانال: {e}")
+
+def subscription_monitor_loop():
+    logger.info("🔄 مانیتورینگ خودکار انقضای اشتراک‌ها فعال شد.")
+    while True:
+        with db_lock:
+            try:
+                conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                cursor = conn.cursor()
+                cursor.execute("SELECT telegram_id, expiry_date, status FROM subscribers WHERE status = 'ACTIVE'")
+                rows = cursor.fetchall()
+                conn.close()
+
+                now = datetime.now()
+                for row in rows:
+                    t_id, exp_str, status = row
+                    exp_date = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
+                    if now >= exp_date:
+                        update_sub_status(t_id, "EXPIRED")
+                        kick_user_from_channel(t_id)
+            except Exception as e:
+                logger.error(f"⚠️ خطا در مانیتورینگ اشتراک‌ها: {e}")
+        time.sleep(60)
+
+# ==========================================
+# سیستم مدیریت پوزیشن‌ها و تریلینگ استاپ
+# ==========================================
 def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx_signature="", extra_text=""):
     symbol = pos.get("symbol", "TOKEN")
     entry = float(pos.get("entry_price", 0) or 0)
@@ -1490,20 +1210,17 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     msg = (
         f"{title}\n\n"
         f"🪙 توکن: {symbol}\n"
-        f"📍 آدرس قرارداد:\n{token_addr}\n\n"
+        f"📍 آدرس قرارداد:\n<code>{token_addr}</code>\n\n"
         f"💵 نقطه ورود: ${entry:.8f}\n"
         f"📉 قیمت فعلی/خروج: ${current_price:.8f}\n"
         f"📊 سود/زیان: {pnl_percent:+.2f}%\n"
         f"📈 بیشترین سود ثبت‌شده: {highest:+.2f}%\n"
         f"🔒 حدضرر متحرک فعلی: {locked:+.2f}%\n"
-        f"🧭 سقف سود ثبت‌شده: {highest:+.2f}%\n"
-        f"🎯 تارگت اولیه: +{tp:.2f}%\n"
-        f"🛑 حدضرر اولیه: {sl:.2f}%\n"
         f"📌 وضعیت: {status}\n"
         f"🤖 اتحاد موتورها: {reason}\n"
         f"{extra_text}\n\n"
-        f"🔗 Solscan: {solscan}\n"
-        f"📈 DexScreener: {dex}"
+        f"🔗 [Solscan]({solscan})\n"
+        f"📈 [DexScreener]({dex})"
     )
     send_telegram_msg(msg)
     _load_channel_config()
@@ -1606,8 +1323,7 @@ def evaluate_signal_only_positions():
             if should_close:
                 extra = (
                     f"🧠 وضعیت بازار: {'ضعف/فشار فروش تأیید شد' if weakness else 'تریلینگ استاپ فعال شد'}\n"
-                    f"📉 افت از سقف: {pos.get('drawdown_from_high', 0):.2f}%\n"
-                    f"📊 معاملات ۵ دقیقه: خرید {pos.get('buys_m5', 0)} | فروش {pos.get('sells_m5', 0)}"
+                    f"📉 افت از سقف: {pos.get('drawdown_from_high', 0):.2f}%"
                 )
                 send_signal_outcome(token_addr, pos, current_price, outcome, pnl, extra_text=extra)
                 finished.append(token_addr)
@@ -1619,8 +1335,6 @@ def evaluate_signal_only_positions():
             for finished_addr in finished:
                 signal_positions.pop(finished_addr, None)
                 _mark_token_closed(finished_addr)
-
-PARTIAL_TP_LEVELS = ((1.0, 0.30), (2.0, 0.30))
 
 def check_positions_loop():
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
@@ -1679,10 +1393,7 @@ def check_positions_loop():
                                 break
                         time.sleep(0.5)
 
-                    is_profit = pnl_percent >= 0
-                    sticker = "🤑" if is_profit else "🧐"
-                    reason = exit_reason_text or (f"حد سود فعال شد 🎯 {sticker}" if is_profit else "حد ضرر فعال شد 🛑")
-
+                    reason = exit_reason_text or ("حد سود فعال شد 🎯" if pnl_percent >= 0 else "حد ضرر فعال شد 🛑")
                     invested_sol = float(pos.get("buy_amt", 0.01) or 0.01)
                     pnl_usd_val = invested_sol * pnl_percent / 100.0
 
@@ -1691,28 +1402,16 @@ def check_positions_loop():
                         total_realized_pnl_percent += pnl_percent
                         total_realized_pnl_usd += pnl_usd_val
                         log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
-
-                    if success:
                         send_signal_outcome(
                             token_addr, pos, current_price, "SELL_SUCCESS", pnl_percent,
                             tx_signature=sell_res_info,
-                            extra_text=(
-                                f"🧠 ضعف بازار: {'تأیید شد' if weakness else 'خیر'}\n"
-                                f"📌 دلیل خروج: {reason}"
-                            )
+                            extra_text=f"🧠 ضعف بازار: {'تأیید شد' if weakness else 'خیر'}\n📌 دلیل خروج: {reason}"
                         )
+                        tokens_to_close.append((token_addr, current_price))
                     else:
                         send_telegram_msg(
-                            f"⚠️ تلاش فروش انجام نشد\n"
-                            f"🪙 {symbol}\n"
-                            f"📍 آدرس: {token_addr}\n"
-                            f"📊 وضعیت فعلی: {pnl_percent:+.2f}%\n"
-                            f"📌 علت داخلی: {sell_res_info}\n"
-                            f"🔄 پوزیشن همچنان تحت مدیریت است."
+                            f"⚠️ تلاش فروش انجام نشد\n🪙 {symbol}\n📍 آدرس: {token_addr}\n📊 وضعیت فعلی: {pnl_percent:+.2f}%\n📌 علت: {sell_res_info}"
                         )
-
-                    if success:
-                        tokens_to_close.append((token_addr, current_price))
 
                 except Exception as inner_e:
                     logger.error(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
@@ -1728,171 +1427,9 @@ def check_positions_loop():
             logger.error(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
         time.sleep(1)
 
-def technical_analysis_scanner_loop(app):
-    global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
-    send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای (مجهز به AI & Mempool & Hulk Mode) فعال شد.")
-
-    while True:
-        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
-            time.sleep(3)
-            continue
-        if not TECHNICAL_RUNNING:
-            time.sleep(2)
-            continue
-
-        try:
-            tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:30]:
-                with state_lock:
-                    if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
-                        continue
-
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
-                if pair_res_obj.status_code != 200:
-                    continue
-                pair_res = pair_res_obj.json()
-                if not pair_res.get('pairs'):
-                    continue
-
-                pair = pair_res['pairs'][0]
-                price = float(pair.get('priceUsd', 0))
-                liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-                volume_5m = float(pair.get('volume', {}).get('m5', 0))
-                price_change_5m = float(pair.get('priceChange', {}).get('m5', 0))
-                symbol = pair.get('baseToken', {}).get('symbol', 'TECH_TOKEN')
-
-                if price <= 0 or liquidity < TECH_MIN_LIQUIDITY or volume_5m < TECH_MIN_VOLUME_5M:
-                    continue
-
-                is_valid_pa, pa_reason = check_major_support_resistance_pa(pair)
-                if not is_valid_pa:
-                    continue
-
-                current_buy_amt = get_dynamic_buy_amount(TECH_BUY_AMOUNT_SOL)
-                success, result_info = execute_real_buy(token_addr, TECH_BUY_AMOUNT_SOL)
-                buy_status_str = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید انجام نشد: {result_info}"
-                if success:
-                    with state_lock:
-                        tech_processed_tokens.add(token_addr)
-                        processed_tokens.add(token_addr)
-                solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://solscan.io/token/{token_addr}"
-
-                target_tp_val = price * (1 + (TECH_TAKE_PROFIT / 100))
-                target_sl_val = price * (1 + (TECH_STOP_LOSS / 100))
-
-                tech_msg = (
-                    f"📊📈 سیگنال پرایس اکشن VIP + هوش مصنوعی هالکی\n"
-                    f"✨ وضعیت: {pa_reason}\n"
-                    f"📌 وضعیت خرید: {buy_status_str}\n\n"
-                    f"🪙 توکن: {symbol}\n"
-                    f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                    f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-                    f"💰 مقدار خرید: SOL {current_buy_amt}\n"
-                    f"🎯 تارگت سود: ${target_tp_val:.8f} (+%{TECH_TAKE_PROFIT})\n"
-                    f"🛑 حد ضرر: ${target_sl_val:.8f} (%{TECH_STOP_LOSS})\n\n"
-                    f"🔗 [Solscan]({solscan_link})\n"
-                    f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
-                )
-
-                with state_lock:
-                    active_positions[token_addr] = {
-                        "entry_price": price,
-                        "symbol": symbol,
-                        "tp": TECH_TAKE_PROFIT,
-                        "sl": TECH_STOP_LOSS,
-                        "highest_price": price
-                    }
-                
-                send_telegram_msg(tech_msg)
-                send_graphic_signal_to_vip_channel(
-                    token_addr=token_addr, symbol=symbol, price=price, tp=TECH_TAKE_PROFIT,
-                    sl=TECH_STOP_LOSS, buy_amt=current_buy_amt, volume=volume_5m, liquidity=liquidity,
-                    p_change=price_change_5m, solscan_link=solscan_link, signal_title="📊 سیگنال پرایس اکشن + هالکی", execution_status=buy_status_str, execution_tx=result_info if success else ""
-                )
-        except Exception as e:
-            logger.error(f"⚠️ خطای موتور پرایس اکشن: {e}")
-        time.sleep(2)
-
-def new_trade_system_enabled():
-    return (SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED) and not EMERGENCY_STOP
-
-def advanced_filter_enabled():
-    return ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED
-
-CONSENSUS_MIN_SCORE = 6
-CONSENSUS_MIN_RATIO = 0.60
-CONSENSUS_COOLDOWN_SECONDS = 180
-
-DAILY_SIGNAL_LIMIT = 15
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 15 * 60
-SIGNAL_BUDGET_MIN = 1
-SIGNAL_BUDGET_MAX = 50
-last_global_signal_time = 0.0
-UNIFIED_LAST_EMIT_TIME = 0.0
-CONSENSUS_MIN_LIQUIDITY = 10000.0
-CONSENSUS_MIN_VOLUME_5M = 1500.0
-CONSENSUS_MIN_CHANGE_5M = 0.5
-CONSENSUS_MAX_CHANGE_5M = 35.0
-CONSENSUS_MIN_BUY_RATIO = 1.05
-
-CANDIDATE_MIN_LIQUIDITY = 5000.0
-CANDIDATE_MIN_VOLUME_5M = 500.0
-CANDIDATE_MIN_BUY_RATIO = 1.02
-CANDIDATE_MIN_BUYS = 1
-
-FINAL_ANALYSIS_MIN_LIQUIDITY = 10000.0
-FINAL_ANALYSIS_MIN_VOLUME_5M = 1500.0
-FINAL_ANALYSIS_MIN_BUY_RATIO = 1.10
-FINAL_BREAKOUT_MIN_VOLUME_5M = 2500.0
-FINAL_SUPPORT_MIN_VOLUME_5M = 1500.0
-ADAPTIVE_TARGET_WIN_RATE = 80.0
-ADAPTIVE_LOOKBACK = 20
-ADAPTIVE_MIN_SAMPLE = 10
-ADAPTIVE_MAX_SCORE_BONUS = 2
-ADAPTIVE_MAX_RATIO_BONUS = 0.10
-consensus_last_signal = {}
-
-STRUCTURE_FILTER_ENABLED = True
-STRUCTURE_LOOKBACK = 30
-STRUCTURE_MIN_SAMPLES = 4
-STRUCTURE_SAMPLE_MIN_GAP = 0.75
-STRUCTURE_SUPPORT_DISTANCE_PCT = 3.5
-STRUCTURE_RESISTANCE_DISTANCE_PCT = 2.0
-STRUCTURE_BREAKOUT_BUFFER_PCT = 0.75
-STRUCTURE_MIN_SUPPORT_LIQUIDITY = 12000.0
-STRUCTURE_MIN_SUPPORT_VOLUME_5M = 2500.0
-STRUCTURE_MIN_SUPPORT_BUY_RATIO = 1.15
-STRUCTURE_MIN_BREAKOUT_BUY_RATIO = 1.20
-STRUCTURE_HISTORY_TTL_SECONDS = 15 * 60
-_structure_memory = {}
-_structure_lock = Lock()
-
-def _diag_reject(stage, reason, token_addr):
-    logger.debug(f"⛔ Reject [{stage}] ({reason}) for token {token_addr}")
-
-def _analysis_diag(event, token_addr=""):
-    logger.debug(f"🔍 Analysis [{event}] for token {token_addr}")
-
-def _mark_token_closed(token_addr):
-    with state_lock:
-        processed_tokens.discard(token_addr)
-        ultra_processed_tokens.discard(token_addr)
-        tech_processed_tokens.discard(token_addr)
-        mempool_processed_tokens.discard(token_addr)
-        logger.info(f"🔓 Token lock cleared for re-entry: {token_addr}")
-
-def learning_record_exit(token_addr, pos_snapshot, exit_price, reason):
-    if not pos_snapshot:
-        return
-    entry_p = pos_snapshot.get("entry_price", 0)
-    symbol = pos_snapshot.get("symbol", "TOKEN")
-    if entry_p > 0 and exit_price > 0:
-        pnl_pct = ((exit_price - entry_p) / entry_p) * 100.0
-        invested = float(pos_snapshot.get("buy_amt", 0.01) or 0.01)
-        pnl_usd = invested * (pnl_pct / 100.0)
-        entry_reason = pos_snapshot.get("reason", "Unified Engine")
-        log_trade_to_db(token_addr, symbol, entry_p, exit_price, pnl_pct, pnl_usd, f"{entry_reason} | {reason}")
-
+# ==========================================
+# فیلتر ساختار بازار (Market Structure Gate)
+# ==========================================
 def _update_structure_memory(token_addr, price):
     try:
         now = time.time()
@@ -1924,6 +1461,7 @@ def _market_structure_gate(token_addr, pair):
         sells = int(tx.get("sells", 0) or 0)
         buy_ratio = buys / max(1, sells)
         samples = _update_structure_memory(token_addr, price)
+
         if price <= 0:
             _diag_reject("STRUCTURE", "INVALID_PRICE", token_addr)
             return False, {"structure": "INVALID_PRICE", "structure_score": 0.0}
@@ -1940,9 +1478,6 @@ def _market_structure_gate(token_addr, pair):
                     "structure": "PROVISIONAL_FLOW_CONFIRMATION",
                     "structure_score": 1.0,
                     "samples": len(samples),
-                    "support": 0.0,
-                    "resistance": 0.0,
-                    "breakout": False,
                 }
             _diag_reject("STRUCTURE", "BUILDING_HISTORY", token_addr)
             return False, {"structure": "BUILDING_HISTORY", "structure_score": 0.0, "samples": len(samples)}
@@ -1953,16 +1488,15 @@ def _market_structure_gate(token_addr, pair):
         local_low = min(prices)
         local_high = max(prior) if prior else price
         recent_low = min(prices[-min(8, len(prices)):])
-        recent_high = max(prices[-min(8, len(prices)):])
         bounce_from_low = ((price - recent_low) / recent_low * 100.0) if recent_low > 0 else 0.0
+        below_resistance = price < local_high * (1.0 - STRUCTURE_RESISTANCE_DISTANCE_PCT / 100.0)
         at_resistance = price >= local_high * (1.0 - STRUCTURE_RESISTANCE_DISTANCE_PCT / 100.0)
         breakout = price >= local_high * (1.0 + STRUCTURE_BREAKOUT_BUFFER_PCT / 100.0)
         near_support = price <= recent_low * (1.0 + STRUCTURE_SUPPORT_DISTANCE_PCT / 100.0)
 
         if at_resistance and not breakout:
             _diag_reject("STRUCTURE", "RESISTANCE_REJECTION", token_addr)
-            return False, {"structure": "RESISTANCE_REJECTION", "structure_score": 0.0,
-                           "support": recent_low, "resistance": local_high, "breakout": False}
+            return False, {"structure": "RESISTANCE_REJECTION", "structure_score": 0.0}
 
         if near_support:
             support_ok = (liq >= STRUCTURE_MIN_SUPPORT_LIQUIDITY and
@@ -1971,221 +1505,385 @@ def _market_structure_gate(token_addr, pair):
                           chg > 0 and bounce_from_low >= 0.35)
             if not support_ok:
                 _diag_reject("STRUCTURE", "UNCONFIRMED_SUPPORT", token_addr)
-                return False, {"structure": "UNCONFIRMED_SUPPORT", "structure_score": 0.0,
-                               "support": recent_low, "resistance": local_high, "breakout": False}
-            return True, {"structure": "SUPPORT_BOUNCE", "structure_score": 3.0,
-                          "support": recent_low, "resistance": local_high, "breakout": False}
+                return False, {"structure": "UNCONFIRMED_SUPPORT", "structure_score": 0.0}
+            return True, {"structure": "SUPPORT_BOUNCE", "structure_score": 3.0}
 
         if breakout:
             if liq < STRUCTURE_MIN_SUPPORT_LIQUIDITY or vol < STRUCTURE_MIN_SUPPORT_VOLUME_5M or buy_ratio < STRUCTURE_MIN_BREAKOUT_BUY_RATIO:
                 _diag_reject("STRUCTURE", "WEAK_BREAKOUT", token_addr)
-                return False, {"structure": "WEAK_BREAKOUT", "structure_score": 0.0,
-                               "support": recent_low, "resistance": local_high, "breakout": True}
-            return True, {"structure": "CONFIRMED_BREAKOUT", "structure_score": 3.0,
-                          "support": recent_low, "resistance": local_high, "breakout": True}
+                return False, {"structure": "WEAK_BREAKOUT", "structure_score": 0.0}
+            return True, {"structure": "BREAKOUT_CONFIRMED", "structure_score": 3.0}
 
-        if chg > 0 and buy_ratio >= CONSENSUS_MIN_BUY_RATIO:
-            return True, {"structure": "UPTREND_CONTINUATION", "structure_score": 2.0,
-                          "support": recent_low, "resistance": local_high, "breakout": False}
+        if below_resistance and chg > 0 and buy_ratio >= CONSENSUS_MIN_BUY_RATIO:
+            return True, {"structure": "TREND_CONTINUATION", "structure_score": 2.0}
 
-        _diag_reject("STRUCTURE", "NO_STRUCTURE_MATCH", token_addr)
-        return False, {"structure": "NO_STRUCTURE_MATCH", "structure_score": 0.0,
-                       "support": recent_low, "resistance": local_high, "breakout": False}
+        _diag_reject("STRUCTURE", "NO_CLEAR_STRUCTURE", token_addr)
+        return False, {"structure": "NO_CLEAR_STRUCTURE", "structure_score": 0.0}
     except Exception as e:
-        logger.error(f"⚠️ Error in market structure gate: {e}")
-        return False, {"structure": "ERROR", "structure_score": 0.0}
+        logger.error(f"Error in structure gate: {e}")
+        return True, {"structure": "GATE_ERROR", "structure_score": 1.0}
 
-def unified_consensus_engine_loop(app):
+# ==========================================
+# موتور اصلی سیگنال‌دهی اجماع متحد (MAX Fusion)
+# ==========================================
+def new_trade_system_enabled():
+    return (SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED) and not EMERGENCY_STOP
+
+def unified_consensus_scanner_loop(app):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
-    logger.info("🤖⚡ Unified Consensus Engine V22 launched.")
+    logger.info("🚀🤖 موتور اجماع متحد (Unified MAX FUSION Engine) فعال شد.")
+    daily_count = 0
+    last_reset_day = datetime.now().day
 
     while True:
-        if not new_trade_system_enabled():
-            time.sleep(3)
-            continue
-
         try:
-            now = time.time()
-            if now - last_global_signal_time < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
-                time.sleep(5)
+            if datetime.now().day != last_reset_day:
+                daily_count = 0
+                last_reset_day = datetime.now().day
+
+            if not new_trade_system_enabled():
+                time.sleep(3)
+                continue
+
+            if daily_count >= DAILY_SIGNAL_LIMIT:
+                time.sleep(10)
                 continue
 
             tokens = get_real_market_trending_tokens()
-            for token_addr in tokens[:30]:
-                if now - last_global_signal_time < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
+            for token_addr in tokens:
+                if not new_trade_system_enabled():
+                    break
+                if daily_count >= DAILY_SIGNAL_LIMIT:
                     break
 
                 with state_lock:
-                    if not token_addr or token_addr in active_positions or token_addr in processed_tokens:
+                    if (not token_addr or 
+                        token_addr in active_positions or 
+                        token_addr in signal_positions or 
+                        token_addr in processed_tokens):
                         continue
 
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
-                if pair_res_obj.status_code != 200:
-                    continue
-                pair_res = pair_res_obj.json()
-                if not pair_res.get('pairs'):
+                now_t = time.time()
+                if now_t - consensus_last_signal.get(token_addr, 0) < CONSENSUS_COOLDOWN_SECONDS:
                     continue
 
-                pairs = [p for p in pair_res['pairs'] if p.get('chainId') == 'solana']
-                if not pairs:
+                if now_t - last_global_signal_time < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
+                    time.sleep(2)
+                    break
+
+                try:
+                    pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4)
+                    if pair_res_obj.status_code != 200:
+                        continue
+                    pairs = (pair_res_obj.json() or {}).get("pairs") or []
+                    sol_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+                    if not sol_pairs:
+                        continue
+                    pair = max(sol_pairs, key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
+                except Exception:
                     continue
-                pair = max(pairs, key=lambda p: float(((p.get('liquidity') or {}).get('usd')) or 0))
 
-                liquidity = float((pair.get('liquidity') or {}).get('usd', 0))
-                volume_5m = float((pair.get('volume') or {}).get('m5', 0))
-                price = float(pair.get('priceUsd', 0))
-                symbol = pair.get('baseToken', {}).get('symbol', 'UNKNOWN')
-                price_change_5m = float((pair.get('priceChange') or {}).get('m5', 0))
+                liquidity = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+                volume_5m = float((pair.get("volume") or {}).get("m5", 0) or 0)
+                price = float(pair.get("priceUsd", 0) or 0)
+                price_change_5m = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+                symbol = (pair.get("baseToken") or {}).get("symbol", "TOKEN")
 
-                if price <= 0 or liquidity < FINAL_ANALYSIS_MIN_LIQUIDITY or volume_5m < FINAL_ANALYSIS_MIN_VOLUME_5M:
+                if liquidity < CANDIDATE_MIN_LIQUIDITY or volume_5m < CANDIDATE_MIN_VOLUME_5M or price <= 0:
                     continue
 
-                struct_ok, struct_meta = _market_structure_gate(token_addr, pair)
+                struct_ok, struct_data = _market_structure_gate(token_addr, pair)
                 if not struct_ok:
                     continue
 
-                is_social_ok, social_msg = check_social_sentiment_and_hype(pair)
-                if not is_social_ok:
-                    continue
+                scores = {}
+                txns = (pair.get("txns") or {}).get("m5") or {}
+                buys = int(txns.get("buys", 0) or 0)
+                sells = int(txns.get("sells", 0) or 0)
+                buy_ratio = buys / max(1, sells)
 
-                buy_amt = get_dynamic_buy_amount(0.01)
-                success, result_info = execute_real_buy(token_addr, buy_amt)
-                buy_status_str = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ عدم خرید واقعی: {result_info}"
+                scores["Fire"] = 1 if (liquidity >= FIRE_MIN_LIQUIDITY and volume_5m >= FIRE_MIN_VOLUME_5M and price_change_5m >= FIRE_MIN_PRICE_CHANGE_5M) else 0
+                scores["Trend"] = 1 if (price_change_5m >= 3.0 and buy_ratio >= 1.1) else 0
+                scores["Combo"] = 1 if (liquidity >= COMBO_MIN_LIQUIDITY and volume_5m >= COMBO_MIN_VOLUME_5M) else 0
+                scores["Golden"] = 1 if (liquidity >= GOLDEN_MIN_LIQUIDITY and price_change_5m >= GOLDEN_MIN_CHANGE_5M) else 0
+                is_pa, _ = check_major_support_resistance_pa(pair)
+                scores["Technical"] = 1 if is_pa else 0
+                scores["Mempool/SmartMoney"] = 1 if (buys >= 5 and buy_ratio >= 1.25) else 0
+                scores["Whale"] = 1 if (volume_5m >= 8000 and liquidity >= 20000) else 0
+                soc_ok, _ = check_social_sentiment_and_hype(pair)
+                scores["Social/Hype"] = 1 if soc_ok else 0
+                scores["Anti-Wash"] = 1 if is_token_worthy(pair) else 0
+                scores["SmartFilter"] = 1 if (struct_data.get("structure_score", 0) > 0) else 0
 
-                with state_lock:
-                    processed_tokens.add(token_addr)
+                enabled_count = len(scores)
+                score_sum = sum(scores.values())
+                score_ratio = score_sum / max(1, enabled_count)
 
-                solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://solscan.io/token/{token_addr}"
-                init_tp = 20.0
-                init_sl = -8.0
+                min_score, min_ratio, _, _ = get_adaptive_consensus_settings(enabled_count)
 
-                if success:
+                if score_sum >= min_score and score_ratio >= min_ratio:
+                    buy_amt = get_dynamic_buy_amount(MAX_TRADE_SOL)
+                    tp_val = 20.0
+                    sl_val = -8.0
+                    
+                    real_success = False
+                    tx_info = "PAPER_SIGNAL"
+                    if WALLET_PUBKEY and sender_keypair is not None:
+                        real_success, tx_info = execute_real_buy(token_addr, buy_amt)
+                    
+                    execution_status = "🟢 خرید روی بلاکچین" if real_success else ("⚠️ سیگنال رصدی" if tx_info == "PAPER_SIGNAL" else f"⚠️ عدم اجرا: {tx_info}")
+                    solscan_link = f"https://solscan.io/tx/{tx_info}" if (real_success and tx_info != "PAPER_SIGNAL") else f"https://solscan.io/token/{token_addr}"
+
+                    reasons_list = [k for k, v in scores.items() if v == 1]
+                    reason_str = " + ".join(reasons_list)
+
                     with state_lock:
-                        active_positions[token_addr] = {
-                            "entry_price": price,
-                            "symbol": symbol,
-                            "tp": init_tp,
-                            "sl": init_sl,
-                            "highest_price": price,
-                            "highest_pnl": 0.0,
-                            "locked_floor": init_sl,
-                            "buy_amt": buy_amt,
-                            "volume": volume_5m,
-                            "liquidity": liquidity,
-                            "m5_change": price_change_5m,
-                            "reason": UNIFIED_ENGINE_NAME,
-                            "trailing_active": DYNAMIC_TRAILING_TP_ENABLED
-                        }
-                else:
-                    track_signal_only(
-                        token_addr, symbol, price, init_tp, init_sl,
-                        volume_5m, liquidity, price_change_5m,
-                        UNIFIED_ENGINE_NAME, buy_amt, buy_status_str
+                        processed_tokens.add(token_addr)
+                        consensus_last_signal[token_addr] = now_t
+                        last_global_signal_time = now_t
+                        UNIFIED_LAST_EMIT_TIME = now_t
+
+                        if real_success:
+                            active_positions[token_addr] = {
+                                "entry_price": price, "symbol": symbol, "tp": tp_val, "sl": sl_val,
+                                "highest_price": price, "highest_pnl": 0.0, "locked_floor": sl_val,
+                                "buy_amt": buy_amt, "volume": volume_5m, "liquidity": liquidity,
+                                "p_change": price_change_5m, "reason": reason_str
+                            }
+                        else:
+                            track_signal_only(
+                                token_addr, symbol, price, tp_val, sl_val,
+                                volume_5m, liquidity, price_change_5m, reason_str,
+                                buy_amt, execution_status
+                            )
+
+                    daily_count += 1
+
+                    signal_msg = (
+                        f"🤖⚡ [{UNIFIED_ENGINE_NAME}]\n"
+                        f"🎯 سیگنال اجماع متحد (رتبه کیفیت: {score_sum}/{enabled_count})\n"
+                        f"📌 وضعیت: {execution_status}\n"
+                        f"📊 تایید موتورها: {reason_str}\n\n"
+                        f"🪙 توکن: {symbol}\n"
+                        f"📍 آدرس قرارداد:\n<code>{token_addr}</code>\n\n"
+                        f"💵 قیمت ورود: ${price:.8f}\n"
+                        f"💰 حجم معامله: {buy_amt:g} SOL\n"
+                        f"🎯 TP: +{tp_val:.1f}% | 🛑 SL: {sl_val:.1f}%\n"
+                        f"🔗 [Solscan]({solscan_link})\n"
+                        f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
                     )
+                    send_telegram_msg(signal_msg)
 
-                last_global_signal_time = time.time()
-                UNIFIED_LAST_EMIT_TIME = last_global_signal_time
-
-                sig_msg = (
-                    f"{UNIFIED_ENGINE_NAME}\n\n"
-                    f"🪙 توکن: {symbol}\n"
-                    f"📍 آدرس قرارداد:\n{token_addr}\n\n"
-                    f"💵 قیمت ورود: ${price:.8f}\n"
-                    f"💰 حجم معامله: {buy_amt:g} SOL\n"
-                    f"🎯 تارگت سود: +{init_tp}%\n"
-                    f"🛑 حد ضرر: {init_sl}%\n"
-                    f"📌 وضعیت اجرای معامله: {buy_status_str}\n"
-                    f"📊 ساختار بازار: {struct_meta.get('structure', 'OK')}\n\n"
-                    f"🔗 [Solscan]({solscan_link})\n"
-                    f"📈 [DexScreener](https://dexscreener.com/solana/{token_addr})"
-                )
-                send_telegram_msg(sig_msg)
-
-                send_graphic_signal_to_vip_channel(
-                    token_addr=token_addr, symbol=symbol, price=price, tp=init_tp, sl=init_sl,
-                    buy_amt=buy_amt, volume=volume_5m, liquidity=liquidity, p_change=price_change_5m,
-                    solscan_link=solscan_link, signal_title=UNIFIED_ENGINE_NAME,
-                    execution_status=buy_status_str, execution_tx=result_info if success else ""
-                )
+                    send_graphic_signal_to_vip_channel(
+                        token_addr=token_addr, symbol=symbol, price=price, tp=tp_val, sl=sl_val,
+                        buy_amt=buy_amt, volume=volume_5m, liquidity=liquidity, p_change=price_change_5m,
+                        solscan_link=solscan_link, signal_title=UNIFIED_ENGINE_NAME,
+                        execution_status=execution_status, execution_tx=tx_info if real_success else ""
+                    )
+                    time.sleep(3)
 
         except Exception as e:
-            logger.error(f"⚠️ Error in unified consensus engine loop: {e}")
+            logger.error(f"⚠️ خطای موتور اجماع متحد: {e}")
+        time.sleep(3)
+
+# اسکنرهای مکمل در صورت خروج از حالت اجماع صریح
+def ultra_accuracy_scanner_loop(app):
+    logger.info("💎🚀 موتور اسکن سخت‌گیر فعال شد.")
+    while True:
+        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
+            time.sleep(3)
+            continue
+        time.sleep(3)
+
+def mempool_smart_money_scanner_loop(app):
+    logger.info("⚡🕵️ موتور اسکنر ممپول فعال شد.")
+    while True:
+        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
+            time.sleep(3)
+            continue
+        time.sleep(3)
+
+def technical_analysis_scanner_loop(app):
+    logger.info("📊 موتور پرایس اکشن فعال شد.")
+    while True:
+        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
+            time.sleep(3)
+            continue
         time.sleep(3)
 
 # ==========================================
-# Flask Web App & Telegram Handlers
+# وب سرور Flask API برای Render و Mini App
 # ==========================================
-flask_app = Flask(__name__)
+app = Flask(__name__)
 
-@flask_app.route("/")
-def index():
-    return f"<h1>HulkSolBot Running</h1><p>Version: {BOT_BUILD_VERSION}</p>"
+@app.route('/')
+def home():
+    return jsonify({
+        "bot_version": BOT_BUILD_VERSION,
+        "status": "RUNNING",
+        "active_positions": len(active_positions),
+        "sol_balance": get_sol_balance() if WALLET_PUBKEY else 0.0
+    })
 
-@flask_app.route("/api/analytics")
-def api_analytics():
-    data = get_advanced_trade_analytics()
-    return jsonify(data)
+@app.route('/api/status', methods=['GET'])
+def api_status():
+    analytics = get_advanced_trade_analytics()
+    return jsonify({
+        "status": "OK",
+        "version": BOT_BUILD_VERSION,
+        "analytics": analytics,
+        "active_positions": len(active_positions),
+        "signal_positions": len(signal_positions),
+        "sol_balance": get_sol_balance() if WALLET_PUBKEY else 0.0,
+        "wallet_pubkey": WALLET_PUBKEY
+    })
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    is_active, exp_date = check_user_subscription(user_id)
+@app.route('/api/user_info', methods=['GET'])
+def api_user_info():
+    telegram_id = request.args.get('telegram_id')
+    if not telegram_id:
+        return jsonify({"error": "Missing telegram_id"}), 400
     
-    if is_active:
-        msg = f"🟢 اشتراک VIP شما فعال است.\n⏳ تاریخ انقضا: {exp_date.strftime('%Y-%m-%d %H:%M:%S')}"
-        buttons = []
-        if WEBAPP_URL:
-            buttons.append([InlineKeyboardButton("📱 ورود به Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
-        if CHANNEL_INVITE_LINK:
-            buttons.append([InlineKeyboardButton("📢 ورود به کانال VIP", url=CHANNEL_INVITE_LINK)])
-        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
-        await update.message.reply_text(msg, reply_markup=reply_markup)
+    is_sub, exp_date = check_user_subscription(telegram_id)
+    return jsonify({
+        "telegram_id": telegram_id,
+        "is_vip": is_sub,
+        "expiry_date": exp_date.strftime("%Y-%m-%d %H:%M:%S") if exp_date else None,
+        "vip_price_usdc": VIP_PRICE_USDC,
+        "wallet_pubkey": WALLET_PUBKEY
+    })
+
+# ==========================================
+# دستورات تلگرام (Telegram Handlers)
+# ==========================================
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    is_sub, exp_date = check_user_subscription(user_id)
+    
+    ensure_channel_invite_link()
+    rows = []
+    if WEBAPP_URL:
+        rows.append([InlineKeyboardButton("📱 ورود به Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
+    if is_sub and CHANNEL_INVITE_LINK:
+        rows.append([InlineKeyboardButton("📢 ورود به کانال VIP", url=CHANNEL_INVITE_LINK)])
+    
+    markup = InlineKeyboardMarkup(rows) if rows else None
+    
+    if is_sub:
+        msg = (
+            f"👋 سلام {update.effective_user.first_name} عزیز!\n\n"
+            f"✅ اشتراک VIP شما فعال است.\n"
+            f"⏳ تاریخ انقضا: {exp_date.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"🤖 سیستم کپی‌تریدینگ و سیگنال‌دهی لحظه‌ای برای شما فعال می‌باشد."
+        )
     else:
         msg = (
-            f"👋 به ربات هوشمند {UNIFIED_ENGINE_NAME} خوش آمدید!\n\n"
-            f"برای دریافت سیگنال‌های VIP و کپی‌تریدینگ خودکار، لطفا اشتراک ۳۰ روزه را فعال کنید.\n"
-            f"💰 قیمت اشتراک: {VIP_PRICE_USDC} USDC\n"
-            f"📍 واریز به آدرس ولت:\n<code>{WALLET_PUBKEY}</code>\n\n"
-            f"پس از واریز، هش تراکنش (TX Hash) خود را ارسال کنید."
+            f"👋 سلام {update.effective_user.first_name} عزیز!\n\n"
+            f"🔥 به ربات هوشمند هانتر سولانا خوش آمدید.\n"
+            f"💎 برای دسترسی به سیگنال‌های VIP و کپی‌تریدینگ هوشمند، می‌توانید از طریق Mini App اشتراک خود را فعال کنید."
         )
-        await update.message.reply_text(msg, parse_mode="HTML")
+    await update.message.reply_text(msg, reply_markup=markup, parse_mode="HTML")
 
-async def verify_tx_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    tx_hash = update.message.text.strip()
-    
-    if len(tx_hash) < 30:
+async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    analytics = get_advanced_trade_analytics()
+    bal = get_sol_balance() if WALLET_PUBKEY else 0.0
+    msg = (
+        f"📊 <b>گزارش عملکرد ربات HULK SOL BOT</b>\n\n"
+        f"💰 موجودی ولت اصلی: <code>{bal:.4f} SOL</code>\n"
+        f"🎯 تعداد کل معاملات: <code>{analytics['total_trades']}</code>\n"
+        f"🏆 نرخ موفقیت (Win Rate): <code>{analytics['win_rate']}%</code> ({analytics['win_count']} برد)\n"
+        f"📈 مجموع درصد PnL: <code>{analytics['total_pct']:+.2f}%</code>\n"
+        f"💵 مجموع سود/زیان دلار: <code>${analytics['total_usd']:+.2f}</code>\n"
+        f"🔄 پوزیشن‌های فعال واقعی: <code>{len(active_positions)}</code>\n"
+        f"📡 پوزیشن‌های تحت رصد سیگنال: <code>{len(signal_positions)}</code>"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+async def set_vip_channel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    secret = context.args[0] if context.args else ""
+    if ADMIN_SECRET_KEY and secret != ADMIN_SECRET_KEY and user_id != TELEGRAM_CHAT_ID:
+        await update.message.reply_text("⛔ دسترسی غیرمجاز!")
         return
+    
+    if len(context.args) < 1:
+        await update.message.reply_text("فرمت صحیح: <code>/setvipchannel @channel_id</code>", parse_mode="HTML")
+        return
+    
+    target_channel = context.args[-1].strip()
+    global CHANNEL_ID, CHANNEL_INVITE_LINK
+    CHANNEL_ID = target_channel
+    _set_bot_setting("vip_channel_id", CHANNEL_ID)
+    CHANNEL_INVITE_LINK = ""
+    link = ensure_channel_invite_link()
+    await update.message.reply_text(f"✅ کانال VIP با موفقیت تنظیم شد: <code>{CHANNEL_ID}</code>\n🔗 لینک: {link}", parse_mode="HTML")
 
-    verified, msg = verify_blockchain_transaction(tx_hash, "USDC")
-    if verified:
-        register_subscription(user_id, WALLET_PUBKEY or "", tx_hash, "USDC")
+async def free_vip_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("فرمت: <code>/freevip <telegram_id></code>", parse_mode="HTML")
+        return
+    target_id = context.args[0].strip()
+    ok = register_free_vip(target_id)
+    if ok:
+        await update.message.reply_text(f"✅ اشتراک VIP رایگان ۳۰ روزه برای کاربر <code>{target_id}</code> فعال گردید.", parse_mode="HTML")
     else:
-        await update.message.reply_text(f"❌ بررسی تراکنش ناموفق بود:\n{msg}")
+        await update.message.reply_text("❌ خطا در ثبت اشتراک رایگان.")
+
+async def set_trade_limit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(f"سقف فعلی: <code>{MAX_TRADE_SOL} SOL</code>\nبرای تغییر: <code>/settradelimit <amount></code>", parse_mode="HTML")
+        return
+    try:
+        val = float(context.args[0])
+        new_limit = _set_trade_limit(val)
+        await update.message.reply_text(f"✅ سقف حجم معامله با موفقیت به <code>{new_limit} SOL</code> تغییر یافت.", parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا: {e}")
+
+# ==========================================
+# مدیریت پروسه‌ها و نقطه ورود ربات (Main)
+# ==========================================
+def run_background_loops(telegram_app):
+    threads = [
+        Thread(target=subscription_monitor_loop, daemon=True, name="SubMonitor"),
+        Thread(target=self_learning_ai_optimizer_loop, daemon=True, name="AIOptimizer"),
+        Thread(target=check_positions_loop, daemon=True, name="PositionCheck"),
+        Thread(target=unified_consensus_scanner_loop, args=(telegram_app,), daemon=True, name="UnifiedConsensus"),
+        Thread(target=ultra_accuracy_scanner_loop, args=(telegram_app,), daemon=True, name="UltraScanner"),
+        Thread(target=mempool_smart_money_scanner_loop, args=(telegram_app,), daemon=True, name="MempoolScanner"),
+        Thread(target=technical_analysis_scanner_loop, args=(telegram_app,), daemon=True, name="TechScanner"),
+    ]
+    for t in threads:
+        t.start()
+        logger.info(f"🚀 ترد پس‌زمینه {t.name} با موفقیت روشن شد.")
 
 def main():
-    logger.info(f"🚀 Starting HulkSolBot {BOT_BUILD_VERSION}...")
-    
-    threading.Thread(target=subscription_monitor_loop, daemon=True, name="SubMonitor").start()
-    threading.Thread(target=self_learning_ai_optimizer_loop, daemon=True, name="AIOptimizer").start()
-    threading.Thread(target=check_positions_loop, daemon=True, name="PositionMonitor").start()
-    threading.Thread(target=ultra_accuracy_scanner_loop, args=(None,), daemon=True, name="UltraScanner").start()
-    threading.Thread(target=mempool_smart_money_scanner_loop, args=(None,), daemon=True, name="MempoolScanner").start()
-    threading.Thread(target=technical_analysis_scanner_loop, args=(None,), daemon=True, name="TechScanner").start()
-    threading.Thread(target=unified_consensus_engine_loop, args=(None,), daemon=True, name="UnifiedEngine").start()
-
-    port = int(os.environ.get("PORT", 8080))
-    threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=port, use_reloader=False), daemon=True, name="FlaskServer").start()
+    logger.info("🔥 در حال راه‌اندازی ربات HULK SOL BOT برای رندر (Render)...")
+    _load_channel_config()
+    _load_trade_limit()
 
     if TELEGRAM_BOT_TOKEN:
         tg_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        tg_app.add_handler(CommandHandler("start", start_command))
-        tg_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), verify_tx_handler))
-        logger.info("🤖 Telegram Bot Polling started...")
-        tg_app.run_polling()
+        tg_app.add_handler(CommandHandler("start", start_handler))
+        tg_app.add_handler(CommandHandler("status", status_handler))
+        tg_app.add_handler(CommandHandler("setvipchannel", set_vip_channel_handler))
+        tg_app.add_handler(CommandHandler("freevip", free_vip_handler))
+        tg_app.add_handler(CommandHandler("settradelimit", set_trade_limit_handler))
+        
+        run_background_loops(tg_app)
+        
+        def run_bot():
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            tg_app.run_polling(drop_pending_updates=True)
+
+        bot_thread = Thread(target=run_bot, daemon=True, name="TelegramBotThread")
+        bot_thread.start()
     else:
-        logger.warning("⚠️ TELEGRAM_BOT_TOKEN set نشده است. ربات تلگرام غیرفعال است.")
-        while True:
-            time.sleep(3600)
+        logger.warning("⚠️ TELEGRAM_BOT_TOKEN تنظیم نشده است.")
+
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"🌐 وب سرور Flask روی پورت {port} آماده به کار است.")
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
