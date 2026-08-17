@@ -61,12 +61,12 @@ CHANNEL_INVITE_LINK = os.environ.get("CHANNEL_INVITE_LINK", "").strip()
 
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "").strip()
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()
-VIP_PRICE_SOL = 0.0  # پرداخت SOL غیرفعال است
-VIP_PRICE_USDC = 50.0  # قیمت ثابت اشتراک ۳۰ روزه: 50 USDC
-COPY_TRADING_FEE_PERCENT = 1.0  # کارمزد سرویس کپی‌ترید؛ از بودجه همان معامله کاربر محاسبه می‌شود.
+VIP_PRICE_SOL = 0.0  
+VIP_PRICE_USDC = 50.0  
+COPY_TRADING_FEE_PERCENT = 1.0  
 COPY_DEFAULT_ASSET = "USDC"
 UNIFIED_ENGINE_NAME = "🤖⚡ هالک AI — موتور متحد بازار"
-BOT_BUILD_VERSION = "V25-RENDER-STARTUP-FIX-2026-08-17"
+BOT_BUILD_VERSION = "V30-MASTER-ULTIMATE-2026"
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -104,12 +104,9 @@ def send_rpc_request(payload, timeout=8, retries_count=3):
                 data = res.json()
                 if "error" not in data:
                     return data
-                else:
-                    logger.warning(f"⚠️ پاسخ دارای خطای RPC از {endpoint}: {data.get('error')}")
         except Exception as e:
             logger.debug(f"⚠️ تلاش ناموفق اتصال به RPC ({endpoint}): {e}")
         time.sleep(0.2)
-    # تلاش نهایی روی اولین RPC پایه
     try:
         return http_session.post(RPC_ENDPOINTS[0], json=payload, timeout=timeout).json()
     except Exception as e:
@@ -156,22 +153,10 @@ DYNAMIC_TRAILING_TP_ENABLED = True
 # مدیریت سود پله‌ای بر پایه سقف سود: حدضرر فقط بالا می‌رود و هیچ‌وقت پایین نمی‌آید.
 # مثال: اگر سقف سود به +1000% برسد، حدضرر روی حدود +950% قفل می‌شود.
 TRAILING_LOCK_TABLE = (
-    # سقف سود -> حداقل سودی که اجازه می‌دهیم پس بدهد
-    (1000.0, 950.0),
-    (750.0, 650.0),
-    (500.0, 350.0),
-    (300.0, 230.0),
-    (200.0, 155.0),
-    (150.0, 110.0),
-    (100.0, 75.0),
-    (75.0, 55.0),
-    (50.0, 35.0),
-    (40.0, 28.0),
-    (30.0, 20.0),
-    (25.0, 15.0),
-    (20.0, 10.0),
-    (15.0, 7.0),
-    (10.0, 3.0),
+    (1000.0, 950.0), (750.0, 650.0), (500.0, 350.0), (300.0, 230.0),
+    (200.0, 155.0), (150.0, 110.0), (100.0, 75.0), (75.0, 55.0),
+    (50.0, 35.0), (40.0, 28.0), (30.0, 20.0), (25.0, 15.0), (20.0, 10.0),
+    (15.0, 7.0), (10.0, 3.0),
 )
 TRAILING_WEAKNESS_ENABLED = True
 TRAILING_WEAK_SELL_RATIO = 1.45
@@ -280,7 +265,7 @@ def init_db():
             """)
             conn.commit()
             conn.close()
-            logger.info("✅ دیتابیس با قابلیت WAL و کارایی حداکثری مقداردهی اولیه شد.")
+            logger.info("✅ دیتابیس با موفقیت فعال و مقداردهی شد.")
         except Exception as e:
             logger.error(f"⚠️ خطای دیتابیس: {e}")
 
@@ -1904,39 +1889,39 @@ def advanced_filter_enabled():
 # حالت شکار سخت‌گیر: سیگنال کمتر، کیفیت فیلتر بالاتر.
 # این اعداد «تلاش برای win-rate بالا» هستند و تضمین ۹۰٪ سود نیستند.
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
-CONSENSUS_MIN_SCORE = 6
-CONSENSUS_MIN_RATIO = 0.60
-CONSENSUS_COOLDOWN_SECONDS = 180
+CONSENSUS_MIN_SCORE = 4.0
+CONSENSUS_MIN_RATIO = 0.55
+CONSENSUS_COOLDOWN_SECONDS = 120
 
 # Daily signal cap: editable from the management panel, 1..50. Default: 15.
-DAILY_SIGNAL_LIMIT = 15
+DAILY_SIGNAL_LIMIT = 25
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 15 * 60
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 3 * 60
 # Signal budget is capacity only; quality thresholds never depend on this value.
 SIGNAL_BUDGET_MIN = 1
 SIGNAL_BUDGET_MAX = 50
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
-CONSENSUS_MIN_LIQUIDITY = 10000.0
-CONSENSUS_MIN_VOLUME_5M = 1500.0
+CONSENSUS_MIN_LIQUIDITY = 25000.0
+CONSENSUS_MIN_VOLUME_5M = 3000.0
 CONSENSUS_MIN_CHANGE_5M = 0.5
-CONSENSUS_MAX_CHANGE_5M = 35.0
-CONSENSUS_MIN_BUY_RATIO = 1.05
+CONSENSUS_MAX_CHANGE_5M = 40.0
+CONSENSUS_MIN_BUY_RATIO = 1.15
 
 # V3: two-stage candidate pipeline.
 # These thresholds only decide whether a market is worth deeper analysis.
 # They do NOT authorize a trade by themselves.
-CANDIDATE_MIN_LIQUIDITY = 5000.0
-CANDIDATE_MIN_VOLUME_5M = 500.0
-CANDIDATE_MIN_BUY_RATIO = 1.02
-CANDIDATE_MIN_BUYS = 1
+CANDIDATE_MIN_LIQUIDITY = 25000.0
+CANDIDATE_MIN_VOLUME_5M = 1500.0
+CANDIDATE_MIN_BUY_RATIO = 1.10
+CANDIDATE_MIN_BUYS = 2
 
 # Final entry quality remains stricter and is checked after structure/flow analysis.
-FINAL_ANALYSIS_MIN_LIQUIDITY = 10000.0
-FINAL_ANALYSIS_MIN_VOLUME_5M = 1500.0
-FINAL_ANALYSIS_MIN_BUY_RATIO = 1.10
-FINAL_BREAKOUT_MIN_VOLUME_5M = 2500.0
-FINAL_SUPPORT_MIN_VOLUME_5M = 1500.0
+FINAL_ANALYSIS_MIN_LIQUIDITY = 25000.0
+FINAL_ANALYSIS_MIN_VOLUME_5M = 3000.0
+FINAL_ANALYSIS_MIN_BUY_RATIO = 1.15
+FINAL_BREAKOUT_MIN_VOLUME_5M = 4000.0
+FINAL_SUPPORT_MIN_VOLUME_5M = 3000.0
 ADAPTIVE_TARGET_WIN_RATE = 80.0
 ADAPTIVE_LOOKBACK = 20
 ADAPTIVE_MIN_SAMPLE = 10
@@ -1952,24 +1937,20 @@ consensus_last_signal = {}
 # ==========================================================
 STRUCTURE_FILTER_ENABLED = True
 STRUCTURE_LOOKBACK = 30
-STRUCTURE_MIN_SAMPLES = 4
-STRUCTURE_SAMPLE_MIN_GAP = 0.75
-STRUCTURE_SUPPORT_DISTANCE_PCT = 3.5
-STRUCTURE_RESISTANCE_DISTANCE_PCT = 2.0
-STRUCTURE_BREAKOUT_BUFFER_PCT = 0.75
-STRUCTURE_MIN_SUPPORT_LIQUIDITY = 12000.0
-STRUCTURE_MIN_SUPPORT_VOLUME_5M = 2500.0
+STRUCTURE_MIN_SAMPLES = 3
+STRUCTURE_SAMPLE_MIN_GAP = 0.5
+STRUCTURE_SUPPORT_DISTANCE_PCT = 4.0
+STRUCTURE_RESISTANCE_DISTANCE_PCT = 2.5
+STRUCTURE_BREAKOUT_BUFFER_PCT = 0.6
+STRUCTURE_MIN_SUPPORT_LIQUIDITY = 25000.0
+STRUCTURE_MIN_SUPPORT_VOLUME_5M = 3000.0
 STRUCTURE_MIN_SUPPORT_BUY_RATIO = 1.15
 STRUCTURE_MIN_BREAKOUT_BUY_RATIO = 1.20
 STRUCTURE_HISTORY_TTL_SECONDS = 15 * 60
 _structure_memory = {}
 _structure_lock = Lock()
 
-def _diag_reject(category, reason, token_addr=""):
-    logger.debug(f"⛔ رد سیگنال [{category}] - دلیل: {reason} | توکن: {token_addr}")
 
-def _analysis_diag(stage, token_addr=""):
-    logger.debug(f"🔍 مرحله تحلیل [{stage}] | توکن: {token_addr}")
 
 def _update_structure_memory(token_addr, price):
     """Store real observed prices; never invents candles or OHLC data."""
@@ -1992,93 +1973,25 @@ def _update_structure_memory(token_addr, price):
         return []
 
 def _market_structure_gate(token_addr, pair):
-    """Return structure evidence for a BUY candidate.
-
-    Rules:
-      * no blind 'touch the bottom' entry; support must have liquidity and
-        buy pressure, and price must show a bounce away from the low.
-      * no entry directly under a known resistance unless the resistance
-        is actually broken with strong buy pressure.
-      * continuation entries require an upward trend and healthy flow.
-    """
     if not STRUCTURE_FILTER_ENABLED:
         return True, {"structure": "DISABLED", "structure_score": 0.0}
     try:
         price = float(pair.get("priceUsd", 0) or 0)
-        chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
         liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
         vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
         tx = (pair.get("txns") or {}).get("m5", {}) or {}
         buys = int(tx.get("buys", 0) or 0)
         sells = int(tx.get("sells", 0) or 0)
         buy_ratio = buys / max(1, sells)
-        samples = _update_structure_memory(token_addr, price)
+
         if price <= 0:
-            _diag_reject("STRUCTURE", "INVALID_PRICE", token_addr)
             return False, {"structure": "INVALID_PRICE", "structure_score": 0.0}
 
-        # Do not kill the signal pipeline while a token is still building
-        # local price history. We already have live liquidity/volume/order-flow
-        # evidence; use that as a provisional structure check, then switch to
-        # the full swing-high/swing-low gate once enough samples exist.
-        if len(samples) < STRUCTURE_MIN_SAMPLES:
-            _analysis_diag("warmup_checked", token_addr=token_addr)
-            provisional_ok = (
-                liq >= CONSENSUS_MIN_LIQUIDITY and
-                vol >= CONSENSUS_MIN_VOLUME_5M and
-                buys > 0 and buy_ratio >= CONSENSUS_MIN_BUY_RATIO and chg >= CONSENSUS_MIN_CHANGE_5M
-            )
-            if provisional_ok:
-                return True, {
-                    "structure": "PROVISIONAL_FLOW_CONFIRMATION",
-                    "structure_score": 1.0,
-                    "samples": len(samples),
-                    "support": 0.0,
-                    "resistance": 0.0,
-                    "breakout": False,
-                }
-            _diag_reject("STRUCTURE", "BUILDING_HISTORY", token_addr)
-            return False, {"structure": "BUILDING_HISTORY", "structure_score": 0.0, "samples": len(samples)}
+        # کنترل سخت‌گیرانه نقدینگی بالای ۲۵,۰۰۰ دلار
+        if liq < STRUCTURE_MIN_SUPPORT_LIQUIDITY or vol < STRUCTURE_MIN_SUPPORT_VOLUME_5M or buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO:
+            return False, {"structure": "WEAK_STRUCTURE_FLOW", "structure_score": 0.0}
 
-        _analysis_diag("full_structure_checked", token_addr=token_addr)
-        prices = [x[1] for x in samples]
-        prior = prices[:-1]
-        local_low = min(prices)
-        local_high = max(prior) if prior else price
-        recent_low = min(prices[-min(8, len(prices)):])
-        recent_high = max(prices[-min(8, len(prices)):])
-        bounce_from_low = ((price - recent_low) / recent_low * 100.0) if recent_low > 0 else 0.0
-        below_resistance = price < local_high * (1.0 - STRUCTURE_RESISTANCE_DISTANCE_PCT / 100.0)
-        at_resistance = price >= local_high * (1.0 - STRUCTURE_RESISTANCE_DISTANCE_PCT / 100.0)
-        breakout = price >= local_high * (1.0 + STRUCTURE_BREAKOUT_BUFFER_PCT / 100.0)
-        near_support = price <= recent_low * (1.0 + STRUCTURE_SUPPORT_DISTANCE_PCT / 100.0)
-
-        # Direct resistance entries are forbidden unless a real breakout is confirmed.
-        if at_resistance and not breakout:
-            _diag_reject("STRUCTURE", "RESISTANCE_REJECTION", token_addr)
-            return False, {"structure": "RESISTANCE_REJECTION", "structure_score": 0.0,
-                           "support": recent_low, "resistance": local_high, "breakout": False}
-
-        # A bottom entry is valid only after a bounce and with real liquidity/flow.
-        if near_support:
-            support_ok = (liq >= STRUCTURE_MIN_SUPPORT_LIQUIDITY and
-                          vol >= STRUCTURE_MIN_SUPPORT_VOLUME_5M and
-                          buy_ratio >= STRUCTURE_MIN_SUPPORT_BUY_RATIO and
-                          chg > 0 and bounce_from_low >= 0.35)
-            if not support_ok:
-                _diag_reject("STRUCTURE", "UNCONFIRMED_SUPPORT", token_addr)
-                return False, {"structure": "UNCONFIRMED_SUPPORT", "structure_score": 0.0,
-                               "support": recent_low, "resistance": local_high, "breakout": False}
-            return True, {"structure": "SUPPORT_BOUNCE", "structure_score": 3.0,
-                          "support": recent_low, "resistance": local_high, "breakout": False}
-
-        # Breakout is allowed only with stronger buy pressure and enough market depth.
-        if breakout:
-            if liq < STRUCTURE_MIN_SUPPORT_LIQUIDITY or vol < STRUCTURE_MIN_SUPPORT_VOLUME_5M or buy_ratio < STRUCTURE_MIN_BREAKOUT_BUY_RATIO:
-                return False, {"structure": "WEAK_BREAKOUT", "structure_score": 0.0}
-            return True, {"structure": "BREAKOUT_CONFIRMED", "structure_score": 3.0, "support": recent_low, "resistance": local_high, "breakout": True}
-
-        return True, {"structure": "CONTINUATION", "structure_score": 1.0, "support": recent_low, "resistance": local_high, "breakout": False}
+        return True, {"structure": "PASSED", "structure_score": 3.0}
     except Exception as e:
         logger.error(f"⚠️ خطای تحلیل ساختار بازار: {e}")
         return True, {"structure": "ERROR_BYPASS", "structure_score": 0.0}
@@ -2405,26 +2318,18 @@ def build_consensus_signal(token_addr, pair):
 # Learning may update engine weights from real closed-trade outcomes,
 # but it must not lower the fixed quality gate just to consume the daily budget.
 def fusion_quality_gate(fusion):
-    """Fixed market-quality gate. Daily budget is never used as a quality knob."""
     try:
         liq = float(fusion.get("liq", 0) or 0)
         vol = float(fusion.get("vol", 0) or 0)
-        chg = float(fusion.get("chg", 0) or 0)
         score = float(fusion.get("score", 0) or 0)
+        buys = int(fusion.get("buys", 0) or 0)
+        sells = int(fusion.get("sells", 0) or 0)
 
-        if liq < CONSENSUS_MIN_LIQUIDITY:
+        if liq < CONSENSUS_MIN_LIQUIDITY or vol < CONSENSUS_MIN_VOLUME_5M:
             return False
-        if vol < CONSENSUS_MIN_VOLUME_5M:
+        if buys < 2 or (sells > 0 and buys < sells * CONSENSUS_MIN_BUY_RATIO):
             return False
-        if chg < CONSENSUS_MIN_CHANGE_5M:
-            return False
-        # MAX keeps a meaningful quality floor, but 10.0 was unreachable
-        # for otherwise valid 1+1 consensus candidates.
-        if MAX_FUSION_ENABLED and score < 4.5:
-            return False
-        if ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 4.0:
-            return False
-        if SYNCHRONIZED_MODE and not ADVANCED_AI_ENABLED and not MAX_FUSION_ENABLED and score < 4.0:
+        if score < CONSENSUS_MIN_SCORE:
             return False
         return True
     except Exception:
@@ -3412,28 +3317,22 @@ def _elite_get_market_tokens():
 
 
 def _fetch_best_solana_pair(token_addr):
-    """Fetch one token once, then consider several strong Solana pairs.
-
-    The previous radar selected only the deepest-liquidity pair. Sentinel keeps
-    the same HTTP cost but evaluates up to three promising pairs from the same
-    response, so a thin/secondary pool cannot hide a better setup.
-    """
     try:
         res = http_session.get(
             f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}",
-            timeout=ELITE_PAIR_TIMEOUT_SECONDS
+            timeout=2.5
         )
         if res.status_code != 200:
             return token_addr, []
-        pairs = (res.json() or {}).get("pairs") or []
-        pairs = [p for p in pairs if p.get("chainId") == "solana"]
-        if not pairs:
-            _diag_reject("PAIR_FETCH", "NO_SOLANA_PAIR_DATA", token_addr)
+        data = res.json() or {}
+        pairs = data.get("pairs") or []
+        sol_pairs = [p for p in pairs if isinstance(p, dict) and p.get("chainId") == "solana"]
+        if not sol_pairs:
             return token_addr, []
-        pairs.sort(key=_sentinel_rank_pair, reverse=True)
-        return token_addr, pairs[:_SENTINEL_PAIR_CHOICES]
-    except Exception as token_error:
-        logger.debug(f"Sentinel token error {token_addr}: {token_error}")
+        sol_pairs.sort(key=lambda x: float((x.get("liquidity") or {}).get("usd") or 0), reverse=True)
+        return token_addr, sol_pairs[:3]
+    except Exception as e:
+        logger.debug(f"Fetch pair error for {token_addr}: {e}")
         return token_addr, []
 
 def _evaluate_elite_token(token_addr):
@@ -3725,7 +3624,6 @@ def _candidate_rank_tuple(item):
 
 
 def _evaluate_token_for_active_modes(token_addr):
-    """Single evaluation contract: one token in, two isolated candidate pools out."""
     token_addr, pairs = _fetch_best_solana_pair(token_addr)
     result = {"analysis": [], "fusion": []}
     if not pairs:
@@ -3736,7 +3634,7 @@ def _evaluate_token_for_active_modes(token_addr):
     analysis_enabled = ("Analysis" in active) and ANALYSIS_ENGINE_ENABLED
 
     for pair in pairs:
-        # ---- ANALYSIS: completely independent of candidate prefilter/Fusion ----
+        # ۱. موتور تحلیل مستقل
         if analysis_enabled:
             try:
                 candidate = _analysis_engine_candidate(token_addr, pair)
@@ -3749,10 +3647,9 @@ def _evaluate_token_for_active_modes(token_addr):
                     candidate["rank_score"] = _candidate_rank_tuple(candidate)[0]
                     result["analysis"].append((token_addr, candidate))
             except Exception as exc:
-                _diag_reject("ANALYSIS", f"EVALUATOR_EXCEPTION:{type(exc).__name__}:{exc}", token_addr)
-                logger.exception("Analysis evaluation failed for %s", token_addr)
+                _diag_reject("ANALYSIS", f"EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
 
-        # ---- FUSION: separate pipeline; Analysis never passes through here ----
+        # ۲. سایر موتورها یا حالت MAX Fusion
         if not _candidate_prefilter(pair):
             continue
         try:
@@ -3778,8 +3675,7 @@ def _evaluate_token_for_active_modes(token_addr):
                         fusion["rank_score"] = _candidate_rank_tuple(fusion)[0]
                         result["fusion"].append((token_addr, fusion))
         except Exception as exc:
-            _diag_reject("FUSION", f"EVALUATOR_EXCEPTION:{type(exc).__name__}:{exc}", token_addr)
-            logger.exception("Fusion evaluation failed for %s", token_addr)
+            _diag_reject("FUSION", f"EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
 
     return token_addr, result
 
