@@ -979,7 +979,13 @@ if __name__ == "__main__":
     flask_thread = Thread(target=lambda: web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False), daemon=True)
     flask_thread.start()
 
-    start_telegram_bot()def execute_real_buy(token_mint, amount_sol):
+    start_telegram_bot()
+    # ==============================================================================
+# HULK SOLANA VIP BOT - V30 MASTER ULTIMATE BATCH VIP
+# PART 2 OF 2 - EXECUTION, ENGINE SCANNERS, WEB APP & TELEGRAM CONTROLLERS
+# ==============================================================================
+
+def execute_real_buy(token_mint, amount_sol):
     if not WALLET_PUBKEY or sender_keypair is None:
         return False, "کلید عمومی ولت نامعتبر است"
 
