@@ -116,7 +116,7 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
 # ==========================================
-# Switches (unchanged)
+# Switches
 # ==========================================
 IS_RUNNING = True
 TREND_ALERT_RUNNING = True
@@ -144,7 +144,7 @@ SOCIAL_SENTIMENT_ENABLED = True
 ANALYSIS_ENGINE_ENABLED = True
 DYNAMIC_TRAILING_TP_ENABLED = True
 
-# ========== IMPROVED TRAILING LOCK TABLE (stair‑step profit) ==========
+# ========== IMPROVED TRAILING LOCK TABLE ==========
 TRAILING_LOCK_TABLE = (
     (1000.0, 950.0), (750.0, 650.0), (500.0, 430.0), (300.0, 260.0),
     (200.0, 170.0), (150.0, 125.0), (100.0, 82.0), (75.0, 60.0),
@@ -2599,13 +2599,20 @@ def api_check_status():
             remaining_seconds = max(0, int((datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S") - datetime.now()).total_seconds()))
         except Exception:
             remaining_seconds = 0
-    copy_amount=0.01; copy_amount_usdc=10.0; copy_asset=COPY_DEFAULT_ASSET; copy_enabled=False
+    copy_amount = 0.01
+    copy_amount_usdc = 10.0
+    copy_asset = COPY_DEFAULT_ASSET
+    copy_enabled = False
     if t_id:
         with db_lock:
             try:
-                conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
-                cur.execute("SELECT copy_enabled, trade_amount_sol, trade_asset, trade_amount_usdc FROM subscribers WHERE telegram_id=?",(str(t_id),))
-                cr=cur.fetchone(); conn.close()
+                conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                cur = conn.cursor()
+                cur.execute("SELECT copy_enabled, trade_amount_sol, trade_asset, trade_amount_usdc FROM subscribers WHERE telegram_id=?", (str(t_id),))
+                cr = cur.fetchone()
+                conn.close()
                 if cr:
-                    copy_enabled=bool(cr[0])
-                    copy_amount=float(cr[1] or
+                    copy_enabled = bool(cr[0])
+                    copy_amount = float(cr[1] or 0.01)
+                    copy_asset = str(cr[2] or COPY_DEFAULT_ASSET).upper()
+                    copy_amount_usdc = float(cr[3] or 10
