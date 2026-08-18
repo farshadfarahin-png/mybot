@@ -200,6 +200,26 @@ TECH_STOP_LOSS = -8.0
 TECH_MIN_LIQUIDITY = 18000
 TECH_MIN_VOLUME_5M = 8000
 
+# آستانه‌های رأی مستقیم موتورهای سیگنال؛ همگی از شیشه سیگنال قابل تنظیم‌اند.
+FIRE_ENGINE_MIN_CHANGE_5M = 3.0
+FIRE_ENGINE_MIN_VOLUME_5M = 3000.0
+TREND_ENGINE_MIN_CHANGE_5M = 5.0
+TREND_ENGINE_MIN_BUY_RATIO = 1.0
+COMBO_ENGINE_MIN_VOLUME_5M = 5000.0
+COMBO_ENGINE_MIN_LIQUIDITY = 15000.0
+COMBO_ENGINE_MIN_BUY_RATIO = 1.0
+GOLDEN_ENGINE_MIN_CHANGE_5M = 8.0
+GOLDEN_ENGINE_MIN_VOLUME_5M = 7000.0
+GOLDEN_ENGINE_MIN_LIQUIDITY = 18000.0
+MEMPOOL_ENGINE_MIN_BUY_RATIO = 1.20
+MEMPOOL_ENGINE_MIN_BUYS = 2
+MEMPOOL_ENGINE_MIN_VOLUME_5M = 5000.0
+MEMPOOL_ENGINE_MIN_LIQUIDITY = 15000.0
+WHALE_ENGINE_MIN_BUYS_OVER_SELLS = 2
+WHALE_ENGINE_MIN_BUYS = 3
+WHALE_ENGINE_MIN_VOLUME_5M = 5000.0
+ANTI_WASH_MAX_SELL_PRESSURE_RATIO = 0.80
+
 AWAITING_STATE = None 
 processed_tokens = set()
 trend_alerted_tokens = set()
@@ -2145,19 +2165,19 @@ def _active_subengine_votes(token_addr, pair):
                     advanced_votes.append(result)
 
     # Hulk predicates are pure local calculations, so evaluate them immediately.
-    if IS_RUNNING and chg >= 3 and vol >= 3000:
+    if IS_RUNNING and chg >= FIRE_ENGINE_MIN_CHANGE_5M and vol >= FIRE_ENGINE_MIN_VOLUME_5M:
         hulk_votes.append("Fire")
-    if TREND_ALERT_RUNNING and chg >= 5 and buys >= max(1, sells):
+    if TREND_ALERT_RUNNING and chg >= TREND_ENGINE_MIN_CHANGE_5M and buys >= max(1, math.ceil(sells * TREND_ENGINE_MIN_BUY_RATIO)):
         hulk_votes.append("Trend")
-    if COMBO_RUNNING and buys > sells and vol >= 5000 and liq >= 15000:
+    if COMBO_RUNNING and buys >= max(1, math.ceil(sells * COMBO_ENGINE_MIN_BUY_RATIO)) and vol >= COMBO_ENGINE_MIN_VOLUME_5M and liq >= COMBO_ENGINE_MIN_LIQUIDITY:
         hulk_votes.append("Combo")
-    if GOLDEN_OPTION and chg >= 8 and vol >= 7000 and liq >= 18000:
+    if GOLDEN_OPTION and chg >= GOLDEN_ENGINE_MIN_CHANGE_5M and vol >= GOLDEN_ENGINE_MIN_VOLUME_5M and liq >= GOLDEN_ENGINE_MIN_LIQUIDITY:
         hulk_votes.append("Golden")
-    if MEMPOOL_SMART_MONEY_ENABLED and buys >= max(2, int(sells * 1.20) + 1) and vol >= 5000 and liq >= 15000:
+    if MEMPOOL_SMART_MONEY_ENABLED and buys >= max(MEMPOOL_ENGINE_MIN_BUYS, math.ceil(sells * MEMPOOL_ENGINE_MIN_BUY_RATIO)) and vol >= MEMPOOL_ENGINE_MIN_VOLUME_5M and liq >= MEMPOOL_ENGINE_MIN_LIQUIDITY:
         hulk_votes.append("Mempool/SmartMoney")
-    if BOTTOM_WHALE_RUNNING and buys >= max(3, sells + 2) and vol >= 5000:
+    if BOTTOM_WHALE_RUNNING and buys >= max(WHALE_ENGINE_MIN_BUYS, sells + WHALE_ENGINE_MIN_BUYS_OVER_SELLS) and vol >= WHALE_ENGINE_MIN_VOLUME_5M:
         hulk_votes.append("Whale")
-    if ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * 0.8):
+    if ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * ANTI_WASH_MAX_SELL_PRESSURE_RATIO):
         hulk_votes.append("Anti-Wash")
 
     all_votes = advanced_votes + hulk_votes
@@ -3447,19 +3467,19 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
         elif engine_name == "SmartFilter":
             ok = bool(SMART_FILTER_ENABLED and is_token_worthy(pair)); strength = 6.0
         elif engine_name == "Fire":
-            ok = bool(IS_RUNNING and chg >= 3 and vol >= 3000); strength = 5.5
+            ok = bool(IS_RUNNING and chg >= FIRE_ENGINE_MIN_CHANGE_5M and vol >= FIRE_ENGINE_MIN_VOLUME_5M); strength = 5.5
         elif engine_name == "Trend":
-            ok = bool(TREND_ALERT_RUNNING and chg >= 5 and buys >= max(1, sells)); strength = 6.0
+            ok = bool(TREND_ALERT_RUNNING and chg >= TREND_ENGINE_MIN_CHANGE_5M and buys >= max(1, math.ceil(sells * TREND_ENGINE_MIN_BUY_RATIO))); strength = 6.0
         elif engine_name == "Combo":
-            ok = bool(COMBO_RUNNING and buys > sells and vol >= 5000 and liq >= 15000); strength = 6.5
+            ok = bool(COMBO_RUNNING and buys >= max(1, math.ceil(sells * COMBO_ENGINE_MIN_BUY_RATIO)) and vol >= COMBO_ENGINE_MIN_VOLUME_5M and liq >= COMBO_ENGINE_MIN_LIQUIDITY); strength = 6.5
         elif engine_name == "Golden":
-            ok = bool(GOLDEN_OPTION and chg >= 8 and vol >= 7000 and liq >= 18000); strength = 7.0
+            ok = bool(GOLDEN_OPTION and chg >= GOLDEN_ENGINE_MIN_CHANGE_5M and vol >= GOLDEN_ENGINE_MIN_VOLUME_5M and liq >= GOLDEN_ENGINE_MIN_LIQUIDITY); strength = 7.0
         elif engine_name == "Mempool/SmartMoney":
-            ok = bool(MEMPOOL_SMART_MONEY_ENABLED and buys >= max(2, int(sells * 1.20) + 1) and vol >= 5000 and liq >= 15000); strength = 7.0
+            ok = bool(MEMPOOL_SMART_MONEY_ENABLED and buys >= max(MEMPOOL_ENGINE_MIN_BUYS, math.ceil(sells * MEMPOOL_ENGINE_MIN_BUY_RATIO)) and vol >= MEMPOOL_ENGINE_MIN_VOLUME_5M and liq >= MEMPOOL_ENGINE_MIN_LIQUIDITY); strength = 7.0
         elif engine_name == "Whale":
-            ok = bool(BOTTOM_WHALE_RUNNING and buys >= max(3, sells + 2) and vol >= 5000); strength = 7.0
+            ok = bool(BOTTOM_WHALE_RUNNING and buys >= max(WHALE_ENGINE_MIN_BUYS, sells + WHALE_ENGINE_MIN_BUYS_OVER_SELLS) and vol >= WHALE_ENGINE_MIN_VOLUME_5M); strength = 7.0
         elif engine_name == "Anti-Wash":
-            ok = bool(ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * 0.8)); strength = 5.5
+            ok = bool(ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * ANTI_WASH_MAX_SELL_PRESSURE_RATIO)); strength = 5.5
         if not ok:
             _diag_reject("ENGINE", f"{engine_name}_NO_ENGINE_TRIGGER", token_addr)
             return None
@@ -4373,11 +4393,229 @@ def _admin_free_panel_text():
         text += "هنوز کاربری ثبت نشده است.\n"
     return text
 
+
+# ==========================================================
+# 🪟 شیشه کنترل کامل سیگنال — تنظیم دستی تمام گلوگاه‌های BUY/SELL
+# این پنل فقط پارامترهای سیگنال‌دهی را تغییر می‌دهد و بخش‌های دیگر ربات را دستکاری نمی‌کند.
+# ==========================================================
+SIGNAL_GLASS_CATEGORIES = {
+    "gates": ("🚧 گلوگاه‌های اصلی", [
+        ("CONSENSUS_MIN_SCORE", "حداقل امتیاز Fusion", "num"),
+        ("CONSENSUS_MIN_RATIO", "حداقل نسبت رأی Fusion (0..1)", "num"),
+        ("CONSENSUS_COOLDOWN_SECONDS", "Cooldown موتور/Fusion (ثانیه)", "num"),
+        ("GLOBAL_SIGNAL_COOLDOWN_SECONDS", "Cooldown سراسری سیگنال (ثانیه)", "num"),
+        ("DAILY_SIGNAL_LIMIT", "سقف روزانه سیگنال", "num"),
+        ("EMERGENCY_STOP", "توقف اضطراری", "bool"),
+        ("MAX_FUSION_ENABLED", "MAX FUSION", "bool"),
+        ("SYNCHRONIZED_MODE", "اتحاد هالک", "bool"),
+        ("ADVANCED_AI_ENABLED", "سیستم پیشرفته AI", "bool"),
+        ("SMART_FILTER_ENABLED", "Smart Filter", "bool"),
+    ]),
+    "market": ("📊 گیت‌های بازار BUY", [
+        ("CONSENSUS_MIN_LIQUIDITY", "Fusion حداقل نقدینگی", "num"),
+        ("CONSENSUS_MIN_VOLUME_5M", "Fusion حداقل حجم 5m", "num"),
+        ("CONSENSUS_MIN_CHANGE_5M", "Fusion حداقل تغییر 5m", "num"),
+        ("CONSENSUS_MAX_CHANGE_5M", "Fusion حداکثر تغییر 5m", "num"),
+        ("CONSENSUS_MIN_BUY_RATIO", "Fusion حداقل Buy Ratio", "num"),
+        ("CANDIDATE_MIN_LIQUIDITY", "Candidate حداقل نقدینگی", "num"),
+        ("CANDIDATE_MIN_VOLUME_5M", "Candidate حداقل حجم 5m", "num"),
+        ("CANDIDATE_MIN_BUY_RATIO", "Candidate حداقل Buy Ratio", "num"),
+        ("CANDIDATE_MIN_BUYS", "Candidate حداقل تعداد Buy", "num"),
+        ("FINAL_ANALYSIS_MIN_LIQUIDITY", "Final حداقل نقدینگی", "num"),
+        ("FINAL_ANALYSIS_MIN_VOLUME_5M", "Final حداقل حجم 5m", "num"),
+        ("FINAL_ANALYSIS_MIN_BUY_RATIO", "Final حداقل Buy Ratio", "num"),
+        ("FINAL_BREAKOUT_MIN_VOLUME_5M", "Breakout حداقل حجم 5m", "num"),
+        ("FINAL_SUPPORT_MIN_VOLUME_5M", "Support حداقل حجم 5m", "num"),
+    ]),
+    "structure": ("🏗 ساختار کف/سقف و Breakout", [
+        ("STRUCTURE_FILTER_ENABLED", "Structure Filter", "bool"),
+        ("STRUCTURE_LOOKBACK", "Structure Lookback", "num"),
+        ("STRUCTURE_MIN_SAMPLES", "حداقل نمونه ساختار", "num"),
+        ("STRUCTURE_SAMPLE_MIN_GAP", "فاصله نمونه ساختار (ثانیه)", "num"),
+        ("STRUCTURE_SUPPORT_DISTANCE_PCT", "فاصله Support (%)", "num"),
+        ("STRUCTURE_RESISTANCE_DISTANCE_PCT", "فاصله Resistance (%)", "num"),
+        ("STRUCTURE_BREAKOUT_BUFFER_PCT", "Breakout Buffer (%)", "num"),
+        ("STRUCTURE_MIN_SUPPORT_LIQUIDITY", "Support حداقل نقدینگی", "num"),
+        ("STRUCTURE_MIN_SUPPORT_VOLUME_5M", "Support حداقل حجم 5m", "num"),
+        ("STRUCTURE_MIN_SUPPORT_BUY_RATIO", "Support حداقل Buy Ratio", "num"),
+        ("STRUCTURE_MIN_BREAKOUT_BUY_RATIO", "Breakout حداقل Buy Ratio", "num"),
+        ("STRUCTURE_HISTORY_TTL_SECONDS", "عمر حافظه ساختار (ثانیه)", "num"),
+    ]),
+    "engines": ("⚙️ موتورهای BUY", [
+        ("IS_RUNNING", "Fire", "bool"),
+        ("TREND_ALERT_RUNNING", "Trend", "bool"),
+        ("COMBO_RUNNING", "Combo", "bool"),
+        ("GOLDEN_OPTION", "Golden", "bool"),
+        ("TECHNICAL_RUNNING", "Technical", "bool"),
+        ("ULTIMATE_21_ENGINE_ENABLED", "UltimateAI/21", "bool"),
+        ("MEMPOOL_SMART_MONEY_ENABLED", "Mempool/SmartMoney", "bool"),
+        ("BOTTOM_WHALE_RUNNING", "Whale", "bool"),
+        ("SOCIAL_SENTIMENT_ENABLED", "Social/Hype", "bool"),
+        ("ANTI_WASH_TRADING_ENABLED", "Anti-Wash", "bool"),
+        ("ANALYSIS_ENGINE_ENABLED", "Analysis", "bool"),
+    ]),
+    "lanes": ("🎯 تنظیمات Fire/Combo/Golden/Technical", [
+        ("FIRE_BUY_AMOUNT_SOL", "Fire مقدار BUY SOL", "num"),
+        ("FIRE_TAKE_PROFIT", "Fire TP (%)", "num"),
+        ("FIRE_STOP_LOSS", "Fire SL (%)", "num"),
+        ("FIRE_MIN_LIQUIDITY", "Fire حداقل نقدینگی", "num"),
+        ("FIRE_MIN_VOLUME_5M", "Fire حداقل حجم 5m", "num"),
+        ("FIRE_MIN_PRICE_CHANGE_5M", "Fire حداقل Change 5m", "num"),
+        ("COMBO_BUY_AMOUNT_SOL", "Combo مقدار BUY SOL", "num"),
+        ("COMBO_TAKE_PROFIT", "Combo TP (%)", "num"),
+        ("COMBO_STOP_LOSS", "Combo SL (%)", "num"),
+        ("COMBO_MIN_LIQUIDITY", "Combo حداقل نقدینگی", "num"),
+        ("COMBO_MIN_VOLUME_5M", "Combo حداقل حجم 5m", "num"),
+        ("COMBO_MIN_CHANGE_5M", "Combo حداقل Change 5m", "num"),
+        ("GOLDEN_BUY_AMOUNT_SOL", "Golden مقدار BUY SOL", "num"),
+        ("GOLDEN_TAKE_PROFIT", "Golden TP (%)", "num"),
+        ("GOLDEN_STOP_LOSS", "Golden SL (%)", "num"),
+        ("GOLDEN_MIN_LIQUIDITY", "Golden حداقل نقدینگی", "num"),
+        ("GOLDEN_MIN_VOLUME_5M", "Golden حداقل حجم 5m", "num"),
+        ("GOLDEN_MIN_CHANGE_5M", "Golden حداقل Change 5m", "num"),
+        ("TECH_BUY_AMOUNT_SOL", "Technical مقدار BUY SOL", "num"),
+        ("TECH_TAKE_PROFIT", "Technical TP (%)", "num"),
+        ("TECH_STOP_LOSS", "Technical SL (%)", "num"),
+        ("TECH_MIN_LIQUIDITY", "Technical حداقل نقدینگی", "num"),
+        ("TECH_MIN_VOLUME_5M", "Technical حداقل حجم 5m", "num"),
+    ]),
+    "engine_gates": ("🎚 آستانه‌های واقعی رأی موتورهای BUY", [
+        ("FIRE_ENGINE_MIN_CHANGE_5M", "Fire رأی: حداقل Change 5m", "num"),
+        ("FIRE_ENGINE_MIN_VOLUME_5M", "Fire رأی: حداقل Volume 5m", "num"),
+        ("TREND_ENGINE_MIN_CHANGE_5M", "Trend رأی: حداقل Change 5m", "num"),
+        ("TREND_ENGINE_MIN_BUY_RATIO", "Trend رأی: Buy/Sell Ratio", "num"),
+        ("COMBO_ENGINE_MIN_VOLUME_5M", "Combo رأی: حداقل Volume 5m", "num"),
+        ("COMBO_ENGINE_MIN_LIQUIDITY", "Combo رأی: حداقل Liquidity", "num"),
+        ("COMBO_ENGINE_MIN_BUY_RATIO", "Combo رأی: Buy/Sell Ratio", "num"),
+        ("GOLDEN_ENGINE_MIN_CHANGE_5M", "Golden رأی: حداقل Change 5m", "num"),
+        ("GOLDEN_ENGINE_MIN_VOLUME_5M", "Golden رأی: حداقل Volume 5m", "num"),
+        ("GOLDEN_ENGINE_MIN_LIQUIDITY", "Golden رأی: حداقل Liquidity", "num"),
+        ("MEMPOOL_ENGINE_MIN_BUY_RATIO", "Mempool رأی: Buy/Sell Ratio", "num"),
+        ("MEMPOOL_ENGINE_MIN_BUYS", "Mempool رأی: حداقل Buy", "num"),
+        ("MEMPOOL_ENGINE_MIN_VOLUME_5M", "Mempool رأی: حداقل Volume 5m", "num"),
+        ("MEMPOOL_ENGINE_MIN_LIQUIDITY", "Mempool رأی: حداقل Liquidity", "num"),
+        ("WHALE_ENGINE_MIN_BUYS_OVER_SELLS", "Whale اختلاف حداقل Buy نسبت به Sell", "num"),
+        ("WHALE_ENGINE_MIN_BUYS", "Whale حداقل Buy", "num"),
+        ("WHALE_ENGINE_MIN_VOLUME_5M", "Whale حداقل Volume 5m", "num"),
+        ("ANTI_WASH_MAX_SELL_PRESSURE_RATIO", "Anti-Wash حداکثر Sell Pressure", "num"),
+    ]),
+    "adaptive": ("🧠 Adaptive / Learning / Circuit", [
+        ("ADAPTIVE_TARGET_WIN_RATE", "هدف Win Rate", "num"),
+        ("ADAPTIVE_LOOKBACK", "Adaptive Lookback", "num"),
+        ("ADAPTIVE_MIN_SAMPLE", "حداقل نمونه Adaptive", "num"),
+        ("ADAPTIVE_MAX_SCORE_BONUS", "حداکثر Score Bonus", "num"),
+        ("ADAPTIVE_MAX_RATIO_BONUS", "حداکثر Ratio Bonus", "num"),
+        ("MAX_CONSECUTIVE_LOSSES", "حداکثر باخت متوالی Circuit", "num"),
+        ("RISK_MIN_MULTIPLIER", "حداقل ضریب ریسک", "num"),
+        ("RISK_MAX_MULTIPLIER", "حداکثر ضریب ریسک", "num"),
+        ("LEARNING_ALPHA", "Learning Alpha", "num"),
+    ]),
+    "sell": ("📉 کنترل کامل SELL / TP / SL / Trailing", [
+        ("DYNAMIC_TRAILING_TP_ENABLED", "Dynamic Trailing", "bool"),
+        ("TRAILING_WEAKNESS_ENABLED", "Trailing Weakness", "bool"),
+        ("TRAILING_WEAK_SELL_RATIO", "Weakness Sell Ratio", "num"),
+        ("TRAILING_WEAKNESS_M5_MAX", "Weakness حداکثر Change 5m", "num"),
+        ("TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT", "Weakness حداقل Drawdown", "num"),
+        ("MAX_TRADE_SOL", "سقف نهایی BUY هر معامله SOL", "num"),
+    ]),
+    "radar": ("🚀 Radar / Discovery / API گلوگاه", [
+        ("ELITE_DISCOVERY_MAX_AGE_SECONDS", "حداکثر عمر Discovery", "num"),
+        ("ELITE_MAX_UNIQUE_TOKENS", "حداکثر Tokenهای یکتا", "num"),
+        ("DEX_MIN_REQUEST_INTERVAL_SECONDS", "فاصله درخواست Dex", "num"),
+        ("_SENTINEL_MAX_TOKENS", "حداکثر Sentinel Memory", "num"),
+    ]),
+}
+
+SIGNAL_GLASS_CATEGORY_ORDER = tuple(SIGNAL_GLASS_CATEGORIES.keys())
+SIGNAL_GLASS_NUMERIC_TYPES = {
+    "FIRE_ENGINE_MIN_CHANGE_5M": float, "FIRE_ENGINE_MIN_VOLUME_5M": float,
+    "TREND_ENGINE_MIN_CHANGE_5M": float, "TREND_ENGINE_MIN_BUY_RATIO": float,
+    "COMBO_ENGINE_MIN_VOLUME_5M": float, "COMBO_ENGINE_MIN_LIQUIDITY": float, "COMBO_ENGINE_MIN_BUY_RATIO": float,
+    "GOLDEN_ENGINE_MIN_CHANGE_5M": float, "GOLDEN_ENGINE_MIN_VOLUME_5M": float, "GOLDEN_ENGINE_MIN_LIQUIDITY": float,
+    "MEMPOOL_ENGINE_MIN_BUY_RATIO": float, "MEMPOOL_ENGINE_MIN_BUYS": int,
+    "MEMPOOL_ENGINE_MIN_VOLUME_5M": float, "MEMPOOL_ENGINE_MIN_LIQUIDITY": float,
+    "WHALE_ENGINE_MIN_BUYS_OVER_SELLS": int, "WHALE_ENGINE_MIN_BUYS": int, "WHALE_ENGINE_MIN_VOLUME_5M": float,
+    "ANTI_WASH_MAX_SELL_PRESSURE_RATIO": float,
+    "CONSENSUS_MIN_SCORE": float, "CONSENSUS_MIN_RATIO": float,
+    "CONSENSUS_COOLDOWN_SECONDS": float, "GLOBAL_SIGNAL_COOLDOWN_SECONDS": float,
+    "DAILY_SIGNAL_LIMIT": int, "CONSENSUS_MIN_LIQUIDITY": float,
+    "CONSENSUS_MIN_VOLUME_5M": float, "CONSENSUS_MIN_CHANGE_5M": float,
+    "CONSENSUS_MAX_CHANGE_5M": float, "CONSENSUS_MIN_BUY_RATIO": float,
+    "CANDIDATE_MIN_LIQUIDITY": float, "CANDIDATE_MIN_VOLUME_5M": float,
+    "CANDIDATE_MIN_BUY_RATIO": float, "CANDIDATE_MIN_BUYS": int,
+    "FINAL_ANALYSIS_MIN_LIQUIDITY": float, "FINAL_ANALYSIS_MIN_VOLUME_5M": float,
+    "FINAL_ANALYSIS_MIN_BUY_RATIO": float, "FINAL_BREAKOUT_MIN_VOLUME_5M": float,
+    "FINAL_SUPPORT_MIN_VOLUME_5M": float, "STRUCTURE_LOOKBACK": int,
+    "STRUCTURE_MIN_SAMPLES": int, "STRUCTURE_SAMPLE_MIN_GAP": float,
+    "STRUCTURE_SUPPORT_DISTANCE_PCT": float, "STRUCTURE_RESISTANCE_DISTANCE_PCT": float,
+    "STRUCTURE_BREAKOUT_BUFFER_PCT": float, "STRUCTURE_MIN_SUPPORT_LIQUIDITY": float,
+    "STRUCTURE_MIN_SUPPORT_VOLUME_5M": float, "STRUCTURE_MIN_SUPPORT_BUY_RATIO": float,
+    "STRUCTURE_MIN_BREAKOUT_BUY_RATIO": float, "STRUCTURE_HISTORY_TTL_SECONDS": float,
+    "FIRE_BUY_AMOUNT_SOL": float, "FIRE_TAKE_PROFIT": float, "FIRE_STOP_LOSS": float,
+    "FIRE_MIN_LIQUIDITY": float, "FIRE_MIN_VOLUME_5M": float, "FIRE_MIN_PRICE_CHANGE_5M": float,
+    "COMBO_BUY_AMOUNT_SOL": float, "COMBO_TAKE_PROFIT": float, "COMBO_STOP_LOSS": float,
+    "COMBO_MIN_LIQUIDITY": float, "COMBO_MIN_VOLUME_5M": float, "COMBO_MIN_CHANGE_5M": float,
+    "GOLDEN_BUY_AMOUNT_SOL": float, "GOLDEN_TAKE_PROFIT": float, "GOLDEN_STOP_LOSS": float,
+    "GOLDEN_MIN_LIQUIDITY": float, "GOLDEN_MIN_VOLUME_5M": float, "GOLDEN_MIN_CHANGE_5M": float,
+    "TECH_BUY_AMOUNT_SOL": float, "TECH_TAKE_PROFIT": float, "TECH_STOP_LOSS": float,
+    "TECH_MIN_LIQUIDITY": float, "TECH_MIN_VOLUME_5M": float, "ADAPTIVE_TARGET_WIN_RATE": float,
+    "ADAPTIVE_LOOKBACK": int, "ADAPTIVE_MIN_SAMPLE": int, "ADAPTIVE_MAX_SCORE_BONUS": float,
+    "ADAPTIVE_MAX_RATIO_BONUS": float, "MAX_CONSECUTIVE_LOSSES": int,
+    "RISK_MIN_MULTIPLIER": float, "RISK_MAX_MULTIPLIER": float, "LEARNING_ALPHA": float,
+    "TRAILING_WEAK_SELL_RATIO": float, "TRAILING_WEAKNESS_M5_MAX": float,
+    "TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT": float, "MAX_TRADE_SOL": float,
+    "ELITE_DISCOVERY_MAX_AGE_SECONDS": float, "ELITE_MAX_UNIQUE_TOKENS": int,
+    "DEX_MIN_REQUEST_INTERVAL_SECONDS": float, "_SENTINEL_MAX_TOKENS": int,
+}
+
+SIGNAL_GLASS_BOOL_VARS = {
+    name for _, items in SIGNAL_GLASS_CATEGORIES.values() for name, _, typ in items if typ == "bool"
+}
+
+def _signal_glass_value(name):
+    value = globals().get(name)
+    if isinstance(value, bool):
+        return "🟢 ON" if value else "🔴 OFF"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+def _signal_glass_category_keyboard(category):
+    title, items = SIGNAL_GLASS_CATEGORIES[category]
+    rows = []
+    for name, label, typ in items:
+        value = _signal_glass_value(name)
+        if typ == "bool":
+            rows.append([InlineKeyboardButton(f"{label}: {value}", callback_data=f"glass_toggle:{name}")])
+        else:
+            rows.append([InlineKeyboardButton(f"✏️ {label}: {value}", callback_data=f"glass_set:{name}")])
+    rows.append([InlineKeyboardButton("🔙 دسته‌های شیشه‌ای", callback_data="signal_glass")])
+    return InlineKeyboardMarkup(rows)
+
+def _signal_glass_keyboard():
+    rows = []
+    for key, (title, _) in SIGNAL_GLASS_CATEGORIES.items():
+        rows.append([InlineKeyboardButton(title, callback_data=f"glass_cat:{key}")])
+    rows.append([InlineKeyboardButton("🔙 پنل اصلی", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
+def _signal_glass_summary():
+    return (
+        "🪟 **شیشه کنترل کامل سیگنال**\n\n"
+        "این بخش برای تنظیم دستی گلوگاه‌های BUY و SELL است.\n"
+        "هر عددی را که تغییر بدهی مستقیماً روی متغیر همان Pipeline اعمال می‌شود.\n\n"
+        "🚧 Gates | 📊 Market | 🏗 Structure | ⚙️ Engines\n"
+        "🎯 Fire/Combo/Golden/Technical | 🧠 Adaptive/Circuit\n"
+        "📉 SELL/TP/SL/Trailing | 🚀 Radar/Discovery/API\n\n"
+        "⚠️ تغییرات این پنل عمداً زنده و دستی هستند؛ برای برگرداندن مقدار، عدد قبلی را دوباره وارد کن."
+    )
+
 def _main_keyboard(is_admin=False):
     rows=[[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
     elif CHANNEL_INVITE_LINK: rows.append([InlineKeyboardButton("📢 کانال VIP",url=CHANNEL_INVITE_LINK)])
     if is_admin:
+        rows.append([InlineKeyboardButton("🪟🔮 کنترل شیشه‌ای کامل سیگنال", callback_data="signal_glass")])
         rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
         rows.append([InlineKeyboardButton(
             f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}",
@@ -4538,6 +4776,7 @@ def start_telegram_bot():
 
         async def cancel_trade_limit_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("awaiting_trade_limit_sol", None)
+            context.user_data.pop("awaiting_signal_glass_setting", None)
             await update.message.reply_text(
                 f"↩️ لغو شد. سقف فعلی هر معامله: {MAX_TRADE_SOL:g} SOL",
                 reply_markup=_control_keyboard() if str(update.effective_user.id) == str(TELEGRAM_CHAT_ID) else _main_keyboard(False)
@@ -4547,6 +4786,41 @@ def start_telegram_bot():
             global MAX_TRADE_SOL
             cid = str(update.effective_user.id)
             if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
+                return
+
+            if context.user_data.get("awaiting_signal_glass_setting"):
+                name = context.user_data.get("awaiting_signal_glass_setting")
+                raw = (update.message.text or "").strip().replace(",", ".")
+                caster = SIGNAL_GLASS_NUMERIC_TYPES.get(name)
+                try:
+                    if caster is int:
+                        if any(ch in raw.lower() for ch in (".", "e")):
+                            raise ValueError("این پارامتر باید عدد صحیح باشد.")
+                        value = int(raw)
+                    else:
+                        value = float(raw)
+                    if not math.isfinite(float(value)):
+                        raise ValueError("عدد باید معتبر و محدود باشد.")
+                    if name in {"CONSENSUS_MIN_RATIO", "CANDIDATE_MIN_BUY_RATIO", "FINAL_ANALYSIS_MIN_BUY_RATIO", "ADAPTIVE_MAX_RATIO_BONUS"} and not (0 <= float(value) <= 10):
+                        raise ValueError("نسبت خارج از محدوده منطقی است.")
+                    if name.endswith("_LIQUIDITY") or "VOLUME_5M" in name:
+                        if value < 0: raise ValueError("مقدار نمی‌تواند منفی باشد.")
+                    if "COOLDOWN" in name or "SECONDS" in name or "INTERVAL" in name or "TTL" in name:
+                        if value < 0: raise ValueError("زمان نمی‌تواند منفی باشد.")
+                    if name == "DAILY_SIGNAL_LIMIT":
+                        value = max(SIGNAL_BUDGET_MIN, min(SIGNAL_BUDGET_MAX, int(value)))
+                    if name == "MAX_TRADE_SOL" and value <= 0:
+                        raise ValueError("سقف معامله باید بیشتر از صفر باشد.")
+                    globals()[name] = value
+                    if name == "MAX_TRADE_SOL":
+                        _set_bot_setting("max_trade_sol", value)
+                    if name == "DAILY_SIGNAL_LIMIT":
+                        _save_daily_signal_state()
+                    context.user_data.pop("awaiting_signal_glass_setting", None)
+                    category = next((k for k, (_, items) in SIGNAL_GLASS_CATEGORIES.items() if any(n == name for n, _, _ in items)), "gates")
+                    await update.message.reply_text(f"✅ **تنظیم شد**\n\n`{name}` = `{_signal_glass_value(name)}`", parse_mode="Markdown", reply_markup=_signal_glass_category_keyboard(category))
+                except Exception as e:
+                    await update.message.reply_text(f"❌ مقدار نامعتبر: {e}\n\nدوباره عدد را بفرست یا /cancel بزن.", parse_mode="Markdown")
                 return
 
             if context.user_data.get("awaiting_daily_signal_limit"):
@@ -4595,6 +4869,47 @@ def start_telegram_bot():
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,_MAX_FUSION_PREV,MAX_TRADE_SOL
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            elif data == "signal_glass":
+                if not is_admin:
+                    await q.edit_message_text("⛔ این بخش فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    return
+                await q.edit_message_text(_signal_glass_summary(), reply_markup=_signal_glass_keyboard(), parse_mode="Markdown")
+                return
+            elif data.startswith("glass_cat:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                category = data.split(":", 1)[1]
+                if category not in SIGNAL_GLASS_CATEGORIES:
+                    await q.edit_message_text("❌ دسته نامعتبر.", reply_markup=_signal_glass_keyboard())
+                    return
+                title, _ = SIGNAL_GLASS_CATEGORIES[category]
+                await q.edit_message_text(f"🪟 **{title}**\n\nبرای عددها روی ✏️ بزن و مقدار جدید را ارسال کن.\nبرای کلیدها روی خود گزینه بزن تا ON/OFF شود.", reply_markup=_signal_glass_category_keyboard(category), parse_mode="Markdown")
+                return
+            elif data.startswith("glass_toggle:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                name = data.split(":", 1)[1]
+                if name not in SIGNAL_GLASS_BOOL_VARS:
+                    await q.edit_message_text("❌ پارامتر کلیدی نامعتبر.", reply_markup=_signal_glass_keyboard())
+                    return
+                globals()[name] = not bool(globals().get(name, False))
+                category = next((k for k, (_, items) in SIGNAL_GLASS_CATEGORIES.items() if any(n == name for n, _, _ in items)), "gates")
+                await q.edit_message_text(f"✅ **{name}** → {_signal_glass_value(name)}", reply_markup=_signal_glass_category_keyboard(category), parse_mode="Markdown")
+                return
+            elif data.startswith("glass_set:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                name = data.split(":", 1)[1]
+                if name not in SIGNAL_GLASS_NUMERIC_TYPES:
+                    await q.edit_message_text("❌ پارامتر عددی نامعتبر.", reply_markup=_signal_glass_keyboard())
+                    return
+                context.user_data["awaiting_signal_glass_setting"] = name
+                current = _signal_glass_value(name)
+                await q.edit_message_text(f"✏️ **تنظیم دستی {name}**\n\nمقدار فعلی: `{current}`\n\nعدد جدید را ارسال کن.\nبرای لغو: /cancel", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="signal_glass")]]), parse_mode="Markdown")
+                return
             elif data=="engines": await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n"+_engine_status_lines(),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت",callback_data="home")]]),parse_mode="Markdown")
             elif data=="controls": await q.edit_message_text(("🎛 **کنترل موتورها**\n\n🤖 اتحاد هالک روشن است.\nهمه موتورهای تحلیلی با هم رأی می‌دهند و فقط یک سیگنال واحد منتشر می‌شود.\n\nبرای کنترل تک‌تک موتورها، اتحاد را خاموش کنید." if SYNCHRONIZED_MODE else "🎛 **کنترل موتورها**\n\n🔴 اتحاد خاموش است.\nحالا هر موتور کلید مستقل خودش را دارد و می‌توانید هرکدام را جداگانه روشن/خاموش کنید."),reply_markup=_control_keyboard(),parse_mode="Markdown") if is_admin else await q.edit_message_text("⛔ این بخش فقط برای ادمین است.",reply_markup=_main_keyboard(False))
             elif data=="wallet":
