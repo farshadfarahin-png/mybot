@@ -2608,11 +2608,4 @@ def api_check_status():
             try:
                 conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
                 cur = conn.cursor()
-                cur.execute("SELECT copy_enabled, trade_amount_sol, trade_asset, trade_amount_usdc FROM subscribers WHERE telegram_id=?", (str(t_id),))
-                cr = cur.fetchone()
-                conn.close()
-                if cr:
-                    copy_enabled = bool(cr[0])
-                    copy_amount = float(cr[1] or 0.01)
-                    copy_asset = str(cr[2] or COPY_DEFAULT_ASSET).upper()
-                    copy_amount_usdc = float(cr[3] or 10
+                cur
