@@ -134,6 +134,9 @@ SYNCHRONIZED_MODE = True
 ADVANCED_AI_ENABLED = False
 MAX_FUSION_ENABLED = False
 EMERGENCY_STOP = False
+# کلید مادر سیگنال: ON = مسیر تولید سیگنال BUY/SELL فعال، OFF = هیچ سیگنال جدیدی تولید/منتشر نمی‌شود.
+MASTER_SIGNAL_ENABLED = False
+MASTER_SIGNAL_FIRE_NOW = False
 COPY_TRADING_ENABLED = True
 _MAX_FUSION_PREV = None
 
@@ -1524,6 +1527,10 @@ def _signal_links(token_addr, tx_signature=""):
     return solscan, dex
 
 def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx_signature="", extra_text=""):
+    # Master OFF means no new BUY/SELL signal publication. Position management itself continues.
+    if not MASTER_SIGNAL_ENABLED:
+        logger.info("Master BUY/SELL OFF: SELL signal publication suppressed for %s", token_addr)
+        return False
     symbol = pos.get("symbol", "TOKEN")
     entry = float(pos.get("entry_price", 0) or 0)
     tp = float(pos.get("tp", 0) or 0)
@@ -1902,6 +1909,8 @@ def technical_analysis_scanner_loop(app):
 # حداقل 82٪ موتورهای روشن باید رأی مثبت بدهند و در حالت معمول حداقل 7 رأی لازم است.
 def new_trade_system_enabled():
     """Whether the unified signal pipeline is allowed to look for new trades."""
+    if MASTER_SIGNAL_ENABLED:
+        return True
     return (SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED) and not EMERGENCY_STOP
 
 def advanced_filter_enabled():
@@ -3068,18 +3077,18 @@ def send_fused_signal(token_addr, fusion):
             logger.info(f"Duplicate BUY blocked for open token: {token_addr}")
             _audit_signal_decision("DUPLICATE_OPEN_POSITION")
             return False, "DUPLICATE_OPEN_POSITION"
-        if daily_signal_cap_reached():
+        if daily_signal_cap_reached() and not MASTER_SIGNAL_ENABLED:
             if is_analysis_signal:
                 _analysis_diag("blocked_daily_cap", token_addr=token_addr)
             _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
             return False, "DAILY_SIGNAL_CAP_REACHED"
-        if learning_is_in_circuit_breaker():
+        if learning_is_in_circuit_breaker() and not MASTER_SIGNAL_ENABLED:
             if is_analysis_signal:
                 _analysis_diag("blocked_circuit", token_addr=token_addr)
             logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
             _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
             return False, "LEARNING_CIRCUIT_BREAKER"
-        if not (is_analysis_signal):
+        if not (is_analysis_signal) and not MASTER_SIGNAL_ENABLED:
             if not fusion_quality_gate(fusion):
                 logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
                 _audit_signal_decision("QUALITY_GATE_REJECTED")
@@ -3088,21 +3097,21 @@ def send_fused_signal(token_addr, fusion):
         # MAX is a single attack and therefore uses the global cooldown.
         # Outside MAX, Advanced/Hulk/individual engines have their own lane
         # cooldown so one engine cannot suppress another engine's valid signal.
-        if MAX_FUSION_ENABLED and not is_analysis_signal:
+        if MAX_FUSION_ENABLED and not is_analysis_signal and not MASTER_SIGNAL_ENABLED:
             if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
                 _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
                 return False, "GLOBAL_SIGNAL_COOLDOWN"
-        elif is_analysis_signal:
+        elif is_analysis_signal and not MASTER_SIGNAL_ENABLED:
             if now_global - consensus_last_signal.get(emit_key, 0) < CONSENSUS_COOLDOWN_SECONDS:
                 _analysis_diag("blocked_cooldown", token_addr=token_addr)
                 _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
                 return False, "ANALYSIS_COOLDOWN"
-        else:
+        elif not MASTER_SIGNAL_ENABLED:
             lane_last = consensus_last_signal.get(emit_key, 0)
             if now_global - lane_last < CONSENSUS_COOLDOWN_SECONDS:
                 _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
                 return False, "ENGINE_COOLDOWN"
-        if EMERGENCY_STOP:
+        if EMERGENCY_STOP and not MASTER_SIGNAL_ENABLED:
             logger.info("Emergency stop active: new signal execution skipped.")
             _audit_signal_decision("EMERGENCY_STOP")
             return False, "EMERGENCY_STOP"
@@ -3712,6 +3721,39 @@ def _candidate_rank_tuple(item):
 
 
 
+def _master_signal_candidate(token_addr, pair):
+    """Master switch candidate: real Pair data, no signal-quality gates.
+
+    This is deliberately a bypass of quality/engine gates, not a synthetic market.
+    It requires an actual DexScreener Pair with a valid price.
+    """
+    try:
+        price = float(pair.get("priceUsd", 0) or 0)
+        if price <= 0:
+            return None
+        liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+        vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
+        chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+        txns = (pair.get("txns") or {}).get("m5", {}) or {}
+        buys = int(txns.get("buys", 0) or 0)
+        sells = int(txns.get("sells", 0) or 0)
+        symbol = (pair.get("baseToken") or {}).get("symbol", "TOKEN")
+        return {
+            "score": 100.0, "strength": 100.0,
+            "votes": ["MASTER_SIGNAL"], "advanced_votes": [], "hulk_votes": [],
+            "engines": ["MASTER_SIGNAL"], "hunter_group": "MASTER",
+            "mode": "🔘 MASTER BUY/SELL",
+            "price": price, "liq": liq, "vol": vol, "chg": chg,
+            "buys": buys, "sells": sells, "symbol": symbol,
+            "tp": max(15.0, min(30.0, float(FIRE_TAKE_PROFIT))),
+            "sl": float(FIRE_STOP_LOSS),
+            "structure": "MASTER_BYPASS", "support": 0.0, "resistance": 0.0,
+            "breakout": False, "force_independent": True,
+        }
+    except Exception as exc:
+        logger.debug("Master signal candidate failed for %s: %s", token_addr, exc)
+        return None
+
 def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
     if pair_cache is not None and token_addr in pair_cache:
         pairs = pair_cache.get(token_addr) or []
@@ -3726,6 +3768,15 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
     analysis_enabled = ("Analysis" in active) and ANALYSIS_ENGINE_ENABLED
 
     for pair in pairs:
+        if MASTER_SIGNAL_ENABLED:
+            master_candidate = _master_signal_candidate(token_addr, pair)
+            if master_candidate is not None:
+                master_candidate["rank_score"] = 100.0
+                result["fusion"].append((token_addr, master_candidate))
+                # کلید مادر باید اولین کاندید واقعی را ترجیح دهد و هیچ موتور دیگری
+                # حق ندارد آن را پشت فیلترهای خودش پنهان کند.
+                continue
+
         # ۱. موتور تحلیل مستقل
         if analysis_enabled:
             try:
@@ -3870,7 +3921,7 @@ def unified_market_scanner_loop(app):
             V12_REAL_AUDIT["scans"] = int(V12_REAL_AUDIT.get("scans", 0) or 0) + 1
             V12_REAL_AUDIT["last_scan"] = time.time()
 
-            if daily_signal_cap_reached():
+            if daily_signal_cap_reached() and not MASTER_SIGNAL_ENABLED:
                 _diag_reject("EXECUTION", "DAILY_SIGNAL_CAP_REACHED")
                 time.sleep(FAST_SCAN_INTERVAL_SECONDS)
                 continue
@@ -3897,12 +3948,38 @@ def unified_market_scanner_loop(app):
             pair_cache = _fetch_best_solana_pairs_batch(scan_tokens)
             V12_REAL_AUDIT["dex_batches"] = int(V12_REAL_AUDIT.get("dex_batches", 0) or 0) + max(1, (len(scan_tokens) + DEX_BATCH_SIZE - 1) // DEX_BATCH_SIZE)
 
+            # Master ON: immediately prioritize the first real, data-bearing Pair.
+            # No quality/engine/cooldown/daily-cap gate is allowed to delay activation.
+            # The Pair itself must still be real and have a valid price; execution remains real.
+            master_immediate_candidate = None
+            if MASTER_SIGNAL_ENABLED and MASTER_SIGNAL_FIRE_NOW:
+                for _addr in scan_tokens:
+                    if _token_lock_is_open(_addr):
+                        continue
+                    for _pair in (pair_cache.get(_addr) or []):
+                        master_immediate_candidate = _master_signal_candidate(_addr, _pair)
+                        if master_immediate_candidate is not None:
+                            master_immediate_candidate["rank_score"] = 100.0
+                            break
+                    if master_immediate_candidate is not None:
+                        break
+                if master_immediate_candidate is not None:
+                    try:
+                        SIGNAL_EXECUTOR.submit(send_fused_signal, _addr, master_immediate_candidate)
+                        MASTER_SIGNAL_FIRE_NOW = False
+                        _diag_reject("MASTER", "IMMEDIATE_SIGNAL_SUBMITTED", _addr)
+                    except Exception as _exc:
+                        logger.exception("Master immediate signal submit failed for %s", _addr)
+                        _diag_reject("MASTER", f"IMMEDIATE_SUBMIT_EXCEPTION:{type(_exc).__name__}", _addr)
+
+            _master_immediate_addr = _addr if master_immediate_candidate is not None else None
+
             # Stage 1: evaluation. Every Future is consumed; exceptions are visible. Every Future is consumed; exceptions are visible.
             with ThreadPoolExecutor(max_workers=PAIR_SCAN_WORKERS, thread_name_prefix="RadarEval") as ex:
                 futures = {
                     ex.submit(_evaluate_token_for_active_modes, token, pair_cache): token
                     for token in scan_tokens
-                    if token and not _token_lock_is_open(token)
+                    if token and token != _master_immediate_addr and not _token_lock_is_open(token)
                 }
                 for future in __import__("concurrent.futures").as_completed(futures):
                     source_token = futures[future]
@@ -4406,6 +4483,7 @@ SIGNAL_GLASS_CATEGORIES = {
         ("GLOBAL_SIGNAL_COOLDOWN_SECONDS", "Cooldown سراسری سیگنال (ثانیه)", "num"),
         ("DAILY_SIGNAL_LIMIT", "سقف روزانه سیگنال", "num"),
         ("EMERGENCY_STOP", "توقف اضطراری", "bool"),
+        ("MASTER_SIGNAL_ENABLED", "🔘 کلید مادر BUY/SELL", "bool"),
         ("MAX_FUSION_ENABLED", "MAX FUSION", "bool"),
         ("SYNCHRONIZED_MODE", "اتحاد هالک", "bool"),
         ("ADVANCED_AI_ENABLED", "سیستم پیشرفته AI", "bool"),
@@ -4615,6 +4693,10 @@ def _main_keyboard(is_admin=False):
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
     elif CHANNEL_INVITE_LINK: rows.append([InlineKeyboardButton("📢 کانال VIP",url=CHANNEL_INVITE_LINK)])
     if is_admin:
+        rows.append([InlineKeyboardButton(
+            f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}",
+            callback_data="toggle_master_signal"
+        )])
         rows.append([InlineKeyboardButton("🪟🔮 کنترل شیشه‌ای کامل سیگنال", callback_data="signal_glass")])
         rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
         rows.append([InlineKeyboardButton(
@@ -4866,9 +4948,32 @@ def start_telegram_bot():
                 )
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,_MAX_FUSION_PREV,MAX_TRADE_SOL
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,_MAX_FUSION_PREV,MAX_TRADE_SOL
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
-            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 کلید مادر BUY/SELL: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            elif data == "toggle_master_signal":
+                if not is_admin:
+                    await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    return
+                MASTER_SIGNAL_ENABLED = not MASTER_SIGNAL_ENABLED
+                MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
+                if MASTER_SIGNAL_ENABLED:
+                    # کلید مادر عمداً مستقل از MAX/Advanced/Hulk/اتحاد است.
+                    # در اولین دور اسکن، یک کاندید واقعی از Pair داده‌دار انتخاب می‌شود.
+                    message = (
+                        "🟢 **کلید مادر BUY/SELL روشن شد**\n\n"
+                        "تمام مسیرهای تولید سیگنال فعال شدند و کلیدهای خانواده‌های دیگر مانع شروع نمی‌شوند.\n"
+                        "⚡ اولین Pair واقعیِ داده‌دار در دور اسکن بعدی برای سیگنال بررسی می‌شود.\n"
+                        "⚠️ این حالت فیلتر کیفیت را دور می‌زند؛ خرید همچنان فقط با داده واقعی Pair و اجرای واقعی شبکه انجام می‌شود."
+                    )
+                else:
+                    message = (
+                        "🔴 **کلید مادر BUY/SELL خاموش شد**\n\n"
+                        "⛔ تولید و انتشار سیگنال جدید متوقف شد.\n"
+                        "✅ مدیریت پوزیشن‌های باز برای TP/SL/Trailing ادامه دارد."
+                    )
+                await q.edit_message_text(message, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
+                return
             elif data == "signal_glass":
                 if not is_admin:
                     await q.edit_message_text("⛔ این بخش فقط برای ادمین است.", reply_markup=_main_keyboard(False))
@@ -5200,6 +5305,7 @@ def start_telegram_bot():
                     f"📢 ارسال واقعی کانال: `{h['channel_sent']}`\n"
                     f"⚠️ شکست ارسال کانال: `{h['channel_failed']}`\n\n"
                     f"📈 سقف امروز: `{daily_signal_status_text()}`\n"
+                    f"🔘 Master BUY/SELL: `{MASTER_SIGNAL_ENABLED}`\n"
                     f"🛑 Emergency Stop: `{EMERGENCY_STOP}`\n"
                     f"👑 MAX Fusion: `{MAX_FUSION_ENABLED}`\n"
                     f"🤝 اتحاد: `{SYNCHRONIZED_MODE}`\n\n"
