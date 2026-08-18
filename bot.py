@@ -2608,4 +2608,122 @@ def api_check_status():
             try:
                 conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
                 cur = conn.cursor()
-                cur
+                cur.execute("SELECT copy_enabled, trade_amount_sol, trade_asset, trade_amount_usdc FROM subscribers WHERE telegram_id=?", (str(t_id),))
+                cr = cur.fetchone()
+                conn.close()
+                if cr:
+                    copy_enabled = bool(cr[0])
+                    copy_amount = float(cr[1] if cr[1] is not None else 0.01)
+                    copy_asset = str(cr[2] if cr[2] is not None else COPY_DEFAULT_ASSET).upper()
+                    copy_amount_usdc = float(cr[3] if cr[3] is not None else 10.0)
+            except Exception as e:
+                logger.error(f"Error fetching copy settings: {e}")
+
+    return jsonify({
+        "has_subscription": has_sub,
+        "expiry_date": expiry_str,
+        "last_expiry": last_exp,
+        "remaining_seconds": remaining_seconds,
+        "channel_link": CHANNEL_INVITE_LINK,
+        "prices": {"USDC": VIP_PRICE_USDC},
+        "copy_enabled": copy_enabled,
+        "copy_amount_sol": copy_amount,
+        "copy_amount_usdc": copy_amount_usdc,
+        "copy_asset": copy_asset,
+        "copy_fee_percent": COPY_TRADING_FEE_PERCENT
+    })
+
+@web_app.route('/api/subscribe', methods=['POST'])
+def api_subscribe():
+    data = request.json or {}
+    t_id = data.get("telegram_id")
+    wallet = data.get("wallet_address")
+    tx_sig = data.get("tx_signature")
+    currency = str(data.get("currency", "USDC")).upper()
+
+    if currency != "USDC":
+        return jsonify({"status": "error", "message": "فقط پرداخت 50 USDC پذیرفته می‌شود."}), 400
+
+    if not (t_id and wallet and tx_sig):
+        return jsonify({"status": "error", "message": "اطلاعات ورودی ناقص است."}), 400
+
+    is_valid, v_msg = verify_blockchain_transaction(tx_sig, currency)
+    if not is_valid:
+        return jsonify({"status": "error", "message": f"تایید تراکنش ناموفق: {v_msg}"}), 400
+
+    with db_lock:
+        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+        cur = conn.cursor()
+        cur.execute("SELECT telegram_id FROM subscribers WHERE tx_signature = ?", (f"{currency}:{tx_sig}",))
+        already_used = cur.fetchone()
+        conn.close()
+    if already_used:
+        return jsonify({"status": "error", "message": "این تراکنش قبلاً برای یک اشتراک استفاده شده است."}), 400
+
+    success = register_subscription(t_id, wallet, tx_sig, currency)
+    if success:
+        return jsonify({"status": "success", "message": "اشتراک شما با موفقیت فعال شد!"})
+    else:
+        return jsonify({"status": "error", "message": "خطا در ثبت اشتراک."}), 500
+
+# ========== TELEGRAM BOT ==========
+def start_telegram_bot():
+    try:
+        if not TELEGRAM_BOT_TOKEN:
+            logger.error("❌ TELEGRAM_BOT_TOKEN تنظیم نشده؛ ربات تلگرام اجرا نشد.")
+            return
+        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        _load_daily_signal_state()
+        async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            chat_id = update.effective_chat.id
+            is_admin = bool(TELEGRAM_CHAT_ID and str(chat_id) == str(TELEGRAM_CHAT_ID))
+            active, exp_date = check_user_subscription(chat_id)
+            text = (
+                f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n"
+                f"👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n"
+                f"⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n"
+                f"🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n"
+                f"🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}"
+            )
+            await update.message.reply_text(text, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
+        app.add_handler(CommandHandler("start", start_cmd))
+        app.run_polling(drop_pending_updates=False)
+    except Exception as e:
+        logger.exception(f"Telegram bot runtime error: {e}")
+
+def _main_keyboard(is_admin=False):
+    rows = [
+        [InlineKeyboardButton("📊 وضعیت موتورها", callback_data="engines"),
+         InlineKeyboardButton("💼 وضعیت ولت", callback_data="wallet")],
+        [InlineKeyboardButton("📈 آمار معاملات", callback_data="stats"),
+         InlineKeyboardButton("🎛 کنترل موتورها", callback_data="controls")]
+    ]
+    if WEBAPP_URL:
+        rows.append([InlineKeyboardButton("📱 Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))])
+    elif CHANNEL_INVITE_LINK:
+        rows.append([InlineKeyboardButton("📢 کانال VIP", url=CHANNEL_INVITE_LINK)])
+    if is_admin:
+        rows.append([InlineKeyboardButton("👑 پنل مدیریت", callback_data="admin")])
+    return InlineKeyboardMarkup(rows)
+
+# ========== MAIN ==========
+if __name__ == "__main__":
+    logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
+    _load_channel_config()
+    _load_trade_limit()
+    ensure_channel_invite_link()
+
+    threads = [
+        Thread(target=self_learning_ai_optimizer_loop, daemon=True, name="AILearning"),
+        Thread(target=subscription_monitor_loop, daemon=True, name="SubMonitor"),
+        Thread(target=check_positions_loop, daemon=True, name="PositionsCheck"),
+        Thread(target=unified_market_scanner_loop, args=(None,), daemon=True, name="UnifiedHulkAI"),
+    ]
+    for t in threads:
+        t.start()
+
+    port = int(os.environ.get("PORT", 5000))
+    flask_thread = Thread(target=lambda: web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False), daemon=True)
+    flask_thread.start()
+
+    start_telegram_bot()
