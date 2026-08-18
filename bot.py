@@ -137,6 +137,8 @@ EMERGENCY_STOP = False
 # کلید مادر سیگنال: ON = مسیر تولید سیگنال BUY/SELL فعال، OFF = هیچ سیگنال جدیدی تولید/منتشر نمی‌شود.
 MASTER_SIGNAL_ENABLED = False
 MASTER_SIGNAL_FIRE_NOW = False
+# کلید مستقل عیب‌یابی: فقط گزارش Diagnostic را کنترل می‌کند و روی تولید/اجرای سیگنال اثر ندارد.
+MASTER_DIAGNOSTIC_ENABLED = True
 COPY_TRADING_ENABLED = True
 _MAX_FUSION_PREV = None
 
@@ -2741,6 +2743,112 @@ def _diag_top_reasons(limit=12):
     except Exception:
         return []
 
+
+# ==========================================================
+# MASTER SIGNAL DIAGNOSTIC REPORT
+# فقط یک گزارش خلاصه و دوره‌ای؛ نه پیام برای هر توکن/فیلتر.
+# ==========================================================
+MASTER_DIAG_FIRST_REPORT_SECONDS = 45
+MASTER_DIAG_REPEAT_SECONDS = 120
+_MASTER_DIAG_LAST_SENT = 0.0
+_MASTER_DIAG_ENABLED_SINCE = 0.0
+_MASTER_DIAG_LAST_SIGNAL_SEEN = 0.0
+_MASTER_DIAG_STATE_LOCK = Lock()
+
+_DIAG_REASON_FA = {
+    "NO_MARKET_TOKENS": "بازار/توکن جدید پیدا نشد",
+    "LOW_LIQUIDITY": "نقدینگی پایین",
+    "LOW_5M_VOLUME": "حجم ۵ دقیقه پایین",
+    "5M_CHANGE_TOO_LOW": "حرکت ۵ دقیقه‌ای کم",
+    "5M_CHANGE_TOO_HIGH": "حرکت ۵ دقیقه‌ای بیش از حد",
+    "NO_BUYERS": "خریدار کافی وجود ندارد",
+    "BUY_PRESSURE_TOO_WEAK": "فشار خرید ضعیف",
+    "QUALITY_GATE_REJECTED": "گیت کیفیت رد کرده",
+    "DAILY_SIGNAL_CAP_REACHED": "سقف روزانه پر شده",
+    "GLOBAL_SIGNAL_COOLDOWN": "Cooldown فعال است",
+    "ENGINE_COOLDOWN": "Cooldown موتور فعال است",
+    "ANALYSIS_COOLDOWN": "Cooldown تحلیل فعال است",
+    "LEARNING_CIRCUIT_BREAKER": "Circuit Breaker یادگیری فعال است",
+    "EMERGENCY_STOP": "توقف اضطراری فعال است",
+    "NO_FUSION_CANDIDATE": "کاندید Fusion ساخته نشده",
+    "NO_ANALYSIS_CANDIDATE": "کاندید تحلیل ساخته نشده",
+    "TRADE_SYSTEM_DISABLED": "سیستم تولید معامله خاموش است",
+    "CANDIDATE_PREFILTER_REJECT": "پیش‌فیلتر کاندید رد کرده",
+    "MARKET_QUALITY_REJECTED": "کیفیت بازار رد شده",
+}
+
+def _diag_reason_fa(reason):
+    reason = str(reason or "—")
+    return _DIAG_REASON_FA.get(reason, reason)
+
+
+def _build_master_diagnostic_report():
+    try:
+        now = time.time()
+        audit = V12_REAL_AUDIT
+        diag = V13_SIGNAL_DIAGNOSTICS
+        last_scan = float(audit.get("last_scan", 0) or 0)
+        last_signal = float(audit.get("last_signal", 0) or 0)
+        scan_age = int(now - last_scan) if last_scan else -1
+        signal_age = int(now - last_signal) if last_signal else -1
+        top = _diag_top_reasons(3)
+        top_text = "\n".join(f"• {_diag_reason_fa(reason)} → {count}" for reason, count in top) or "• هنوز علت رد ثبت نشده"
+        status = "🟢 اسکنر در حال کار" if 0 <= scan_age <= 10 else "⚠️ آخرین اسکن قدیمی است"
+        signal_status = f"آخرین سیگنال: {signal_age} ثانیه قبل" if signal_age >= 0 else "هنوز هیچ سیگنالی ثبت نشده"
+        return (
+            "🩺 **گزارش عیب‌یابی سیگنال**\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🔘 Master BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}\n"
+            f"🩺 Diagnostic: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}\n"
+            f"📡 وضعیت رادار: {status}\n"
+            f"🔍 اسکن‌ها: `{audit.get('scans', 0)}` | توکن‌های دیده‌شده: `{audit.get('tokens_seen', 0)}`\n"
+            f"🎯 کاندید Fusion: `{audit.get('fusion_candidates', 0)}` | تحلیل: `{audit.get('analysis_candidates', 0)}`\n"
+            f"⏱ {signal_status}\n\n"
+            "🚧 **۳ گلوگاه اصلی فعلی:**\n"
+            f"{top_text}\n\n"
+            f"🩺 آخرین مانع: `{_diag_reason_fa(diag.get('last_blocker'))}`\n"
+            f"📍 مرحله: `{diag.get('last_stage') or '—'}`\n"
+            f"📈 کیفیت ردشده: `{audit.get('quality_rejected', 0)}` | Cooldown: `{audit.get('cooldown_rejected', 0)}`\n"
+            f"⚠️ خطای آخر: `{str(audit.get('last_error') or diag.get('last_error') or '—')[-180:]}`"
+        )
+    except Exception as exc:
+        logger.exception("Master diagnostic report build failed: %s", exc)
+        return "🩺 گزارش عیب‌یابی ساخته نشد؛ جزئیات در لاگ ثبت شد."
+
+
+def master_signal_diagnostic_loop():
+    """Send one compact admin report after a quiet period; never spam per-token diagnostics."""
+    global _MASTER_DIAG_LAST_SENT, _MASTER_DIAG_ENABLED_SINCE, _MASTER_DIAG_LAST_SIGNAL_SEEN
+    logger.info("🩺 Master signal diagnostic monitor started.")
+    while True:
+        try:
+            now = time.time()
+            with _MASTER_DIAG_STATE_LOCK:
+                if not MASTER_DIAGNOSTIC_ENABLED:
+                    _MASTER_DIAG_ENABLED_SINCE = 0.0
+                    _MASTER_DIAG_LAST_SENT = 0.0
+                    _MASTER_DIAG_LAST_SIGNAL_SEEN = 0.0
+                else:
+                    if _MASTER_DIAG_ENABLED_SINCE <= 0:
+                        _MASTER_DIAG_ENABLED_SINCE = now
+                        _MASTER_DIAG_LAST_SENT = 0.0
+                        _MASTER_DIAG_LAST_SIGNAL_SEEN = float(V12_REAL_AUDIT.get("last_signal", 0) or 0)
+                    current_signal = float(V12_REAL_AUDIT.get("last_signal", 0) or 0)
+                    if current_signal > _MASTER_DIAG_LAST_SIGNAL_SEEN:
+                        _MASTER_DIAG_LAST_SIGNAL_SEEN = current_signal
+                        _MASTER_DIAG_LAST_SENT = now
+                    else:
+                        quiet_for = now - max(_MASTER_DIAG_ENABLED_SINCE, _MASTER_DIAG_LAST_SIGNAL_SEEN or _MASTER_DIAG_ENABLED_SINCE)
+                        due = quiet_for >= MASTER_DIAG_FIRST_REPORT_SECONDS and (_MASTER_DIAG_LAST_SENT <= 0 or now - _MASTER_DIAG_LAST_SENT >= MASTER_DIAG_REPEAT_SECONDS)
+                        if due and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                            if send_telegram_msg(_build_master_diagnostic_report(), target_chat=TELEGRAM_CHAT_ID, parse_mode="Markdown"):
+                                _MASTER_DIAG_LAST_SENT = now
+                                logger.info("🩺 Master diagnostic report sent to admin.")
+        except Exception as exc:
+            logger.exception("Master diagnostic monitor error: %s", exc)
+        time.sleep(5)
+
+
 def _audit_signal_decision(reason):
     key = {
         "QUALITY_GATE_REJECTED": "quality_rejected",
@@ -4697,6 +4805,10 @@ def _main_keyboard(is_admin=False):
             f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}",
             callback_data="toggle_master_signal"
         )])
+        rows.append([InlineKeyboardButton(
+            f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}",
+            callback_data="toggle_master_diagnostic"
+        )])
         rows.append([InlineKeyboardButton("🪟🔮 کنترل شیشه‌ای کامل سیگنال", callback_data="signal_glass")])
         rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
         rows.append([InlineKeyboardButton(
@@ -4948,9 +5060,9 @@ def start_telegram_bot():
                 )
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,_MAX_FUSION_PREV,MAX_TRADE_SOL
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
-            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 کلید مادر BUY/SELL: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 کلید مادر BUY/SELL: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data == "toggle_master_signal":
                 if not is_admin:
                     await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
@@ -4971,6 +5083,35 @@ def start_telegram_bot():
                         "🔴 **کلید مادر BUY/SELL خاموش شد**\n\n"
                         "⛔ تولید و انتشار سیگنال جدید متوقف شد.\n"
                         "✅ مدیریت پوزیشن‌های باز برای TP/SL/Trailing ادامه دارد."
+                    )
+                await q.edit_message_text(message, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
+                return
+            elif data == "toggle_master_diagnostic":
+                if not is_admin:
+                    await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    return
+                MASTER_DIAGNOSTIC_ENABLED = not MASTER_DIAGNOSTIC_ENABLED
+                _set_bot_setting("master_diagnostic_enabled", "1" if MASTER_DIAGNOSTIC_ENABLED else "0")
+                if MASTER_DIAGNOSTIC_ENABLED:
+                    with _MASTER_DIAG_STATE_LOCK:
+                        _MASTER_DIAG_ENABLED_SINCE = time.time()
+                        _MASTER_DIAG_LAST_SENT = 0.0
+                        _MASTER_DIAG_LAST_SIGNAL_SEEN = float(V12_REAL_AUDIT.get("last_signal", 0) or 0)
+                    message = (
+                        "🟢 **عیب‌یابی سیگنال روشن شد**\n\n"
+                        "🩺 فقط گزارش خلاصه و دوره‌ای برای ادمین ارسال می‌شود.\n"
+                        "🚫 پیام‌های توکن‌به‌توکن و اسپم عیب‌یابی ارسال نمی‌شود.\n"
+                        "⚙️ این کلید هیچ اثری روی تولید، خرید یا انتشار سیگنال ندارد."
+                    )
+                else:
+                    with _MASTER_DIAG_STATE_LOCK:
+                        _MASTER_DIAG_ENABLED_SINCE = 0.0
+                        _MASTER_DIAG_LAST_SENT = 0.0
+                        _MASTER_DIAG_LAST_SIGNAL_SEEN = 0.0
+                    message = (
+                        "🔴 **عیب‌یابی سیگنال خاموش شد**\n\n"
+                        "✅ هیچ گزارش Diagnostic جدیدی ارسال نمی‌شود.\n"
+                        "🚀 تولید و انتشار سیگنال و مدیریت پوزیشن‌ها بدون تغییر ادامه دارد."
                     )
                 await q.edit_message_text(message, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
                 return
@@ -5499,6 +5640,11 @@ if __name__ == "__main__":
     logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
     _load_channel_config()
     _load_trade_limit()
+    # وضعیت کلید Diagnostic از DB برمی‌گردد؛ اگر قبلاً تنظیم نشده باشد روشن است.
+    try:
+        MASTER_DIAGNOSTIC_ENABLED = str(_get_bot_setting("master_diagnostic_enabled", "1")).strip() not in ("0", "false", "off")
+    except Exception:
+        MASTER_DIAGNOSTIC_ENABLED = True
     ensure_channel_invite_link()
 
     threads = [
@@ -5506,6 +5652,7 @@ if __name__ == "__main__":
         # رادار واحد فقط یک Thread اجرایی دارد؛ رفتار آن بر اساس سه حالت اصلی تغییر می‌کند و خرید فقط از بهترین کاندیدای هر sweep انجام می‌شود.
         Thread(target=subscription_monitor_loop, daemon=True, name="SubMonitor"),
         Thread(target=check_positions_loop, daemon=True, name="PositionsCheck"),
+        Thread(target=master_signal_diagnostic_loop, daemon=True, name="MasterSignalDiagnostics"),
         Thread(target=unified_market_scanner_loop, args=(None,), daemon=True, name="UnifiedHulkAI"),
     ]
     for t in threads:
