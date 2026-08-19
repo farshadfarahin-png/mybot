@@ -2058,11 +2058,32 @@ CANDIDATE_MIN_BUY_RATIO = 1.10
 CANDIDATE_MIN_BUYS = 2
 
 # Final entry quality remains stricter and is checked after structure/flow analysis.
-FINAL_ANALYSIS_MIN_LIQUIDITY = 25000.0
-FINAL_ANALYSIS_MIN_VOLUME_5M = 3000.0
-FINAL_ANALYSIS_MIN_BUY_RATIO = 1.15
-FINAL_BREAKOUT_MIN_VOLUME_5M = 4000.0
-FINAL_SUPPORT_MIN_VOLUME_5M = 3000.0
+# Analysis quality gate: adaptive instead of a single hard liquidity wall.
+# Higher liquidity can safely accept slightly lower 5m flow; lower liquidity
+# must compensate with stronger volume, buyer pressure and buyer count.
+ANALYSIS_QUALITY_MIN_LIQUIDITY = 15000.0
+ANALYSIS_QUALITY_MIN_VOLUME_5M = 1500.0
+ANALYSIS_QUALITY_MIN_BUY_RATIO = 1.10
+ANALYSIS_QUALITY_MIN_BUYS = 2
+ANALYSIS_HIGH_LIQUIDITY = 40000.0
+ANALYSIS_HIGH_MIN_VOLUME_5M = 2500.0
+ANALYSIS_HIGH_MIN_BUY_RATIO = 1.15
+ANALYSIS_HIGH_MIN_BUYS = 2
+ANALYSIS_STANDARD_LIQUIDITY = 25000.0
+ANALYSIS_STANDARD_MIN_VOLUME_5M = 3000.0
+ANALYSIS_STANDARD_MIN_BUY_RATIO = 1.18
+ANALYSIS_STANDARD_MIN_BUYS = 3
+ANALYSIS_LOW_MIN_VOLUME_5M = 5000.0
+ANALYSIS_LOW_MIN_BUY_RATIO = 1.28
+ANALYSIS_LOW_MIN_BUYS = 4
+ANALYSIS_QUALITY_MIN_SCORE = 4.0
+
+# Legacy/editable aliases retained for the management panel and compatibility.
+FINAL_ANALYSIS_MIN_LIQUIDITY = ANALYSIS_STANDARD_LIQUIDITY
+FINAL_ANALYSIS_MIN_VOLUME_5M = ANALYSIS_STANDARD_MIN_VOLUME_5M
+FINAL_ANALYSIS_MIN_BUY_RATIO = ANALYSIS_STANDARD_MIN_BUY_RATIO
+FINAL_BREAKOUT_MIN_VOLUME_5M = 3500.0
+FINAL_SUPPORT_MIN_VOLUME_5M = 2500.0
 ADAPTIVE_TARGET_WIN_RATE = 80.0
 ADAPTIVE_LOOKBACK = 20
 ADAPTIVE_MIN_SAMPLE = 10
@@ -2083,10 +2104,10 @@ STRUCTURE_SAMPLE_MIN_GAP = 0.5
 STRUCTURE_SUPPORT_DISTANCE_PCT = 4.0
 STRUCTURE_RESISTANCE_DISTANCE_PCT = 2.5
 STRUCTURE_BREAKOUT_BUFFER_PCT = 0.6
-STRUCTURE_MIN_SUPPORT_LIQUIDITY = 25000.0
-STRUCTURE_MIN_SUPPORT_VOLUME_5M = 3000.0
-STRUCTURE_MIN_SUPPORT_BUY_RATIO = 1.15
-STRUCTURE_MIN_BREAKOUT_BUY_RATIO = 1.20
+STRUCTURE_MIN_SUPPORT_LIQUIDITY = 20000.0
+STRUCTURE_MIN_SUPPORT_VOLUME_5M = 2500.0
+STRUCTURE_MIN_SUPPORT_BUY_RATIO = 1.18
+STRUCTURE_MIN_BREAKOUT_BUY_RATIO = 1.25
 STRUCTURE_HISTORY_TTL_SECONDS = 15 * 60
 _structure_memory = {}
 _structure_lock = Lock()
@@ -3820,6 +3841,43 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
         logger.debug(f"Independent engine {engine_name} failed for {token_addr}: {e}")
         return None
 
+def _analysis_quality_gate(liq, vol, buy_ratio, buys):
+    """Adaptive Analysis gate: quality-first without starving healthy 40k+ pools."""
+    liq = float(liq or 0.0); vol = float(vol or 0.0)
+    buy_ratio = float(buy_ratio or 0.0); buys = int(buys or 0)
+    if liq < ANALYSIS_QUALITY_MIN_LIQUIDITY:
+        return False, 0.0, "LIQUIDITY"
+    if vol < ANALYSIS_QUALITY_MIN_VOLUME_5M:
+        return False, 0.0, "VOLUME"
+    if buys < ANALYSIS_QUALITY_MIN_BUYS:
+        return False, 0.0, "BUYS"
+    if buy_ratio < ANALYSIS_QUALITY_MIN_BUY_RATIO:
+        return False, 0.0, "BUY_RATIO"
+
+    if liq >= ANALYSIS_HIGH_LIQUIDITY:
+        tier, min_vol, min_ratio, min_buys = "HIGH_LIQUIDITY", ANALYSIS_HIGH_MIN_VOLUME_5M, ANALYSIS_HIGH_MIN_BUY_RATIO, ANALYSIS_HIGH_MIN_BUYS
+        liq_points = 2.0
+    elif liq >= ANALYSIS_STANDARD_LIQUIDITY:
+        tier, min_vol, min_ratio, min_buys = "STANDARD", ANALYSIS_STANDARD_MIN_VOLUME_5M, ANALYSIS_STANDARD_MIN_BUY_RATIO, ANALYSIS_STANDARD_MIN_BUYS
+        liq_points = 1.5
+    else:
+        tier, min_vol, min_ratio, min_buys = "LOW_LIQUIDITY_COMPENSATED", ANALYSIS_LOW_MIN_VOLUME_5M, ANALYSIS_LOW_MIN_BUY_RATIO, ANALYSIS_LOW_MIN_BUYS
+        liq_points = 1.0
+
+    if vol < min_vol:
+        return False, 0.0, f"{tier}_VOLUME"
+    if buy_ratio < min_ratio:
+        return False, 0.0, f"{tier}_BUY_RATIO"
+    if buys < min_buys:
+        return False, 0.0, f"{tier}_BUYS"
+
+    volume_points = 2.0 if vol >= 10000 else 1.5 if vol >= 5000 else 1.0
+    ratio_points = 2.0 if buy_ratio >= 1.35 else 1.5 if buy_ratio >= 1.25 else 1.0
+    buyer_points = 1.5 if buys >= 5 else 1.0 if buys >= 3 else 0.5
+    score = liq_points + volume_points + ratio_points + buyer_points
+    return score >= ANALYSIS_QUALITY_MIN_SCORE, score, tier
+
+
 def _analysis_engine_candidate(token_addr, pair):
     """Independent market-structure engine.
 
@@ -3845,16 +3903,13 @@ def _analysis_engine_candidate(token_addr, pair):
             _analysis_diag("data_ready", token_addr=token_addr)
         if price <= 0:
             _diag_reject("ANALYSIS", "INVALID_PRICE", token_addr); return None
-        if liq < CANDIDATE_MIN_LIQUIDITY:
-            _diag_reject("ANALYSIS", "LOW_ANALYSIS_LIQUIDITY", token_addr); return None
-        if vol < CANDIDATE_MIN_VOLUME_5M:
-            _diag_reject("ANALYSIS", "LOW_ANALYSIS_5M_VOLUME", token_addr); return None
+        # Adaptive quality gate: 40k+ liquidity is allowed to pass with healthy
+        # 5m flow, while smaller pools must compensate with stronger flow.
+        quality_ok, quality_score, quality_tier = _analysis_quality_gate(liq, vol, buy_ratio, buys)
+        if not quality_ok:
+            _diag_reject("ANALYSIS", f"ANALYSIS_QUALITY_{quality_tier}", token_addr); return None
         # Do not require positive 5m change before evaluating structure: a valid
         # support bounce can occur while the raw 5m change is still flat/negative.
-        if buys < 1:
-            _diag_reject("ANALYSIS", "ANALYSIS_NO_BUYERS", token_addr); return None
-        if buy_ratio < CANDIDATE_MIN_BUY_RATIO:
-            _diag_reject("ANALYSIS", "ANALYSIS_BUY_PRESSURE_WEAK", token_addr); return None
 
         samples = _update_structure_memory(token_addr, price)
         # Fresh tokens need a first-pass signal path; full structure activates
@@ -3863,13 +3918,9 @@ def _analysis_engine_candidate(token_addr, pair):
             # Provisional path: real liquidity + volume + stronger buyers. It is
             # intentionally independent of MAX/consensus so the Analysis engine
             # can emit while its own structure history is still warming up.
-            if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
-                _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_BUY_RATIO", token_addr); return None
-            if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
-                _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_LIQUIDITY", token_addr); return None
-            if vol < FINAL_ANALYSIS_MIN_VOLUME_5M:
-                _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_VOLUME", token_addr); return None
-            score = 6.0 + min(2.0, buy_ratio - 1.0) + min(1.5, vol / 10000.0) + min(1.0, liq / 50000.0)
+            if quality_score < ANALYSIS_QUALITY_MIN_SCORE:
+                _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_QUALITY_SCORE", token_addr); return None
+            score = 6.0 + quality_score + min(2.0, buy_ratio - 1.0) + min(1.5, vol / 10000.0) + min(1.0, liq / 50000.0)
             now = time.time()
             if now - consensus_last_signal.get(f"{token_addr}:Analysis", 0) < CONSENSUS_COOLDOWN_SECONDS:
                 _diag_reject("ANALYSIS", "ANALYSIS_COOLDOWN", token_addr)
@@ -3917,7 +3968,7 @@ def _analysis_engine_candidate(token_addr, pair):
         if breakout:
             if slope_pct <= 0:
                 _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_TREND_NOT_UP", token_addr); return None
-            if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
+            if liq < ANALYSIS_QUALITY_MIN_LIQUIDITY:
                 _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_LIQUIDITY_WEAK", token_addr); return None
             if vol < FINAL_BREAKOUT_MIN_VOLUME_5M:
                 _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_VOLUME_WEAK", token_addr); return None
@@ -3932,11 +3983,11 @@ def _analysis_engine_candidate(token_addr, pair):
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_TREND_NOT_UP", token_addr); return None
             if bounce_pct < 0.35:
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_NO_BOUNCE", token_addr); return None
-            if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
+            if liq < ANALYSIS_QUALITY_MIN_LIQUIDITY:
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_LIQUIDITY_WEAK", token_addr); return None
             if vol < FINAL_SUPPORT_MIN_VOLUME_5M:
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_VOLUME_WEAK", token_addr); return None
-            if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
+            if buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO:
                 _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_BUY_PRESSURE_WEAK", token_addr); return None
             _analysis_diag("support_setups", token_addr=token_addr)
             structure = "ANALYSIS_SUPPORT_BOUNCE"
@@ -3947,11 +3998,11 @@ def _analysis_engine_candidate(token_addr, pair):
             # and price is not sitting at resistance.
             if slope_pct < 0.20:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_SLOPE_WEAK", token_addr); return None
-            if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
+            if buy_ratio < ANALYSIS_STANDARD_MIN_BUY_RATIO:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_BUY_PRESSURE_WEAK", token_addr); return None
-            if vol < FINAL_ANALYSIS_MIN_VOLUME_5M:
+            if vol < ANALYSIS_STANDARD_MIN_VOLUME_5M:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_VOLUME_WEAK", token_addr); return None
-            if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
+            if liq < ANALYSIS_QUALITY_MIN_LIQUIDITY:
                 _diag_reject("ANALYSIS", "ANALYSIS_TREND_LIQUIDITY_WEAK", token_addr); return None
             _analysis_diag("continuation_setups", token_addr=token_addr)
             structure = "ANALYSIS_TREND_CONTINUATION"
