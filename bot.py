@@ -134,12 +134,8 @@ SYNCHRONIZED_MODE = True
 ADVANCED_AI_ENABLED = False
 MAX_FUSION_ENABLED = False
 EMERGENCY_STOP = False
-# کلید مادر سیگنال: ON = مسیر تولید سیگنال BUY/SELL فعال، OFF = هیچ سیگنال جدیدی تولید/منتشر نمی‌شود.
-# Master فقط کلید اصلی فعال/غیرفعال‌سازی کل سیستم سیگنال است؛ موتور محسوب نمی‌شود.
-MASTER_SIGNAL_ENABLED = False
 # مجوز مستقل خرج‌کردن از ولت برای BUY/SELL واقعی؛ پیش‌فرض خاموش
 WALLET_TRADE_PERMISSION = False
-MASTER_SIGNAL_FIRE_NOW = False  # legacy UI pulse; never used as a signal source
 # کلید مستقل عیب‌یابی: فقط گزارش Diagnostic را کنترل می‌کند و روی تولید/اجرای سیگنال اثر ندارد.
 MASTER_DIAGNOSTIC_ENABLED = True
 COPY_TRADING_ENABLED = True
@@ -583,6 +579,7 @@ def ultra_accuracy_scanner_loop(app):
                             }
 
                     ultra_msg = (
+                        f"🚨 **ورود توسط: 🤖 اسمارت‌مانی/هایپ**\n"
                         f"💎✨ [سیگنال هوش مصنوعی پیش‌رو - فیلتر سخت‌گیر]\n"
                         f"🎯 وضعیت: {social_msg}\n"
                         f"📌 تاییدیه اسمارت‌مانی و والدهای انسایدر ✅\n\n"
@@ -644,6 +641,7 @@ def mempool_smart_money_scanner_loop(app):
                     solscan_link = f"https://solscan.io/tx/{result_info}" if success else f"https://solscan.io/token/{token_addr}"
 
                     mempool_msg = (
+                        f"🚨 **ورود توسط: 🤖 اتحاد — Mempool/SmartMoney**\n"
                         f"⚡🕵️ [شکارچی ممپول & اسمارت مانی هالکی]\n"
                         f"🎯 ورود پیش از عموم بازار با تایید نهنگ‌ها!\n"
                         f"📌 وضعیت: {buy_status_str}\n\n"
@@ -1593,7 +1591,9 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     sl = float(pos.get("sl", 0) or 0)
     locked = float(pos.get("locked_floor", sl) or sl)
     highest = float(pos.get("highest_pnl", pnl_percent) or pnl_percent)
-    reason = pos.get("reason", "سیگنال متحد موتورها")
+    reason = pos.get("reason", "سیگنال موتور")
+    signal_engine_label = (pos.get("exit_engine_label") or pos.get("signal_engine_label")
+                           or pos.get("mode") or "موتور سیگنال")
     volume = float(pos.get("volume", 0.0) or 0.0)
     liquidity = float(pos.get("liquidity", 0.0) or 0.0)
     m5_change = float(pos.get("m5_change", pos.get("p_change", 0.0)) or 0.0)
@@ -1614,6 +1614,8 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
         title, status = "🛑 فروش سیگنال؛ حد ضرر فعال شد", "🔴 سیگنال به حد ضرر رسید"
 
     msg = (
+        f"🔴 **سیگنال SELL توسط: {signal_engine_label}**\n"
+        f"🚨 **خروج واقعی/از مسیر: {signal_engine_label}**\n"
         f"{title}\n\n"
         f"🪙 توکن: {symbol}\n"
         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
@@ -1638,7 +1640,7 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
             token_addr=token_addr, symbol=symbol, price=current_price, tp=tp, sl=locked,
             buy_amt=float(pos.get("buy_amt", 0.0) or 0.0), volume=float(pos.get("volume", 0.0) or 0.0),
             liquidity=float(pos.get("liquidity", 0.0) or 0.0), p_change=float(pos.get("m5_change", 0.0) or 0.0),
-            solscan_link=solscan, signal_title=title, side="SELL",
+            solscan_link=solscan, signal_title=f"🚨 {signal_engine_label} | {title}", side="SELL",
             execution_status="", execution_tx=tx_signature, pnl_percent=pnl_percent
         )
 
@@ -1696,14 +1698,20 @@ def _update_trailing_state(pos, current_price, pnl_percent, pair):
     return current_floor, weakness
 
 def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_change,
-                      reason, buy_amt, buy_status):
+                      reason, buy_amt, buy_status, signal_engine_label="موتور سیگنال",
+                      engine_names=None, mode="ENGINE"):
+    # حتی وقتی خرید بلاکچین ناموفق است، هویت موتور ورود حفظ می‌شود تا خروج/SELL
+    # بعدی دقیقاً به همان موتور یا مسیر نسبت داده شود و پیام عمومی نشود.
     with state_lock:
+        names = list(engine_names or [])
         signal_positions[token_addr] = {
             "entry_price": price, "symbol": symbol, "tp": tp, "sl": sl,
             "volume": volume, "liquidity": liquidity, "p_change": p_change,
             "reason": reason, "buy_amt": buy_amt, "buy_status": buy_status,
             "created_at": time.time(), "highest_pnl": 0.0, "highest_price": price,
-            "locked_floor": sl, "trailing_active": True, "side": "BUY"
+            "locked_floor": sl, "trailing_active": True, "side": "BUY",
+            "engines": names, "engine_names": names, "mode": mode,
+            "signal_engine_label": signal_engine_label,
         }
 
 def evaluate_signal_only_positions():
@@ -1956,6 +1964,7 @@ def technical_analysis_scanner_loop(app):
                 target_sl_val = price * (1 + (TECH_STOP_LOSS / 100))
 
                 tech_msg = (
+                    f"🚨 **ورود توسط: 🧠 پیشرفته — Technical**\n"
                     f"📊📈 سیگنال پرایس اکشن VIP + هوش مصنوعی هالکی\n"
                     f"✨ وضعیت: {pa_reason}\n"
                     f"📌 وضعیت خرید: {buy_status_str}\n\n"
@@ -1975,7 +1984,18 @@ def technical_analysis_scanner_loop(app):
                         "symbol": symbol,
                         "tp": TECH_TAKE_PROFIT,
                         "sl": TECH_STOP_LOSS,
-                        "highest_price": price
+                        "highest_price": price,
+                        "highest_pnl": 0.0,
+                        "locked_floor": TECH_STOP_LOSS,
+                        "engines": ["Technical"],
+                        "engine_names": ["Technical"],
+                        "mode": "🧠 موتور پیشرفته",
+                        "signal_engine_label": "🧠 پیشرفته — Technical",
+                        "exit_engine_label": "🧠 پیشرفته — Technical",
+                        "exit_engine_names": ["Technical"],
+                        "opened_at": time.time(),
+                        "buy_amt": current_buy_amt,
+                        "volume": volume_5m, "liquidity": liquidity, "p_change": price_change_5m,
                     }
                 
                 send_telegram_msg(tech_msg)
@@ -1996,9 +2016,7 @@ def technical_analysis_scanner_loop(app):
 # اجماع عمداً کمی سخت‌گیرتر شده تا فقط گزینه‌های باکیفیت‌تر منتشر شوند.
 # حداقل 82٪ موتورهای روشن باید رأی مثبت بدهند و در حالت معمول حداقل 7 رأی لازم است.
 def new_trade_system_enabled():
-    """Master is only the master ON/OFF gate; an actual engine must be ON too."""
-    if not MASTER_SIGNAL_ENABLED:
-        return False
+    """Run the signal pipeline whenever at least one real engine is enabled."""
     if EMERGENCY_STOP:
         return False
     try:
@@ -2380,6 +2398,7 @@ def build_consensus_signal(token_addr, pair):
         # Top-level mode.  MAX owns the market scanner whenever it is ON.
         if MAX_FUSION_ENABLED:
             mode = "👑 MAX — اتحاد + پیشرفته"
+            hunter_group = "MAX"
             # MAX requires BOTH families to participate, but does not require
             # two votes from each family.  Requiring 2+2 made the real scanner
             # reject almost every candidate even when market quality was valid.
@@ -2392,6 +2411,7 @@ def build_consensus_signal(token_addr, pair):
             strength = adv * 1.25 + hulk * 1.35
         elif ADVANCED_AI_ENABLED:
             mode = "🧠 موتور پیشرفته"
+            hunter_group = "ADVANCED"
             # Advanced can operate completely by itself and searches the market
             # using its own AI/quality sub-engines.
             if adv < 1:
@@ -2404,6 +2424,7 @@ def build_consensus_signal(token_addr, pair):
             strength = adv * 1.35 + (hulk * 0.15)
         elif SYNCHRONIZED_MODE:
             mode = "🤖 موتور اتحاد"
+            hunter_group = "HULK"
             if hulk < 1:
                 _diag_reject("FUSION", "HULK_NO_VOTE", token_addr)
                 return None
@@ -2435,6 +2456,7 @@ def build_consensus_signal(token_addr, pair):
             "hulk_votes": evidence["hulk_votes"],
             "engines": evidence["votes"],
             "mode": mode,
+            "hunter_group": hunter_group,
             **q,
             "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
             "tp": max(15.0, min(30.0, 14.0 + min(12.0, score))),
@@ -2889,7 +2911,7 @@ def _build_master_diagnostic_report():
         return (
             "🩺 **گزارش عیب‌یابی سیگنال**\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"🔘 سیگنال اصلی: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}\n"
+            
             f"🩺 Diagnostic: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}\n"
             f"📡 وضعیت رادار: {status}\n"
             f"🔍 اسکن‌ها: `{audit.get('scans', 0)}` | توکن‌های دیده‌شده: `{audit.get('tokens_seen', 0)}`\n"
@@ -3263,30 +3285,45 @@ v7_compact_learning_memory(force=False)
 
 def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
-    # V17 FIX: non-MAX engines emit independently. MAX keeps one global lane.
-    is_analysis_signal = bool(fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS")
-    emit_lane = "ANALYSIS" if is_analysis_signal else ("MAX" if MAX_FUSION_ENABLED else str(fusion.get("hunter_group", "ENGINE")))
+    # V18: every real engine owns its own BUY lane. MAX is the combined
+    # Advanced + Hulk lane. Analysis is a dedicated independent lane.
+    group = str(fusion.get("hunter_group", "ENGINE") or "ENGINE").upper()
+    is_analysis_signal = bool(fusion.get("force_independent") or group == "ANALYSIS")
+    if is_analysis_signal:
+        emit_lane = "ANALYSIS"
+    elif group == "MAX" or MAX_FUSION_ENABLED and group == "MAX":
+        emit_lane = "MAX"
+    elif group == "ADVANCED":
+        emit_lane = "ADVANCED"
+    elif group in ("HULK", "UNIFIED", "ALLIANCE"):
+        emit_lane = "HULK"
+    else:
+        emit_lane = group or "ENGINE"
     emit_engine = (fusion.get("engines") or fusion.get("votes") or [emit_lane])[0]
     emit_key = f"{emit_lane}:{emit_engine}"
+
+    # Candidate must come from an actually enabled engine/family.
+    active_engine_names = _active_independent_engine_names()
+    candidate_engines = [str(e) for e in (fusion.get("engines") or fusion.get("votes") or [])]
+    if not candidate_engines:
+        _audit_signal_decision("SIGNAL_WITHOUT_ENGINE")
+        return False, "SIGNAL_WITHOUT_ENGINE"
+    if is_analysis_signal:
+        engine_enabled = ANALYSIS_ENGINE_ENABLED and "Analysis" in candidate_engines
+    elif group == "MAX":
+        engine_enabled = MAX_FUSION_ENABLED and bool(fusion.get("advanced_votes")) and bool(fusion.get("hulk_votes"))
+    elif group == "ADVANCED":
+        engine_enabled = ADVANCED_AI_ENABLED and any(e in active_engine_names for e in candidate_engines)
+    elif group in ("HULK", "UNIFIED", "ALLIANCE"):
+        engine_enabled = SYNCHRONIZED_MODE and any(e in active_engine_names for e in candidate_engines)
+    else:
+        engine_enabled = any(e in active_engine_names for e in candidate_engines)
+    if not engine_enabled:
+        _audit_signal_decision("ENGINE_NOT_ENABLED")
+        return False, "ENGINE_NOT_ENABLED"
+
     # فقط تصمیم ورود/سهمیه را قفل می‌کنیم؛ خرید شبکه و Telegram خارج از قفل انجام می‌شوند.
     with SIGNAL_EMIT_LOCK:
-        if not MASTER_SIGNAL_ENABLED:
-            _audit_signal_decision("MASTER_SIGNAL_OFF")
-            return False, "MASTER_SIGNAL_OFF"
-
-        # Master is only permission to use real engines; it is never an engine itself.
-        active_engine_names = _active_independent_engine_names()
-        if not active_engine_names:
-            _audit_signal_decision("NO_ACTIVE_ENGINE")
-            return False, "NO_ACTIVE_ENGINE"
-        candidate_engines = list(fusion.get("engines") or fusion.get("votes") or [])
-        if not candidate_engines:
-            _audit_signal_decision("SIGNAL_WITHOUT_ENGINE")
-            return False, "SIGNAL_WITHOUT_ENGINE"
-        if not any(str(e) in active_engine_names for e in candidate_engines):
-            _audit_signal_decision("ENGINE_NOT_ENABLED")
-            return False, "ENGINE_NOT_ENABLED"
-
         if _token_lock_is_open(token_addr):
             if is_analysis_signal:
                 _analysis_diag("blocked_duplicate", token_addr=token_addr)
@@ -3345,17 +3382,23 @@ def send_fused_signal(token_addr, fusion):
     amount = get_dynamic_buy_amount(0.01)
     reason = " + ".join(fusion.get("votes") or [])
     group = str(fusion.get("hunter_group", "ENGINE") or "ENGINE").upper()
+    engine_names = list(fusion.get("engines") or fusion.get("votes") or [])
     if is_analysis_signal or group == "ANALYSIS":
         mode_name = "🔬 موتور تحلیل"
-    elif MAX_FUSION_ENABLED or group == "MAX":
+        signal_engine_label = "🔬 تحلیل"
+    elif group == "MAX":
         mode_name = "👑 MAX — اتحاد + پیشرفته"
+        signal_engine_label = "👑 MAX (اتحاد + پیشرفته)"
     elif group in ("HULK", "UNIFIED", "ALLIANCE"):
         mode_name = "🤖 موتور اتحاد"
+        signal_engine_label = "🤖 اتحاد"
     elif group == "ADVANCED":
         mode_name = "🧠 موتور پیشرفته"
+        signal_engine_label = "🧠 پیشرفته"
     else:
-        mode_name = "🤖 موتور اتحاد" if fusion.get("hulk_votes") else "🧠 موتور پیشرفته"
-    engine_names = list(fusion.get("engines") or fusion.get("votes") or [])
+        signal_engine_label = mode_name = ("🤖 موتور اتحاد" if fusion.get("hulk_votes") else "🧠 موتور پیشرفته")
+    if engine_names:
+        signal_engine_label += f" — {' + '.join(str(x) for x in engine_names)}"
     symbol = fusion["symbol"]
     price = fusion["price"]
     tp = fusion["tp"]
@@ -3395,6 +3438,7 @@ def send_fused_signal(token_addr, fusion):
         execution_display = f"🔴 خرید واقعی ناموفق شد\n🤖 موتور/موتورهای مسئول: {engine_display}\n📌 دلیل: {result}"
 
     msg = (
+        f"🚨 **ورود توسط: {signal_engine_label}**\n"
         f"⚡🤖 **{mode_name}**\n"
         f"🎯 قدرت سیگنال: **{fusion['score']:.2f}**\n"
         f"🤖 موتورهای مؤثر: {engine_display}\n"
@@ -3443,7 +3487,11 @@ def send_fused_signal(token_addr, fusion):
                 "tp": tp, "sl": sl, "highest_price": price,
                 "highest_pnl": 0.0, "locked_floor": sl,
                 "trailing_active": DYNAMIC_TRAILING_TP_ENABLED,
-                "side": "BUY", "reason": f"{mode_name} | {reason}", "engines": engine_names, "engine_names": engine_names, "mode": mode_name, "opened_at": time.time(), "buy_amt": amount,
+                "side": "BUY", "reason": f"{mode_name} | {reason}", "engines": engine_names, "engine_names": engine_names,
+                "mode": mode_name, "signal_engine_label": signal_engine_label,
+                # SELL/exit همیشه صاحب همان lane ورود است؛ TP/SL/Trailing فقط trigger خروج هستند.
+                "exit_engine_label": signal_engine_label, "exit_engine_names": list(engine_names),
+                "opened_at": time.time(), "buy_amt": amount,
                 "entry_lock": True,
                 "volume": float(fusion.get("vol", 0.0) or 0.0),
                 "liquidity": float(fusion.get("liq", 0.0) or 0.0),
@@ -3461,7 +3509,8 @@ def send_fused_signal(token_addr, fusion):
         # هیچ پیام «ثبت/رصد شد» یا «SOL ناکافی» برای کاربر ارسال نمی‌شود.
         track_signal_only(
             token_addr, symbol, price, tp, sl, fusion['vol'], fusion['liq'],
-            fusion['chg'], reason, amount, execution_status
+            fusion['chg'], reason, amount, execution_status,
+            signal_engine_label=signal_engine_label, engine_names=engine_names, mode=mode_name
         )
     return success, result
 
@@ -4107,7 +4156,7 @@ def unified_market_scanner_loop(app):
     Analysis and Fusion have separate candidate containers, selection, submission,
     and diagnostics. No Fusion/MAX condition is allowed to suppress Analysis.
     """
-    global _TRUE_HUNTER_CURSOR, MASTER_SIGNAL_FIRE_NOW
+    global _TRUE_HUNTER_CURSOR
     logger.info("%s / %s: CLEAN SIGNAL CORE started", UNIFIED_ENGINE_NAME, BOT_BUILD_VERSION)
     send_telegram_msg(f"🚀 رادار {BOT_BUILD_VERSION} فعال شد")
 
@@ -4663,7 +4712,6 @@ SIGNAL_GLASS_CATEGORIES = {
         ("GLOBAL_SIGNAL_COOLDOWN_SECONDS", "Cooldown سراسری سیگنال (ثانیه)", "num"),
         ("DAILY_SIGNAL_LIMIT", "سقف روزانه سیگنال", "num"),
         ("EMERGENCY_STOP", "توقف اضطراری", "bool"),
-        ("MASTER_SIGNAL_ENABLED", "🔘 کلید اصلی فعال/غیرفعال‌سازی سیگنال", "bool"),
         ("MAX_FUSION_ENABLED", "MAX FUSION", "bool"),
         ("SYNCHRONIZED_MODE", "اتحاد هالک", "bool"),
         ("ADVANCED_AI_ENABLED", "سیستم پیشرفته AI", "bool"),
@@ -4873,10 +4921,6 @@ def _main_keyboard(is_admin=False):
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
     elif CHANNEL_INVITE_LINK: rows.append([InlineKeyboardButton("📢 کانال VIP",url=CHANNEL_INVITE_LINK)])
     if is_admin:
-        rows.append([InlineKeyboardButton(
-            f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}",
-            callback_data="toggle_master_signal"
-        )])
         rows.append([InlineKeyboardButton(
             f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}",
             callback_data="toggle_master_diagnostic"
@@ -5132,33 +5176,10 @@ def start_telegram_bot():
                 )
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
-            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 سیگنال اصلی: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
-            elif data == "toggle_master_signal":
-                if not is_admin:
-                    await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
-                    return
-                MASTER_SIGNAL_ENABLED = not MASTER_SIGNAL_ENABLED
-                MASTER_SIGNAL_FIRE_NOW = False
-                _set_bot_setting("master_signal_enabled", "1" if MASTER_SIGNAL_ENABLED else "0")
-                if MASTER_SIGNAL_ENABLED:
-                    # کلید مادر عمداً مستقل از MAX/Advanced/Hulk/اتحاد است.
-                    # در اولین دور اسکن، یک کاندید واقعی از Pair داده‌دار انتخاب می‌شود.
-                    message = (
-                        "🟢 **کلید مادر BUY/SELL روشن شد**\n\n"
-                        "تمام مسیرهای تولید سیگنال فعال شدند و کلیدهای خانواده‌های دیگر مانع شروع نمی‌شوند.\n"
-                        "⚡ موتورهای فعال در دور اسکن بعدی کاندیدهای واقعی را بررسی می‌کنند.\n"
-                        "✅ Master فقط اجازه عبور سیگنال‌های موتورهای واقعی را می‌دهد و خودش موتور نیست."
-                    )
-                else:
-                    message = (
-                        "🔴 **کلید مادر BUY/SELL خاموش شد**\n\n"
-                        "⛔ تولید و انتشار سیگنال جدید متوقف شد.\n"
-                        "✅ مدیریت پوزیشن‌های باز برای TP/SL/Trailing ادامه دارد."
-                    )
-                await q.edit_message_text(message, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
-                return
+            if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🧩 Analysis: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🩺 عیب‌یابی: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if ANALYSIS_ENGINE_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+
             elif data == "toggle_master_diagnostic":
                 if not is_admin:
                     await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
@@ -5555,7 +5576,6 @@ def start_telegram_bot():
                     f"📢 ارسال واقعی کانال: `{h['channel_sent']}`\n"
                     f"⚠️ شکست ارسال کانال: `{h['channel_failed']}`\n\n"
                     f"📈 سقف امروز: `{daily_signal_status_text()}`\n"
-                    f"🔘 سیگنال اصلی: `{MASTER_SIGNAL_ENABLED}`\n"
                     f"🛑 Emergency Stop: `{EMERGENCY_STOP}`\n"
                     f"👑 MAX Fusion: `{MAX_FUSION_ENABLED}`\n"
                     f"🤝 اتحاد: `{SYNCHRONIZED_MODE}`\n\n"
@@ -5754,13 +5774,6 @@ if __name__ == "__main__":
         MASTER_DIAGNOSTIC_ENABLED = str(_get_bot_setting("master_diagnostic_enabled", "1")).strip() not in ("0", "false", "off")
     except Exception:
         MASTER_DIAGNOSTIC_ENABLED = True
-    # وضعیت Master از آخرین تنظیم پنل برمی‌گردد؛ اگر قبلاً ذخیره نشده بود خاموش می‌ماند.
-    try:
-        MASTER_SIGNAL_ENABLED = str(_get_bot_setting("master_signal_enabled", "0")).strip() not in ("0", "false", "off")
-        MASTER_SIGNAL_FIRE_NOW = False
-    except Exception:
-        MASTER_SIGNAL_ENABLED = False
-        MASTER_SIGNAL_FIRE_NOW = False
     ensure_channel_invite_link()
 
     threads = [
