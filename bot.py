@@ -4009,7 +4009,12 @@ def unified_market_scanner_loop(app):
     Analysis and Fusion have separate candidate containers, selection, submission,
     and diagnostics. No Fusion/MAX condition is allowed to suppress Analysis.
     """
-    global _TRUE_HUNTER_CURSOR
+    global _TRUE_HUNTER_CURSOR, MASTER_SIGNAL_FIRE_NOW
+    # MASTER_SIGNAL_FIRE_NOW is shared state: the Telegram toggle arms it,
+    # and this scanner consumes the arm on the first valid Pair.
+    if not isinstance(MASTER_SIGNAL_FIRE_NOW, bool):
+        MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
+
     logger.info("%s / %s: CLEAN SIGNAL CORE started", UNIFIED_ENGINE_NAME, BOT_BUILD_VERSION)
     send_telegram_msg(f"🚀 رادار {BOT_BUILD_VERSION} فعال شد")
 
