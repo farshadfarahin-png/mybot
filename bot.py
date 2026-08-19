@@ -47,8 +47,8 @@ http_session.mount("https://", adapter)
 http_session.mount("http://", adapter)
 
 # کارهای سنگین بازار از اسکنر جدا می‌شوند تا Telegram سریع بماند.
-SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="SignalExec")
-ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisExec")
+SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="SignalExec")
+ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="AnalysisExec")
 SIGNAL_EMIT_LOCK = Lock()
 
 # تنظیمات کلیدی محیطی و کانال انتشار سیگنال
@@ -2050,12 +2050,12 @@ def advanced_filter_enabled():
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
 CONSENSUS_MIN_SCORE = 4.0
 CONSENSUS_MIN_RATIO = 0.55
-CONSENSUS_COOLDOWN_SECONDS = 2
+CONSENSUS_COOLDOWN_SECONDS = 0.5
 
 # Daily signal cap: editable from the management panel, 1..50. Default: 15.
 DAILY_SIGNAL_LIMIT = 25
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 2
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 0.5
 # Signal budget is capacity only; quality thresholds never depend on this value.
 SIGNAL_BUDGET_MIN = 1
 SIGNAL_BUDGET_MAX = 50
@@ -2179,16 +2179,16 @@ def _market_structure_gate(token_addr, pair):
         return True, {"structure": "ERROR_BYPASS", "structure_score": 0.0}
 
 # سرعت رصد فقط — هیچ آستانه کیفیت، تعداد سیگنال یا منطق موتور تغییر نمی‌کند.
-FAST_SCAN_INTERVAL_SECONDS = 0.25
+FAST_SCAN_INTERVAL_SECONDS = 0.10
 MARKET_DISCOVERY_WORKERS = 4
-PAIR_SCAN_WORKERS = 24
+PAIR_SCAN_WORKERS = 32
 
 # ELITE RADAR + HULK SENTINEL: فقط معماری رصد/رتبه‌بندی ارتقا یافته؛ هیچ آستانه کیفیت، سقف سیگنال یا کلید کنترلی تغییر نمی‌کند.
 # بازار در پس‌زمینه تازه می‌شود تا رادار منتظر HTTP discovery نماند.
-ELITE_DISCOVERY_REFRESH_SECONDS = 2.50
-ELITE_DISCOVERY_MAX_AGE_SECONDS = 4.0
-ELITE_PAIR_TIMEOUT_SECONDS = 3.00
-ELITE_VOTE_WORKERS = 12
+ELITE_DISCOVERY_REFRESH_SECONDS = 0.75
+ELITE_DISCOVERY_MAX_AGE_SECONDS = 1.5
+ELITE_PAIR_TIMEOUT_SECONDS = 1.50
+ELITE_VOTE_WORKERS = 16
 ELITE_MAX_UNIQUE_TOKENS = 1200
 _elite_market_cache = []
 _elite_market_cache_time = 0.0
@@ -2208,7 +2208,7 @@ _SENTINEL_PAIR_CHOICES = 3
 # V17 TRUE HUNTER: scan the universe in rotating micro-batches.
 # This prevents the radar from waiting for hundreds of HTTP calls before making
 # a decision, while every discovered token is revisited continuously.
-TRUE_HUNTER_BATCH_SIZE = 40
+TRUE_HUNTER_BATCH_SIZE = 10
 _TRUE_HUNTER_CURSOR = 0
 _TRUE_HUNTER_CURSOR_LOCK = Lock()
 _sentinel_memory = {}
@@ -2217,14 +2217,14 @@ _sentinel_lock = Lock()
 # DexScreener protection: fetch up to 30 token addresses per request and reuse
 # the short-lived batch cache during the same radar sweep. This avoids one HTTP
 # request per token and reduces 429 pressure without weakening market gates.
-DEX_BATCH_SIZE = 30
-DEX_BATCH_CACHE_TTL_SECONDS = 2.0
+DEX_BATCH_SIZE = 10
+DEX_BATCH_CACHE_TTL_SECONDS = 0.50
 _dex_batch_cache = {}
 _dex_batch_cache_time = 0.0
 _dex_batch_lock = RLock()
 _dex_rate_lock = Lock()
 _dex_last_request_time = 0.0
-DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.08
+DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.03
 
 def _sentinel_ratio(buys, sells):
     return float(buys) / max(1.0, float(sells))
