@@ -167,6 +167,9 @@ TRAILING_WEAKNESS_ENABLED = True
 TRAILING_WEAK_SELL_RATIO = 1.45
 TRAILING_WEAKNESS_M5_MAX = 0.0
 TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT = 1.5
+# وقتی قیمت به TP اسمی رسید، خروج واقعی/سیگنال خروج انجام می‌شود.
+# Trailing همچنان برای مدیریت پوزیشن‌هایی که هنوز به TP نرسیده‌اند فعال می‌ماند.
+EXIT_ON_TP_HIT = True
    
 
 SECTION_ULTRA_OPEN = True
@@ -882,10 +885,17 @@ def _set_bot_setting(key, value):
 
 def _load_channel_config():
     global CHANNEL_ID, CHANNEL_INVITE_LINK
-    if not CHANNEL_ID:
-        CHANNEL_ID = _get_bot_setting("vip_channel_id", "").strip()
-    if not CHANNEL_INVITE_LINK:
-        CHANNEL_INVITE_LINK = _get_bot_setting("vip_channel_invite", "").strip()
+    # تنظیم ذخیره‌شده از پنل VIP را در اولویت قرار می‌دهیم؛ این کار جلوی
+    # ماندن CHANNEL_ID قدیمیِ Environment را می‌گیرد. اگر DB خالی بود، مقدار env حفظ می‌شود.
+    try:
+        saved_channel = _get_bot_setting("vip_channel_id", "").strip()
+        saved_invite = _get_bot_setting("vip_channel_invite", "").strip()
+        if saved_channel:
+            CHANNEL_ID = saved_channel
+        if saved_invite:
+            CHANNEL_INVITE_LINK = saved_invite
+    except Exception as e:
+        logger.warning(f"⚠️ بارگذاری تنظیم کانال از DB ناموفق بود؛ مقدار فعلی حفظ شد: {e}")
     return CHANNEL_ID, CHANNEL_INVITE_LINK
 
 def _load_trade_limit():
@@ -1529,10 +1539,8 @@ def _signal_links(token_addr, tx_signature=""):
     return solscan, dex
 
 def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx_signature="", extra_text=""):
-    # Master OFF means no new BUY/SELL signal publication. Position management itself continues.
-    if not MASTER_SIGNAL_ENABLED:
-        logger.info("Master BUY/SELL OFF: SELL signal publication suppressed for %s", token_addr)
-        return False
+    # Master فقط ورود/تولید BUY جدید را کنترل می‌کند. خروج پوزیشن باز همیشه باید
+    # مستقل از وضعیت Master اعلام شود تا خاموش کردن کلید مادر، گزارش SELL را خفه نکند.
     symbol = pos.get("symbol", "TOKEN")
     entry = float(pos.get("entry_price", 0) or 0)
     tp = float(pos.get("tp", 0) or 0)
@@ -1665,10 +1673,15 @@ def evaluate_signal_only_positions():
             pnl = ((current_price - entry) / entry) * 100.0
             locked_floor, weakness = _update_trailing_state(pos, current_price, pnl, pair)
 
-            # در سیگنال مجازی، TP اولیه فقط نقطه شروع قفل سود است؛ خروج با trailing انجام می‌شود.
+            # TP یک خروج واقعی است؛ trailing فقط نقش مدیریت پوزیشن قبل از رسیدن به TP
+            # و محافظت از سودهای بالاتر را دارد. این تغییر مسیر تولید BUY را دست نمی‌زند.
             should_close = False
             outcome = "SIGNAL_TP"
-            if pnl <= float(pos.get("sl", -8.0)) and pos.get("highest_pnl", 0) < 10:
+            tp_target = float(pos.get("tp", 0) or 0)
+            if EXIT_ON_TP_HIT and tp_target > 0 and pnl >= tp_target:
+                should_close = True
+                outcome = "SIGNAL_TP"
+            elif pnl <= float(pos.get("sl", -8.0)) and pos.get("highest_pnl", 0) < 10:
                 should_close = True
                 outcome = "SIGNAL_SL"
             elif pnl <= locked_floor and pos.get("highest_pnl", 0) >= 10:
@@ -1737,7 +1750,11 @@ def check_positions_loop():
                     # اگر به سقف‌های بسیار بزرگ رسید، حدضرر نیز همراه آن بالا می‌رود.
                     # نمونه: +1000% => حدود +950%؛ +500% => حدود +430%.
                     should_exit = False
-                    if pnl_percent <= sl and highest_pnl < 10.0:
+                    tp_target = float(pos.get("tp", 0) or 0)
+                    if EXIT_ON_TP_HIT and tp_target > 0 and pnl_percent >= tp_target:
+                        should_exit = True
+                        exit_reason_text = f"فروش خودکار؛ تارگت سود +{tp_target:.2f}% لمس شد 🎯"
+                    elif pnl_percent <= sl and highest_pnl < 10.0:
                         should_exit = True
                         exit_reason_text = "فروش خودکار حد ضرر اولیه (SL) فعال شد 🛑"
                     elif pnl_percent <= locked_floor and highest_pnl >= 10.0:
@@ -4009,12 +4026,7 @@ def unified_market_scanner_loop(app):
     Analysis and Fusion have separate candidate containers, selection, submission,
     and diagnostics. No Fusion/MAX condition is allowed to suppress Analysis.
     """
-    global _TRUE_HUNTER_CURSOR, MASTER_SIGNAL_FIRE_NOW
-    # MASTER_SIGNAL_FIRE_NOW is shared state: the Telegram toggle arms it,
-    # and this scanner consumes the arm on the first valid Pair.
-    if not isinstance(MASTER_SIGNAL_FIRE_NOW, bool):
-        MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
-
+    global _TRUE_HUNTER_CURSOR
     logger.info("%s / %s: CLEAN SIGNAL CORE started", UNIFIED_ENGINE_NAME, BOT_BUILD_VERSION)
     send_telegram_msg(f"🚀 رادار {BOT_BUILD_VERSION} فعال شد")
 
@@ -5074,6 +5086,7 @@ def start_telegram_bot():
                     return
                 MASTER_SIGNAL_ENABLED = not MASTER_SIGNAL_ENABLED
                 MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
+                _set_bot_setting("master_signal_enabled", "1" if MASTER_SIGNAL_ENABLED else "0")
                 if MASTER_SIGNAL_ENABLED:
                     # کلید مادر عمداً مستقل از MAX/Advanced/Hulk/اتحاد است.
                     # در اولین دور اسکن، یک کاندید واقعی از Pair داده‌دار انتخاب می‌شود.
@@ -5650,6 +5663,13 @@ if __name__ == "__main__":
         MASTER_DIAGNOSTIC_ENABLED = str(_get_bot_setting("master_diagnostic_enabled", "1")).strip() not in ("0", "false", "off")
     except Exception:
         MASTER_DIAGNOSTIC_ENABLED = True
+    # وضعیت Master از آخرین تنظیم پنل برمی‌گردد؛ اگر قبلاً ذخیره نشده بود خاموش می‌ماند.
+    try:
+        MASTER_SIGNAL_ENABLED = str(_get_bot_setting("master_signal_enabled", "0")).strip() not in ("0", "false", "off")
+        MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
+    except Exception:
+        MASTER_SIGNAL_ENABLED = False
+        MASTER_SIGNAL_FIRE_NOW = False
     ensure_channel_invite_link()
 
     threads = [
