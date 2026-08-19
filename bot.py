@@ -1582,7 +1582,7 @@ def _signal_links(token_addr, tx_signature=""):
     dex = f"https://dexscreener.com/solana/{token_addr}"
     return solscan, dex
 
-def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx_signature="", extra_text=""):
+def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx_signature="", extra_text="", pending=False):
     # Master فقط ورود/تولید BUY جدید را کنترل می‌کند. خروج پوزیشن باز همیشه باید
     # مستقل از وضعیت Master اعلام شود تا خاموش کردن کلید مادر، گزارش SELL را خفه نکند.
     symbol = pos.get("symbol", "TOKEN")
@@ -1599,9 +1599,11 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     m5_change = float(pos.get("m5_change", pos.get("p_change", 0.0)) or 0.0)
     buys_m5 = int(pos.get("buys_m5", 0) or 0)
     sells_m5 = int(pos.get("sells_m5", 0) or 0)
-    solscan, dex = _signal_links(token_addr, tx_signature)
+    solscan, dex = _signal_links(token_addr, "" if pending else tx_signature)
 
-    if outcome == "SELL_SUCCESS":
+    if pending:
+        title, status = "📉 سیگنال SELL صادر شد", "⏳ سیگنال خروج ثبت شد؛ اجرای فروش واقعی جداگانه در حال انجام است"
+    elif outcome == "SELL_SUCCESS":
         if float(pnl_percent or 0.0) < 0:
             title, status = "🔴 فروش خودکار موفق — خروج با ضرر", "🟢 فروش انجام شد؛ معامله با ضرر بسته شد"
         else:
@@ -1652,7 +1654,6 @@ def _adaptive_locked_floor(highest_pnl, current_floor):
     for high, lock in TRAILING_LOCK_TABLE:
         if h >= float(high):
             floor = max(floor, float(lock))
-            break
 
     if h > 1000.0:
         floor = max(floor, h - 50.0)
@@ -1712,6 +1713,8 @@ def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_ch
             "locked_floor": sl, "trailing_active": True, "side": "BUY",
             "engines": names, "engine_names": names, "mode": mode,
             "signal_engine_label": signal_engine_label,
+            "exit_engine_label": signal_engine_label,
+            "exit_engine_names": list(names),
         }
 
 def evaluate_signal_only_positions():
@@ -1832,6 +1835,22 @@ def check_positions_loop():
                     if not should_exit:
                         continue
 
+                    # Emit SELL signal BEFORE balance/RPC/Jupiter work. A slow or
+                    # failed real sell must never hide the engine's exit signal.
+                    try:
+                        send_signal_outcome(
+                            token_addr, pos, current_price, outcome, pnl_percent,
+                            tx_signature="",
+                            extra_text=(
+                                f"🧠 ضعف بازار: {'تأیید شد' if weakness else 'خیر'}\n"
+                                f"📌 دلیل خروج: {exit_reason_text or 'مدیریت سود/حد ضرر'}\n"
+                                f"⏳ اجرای فروش واقعی جداگانه در حال انجام است.\n"
+                            ),
+                            pending=True
+                        )
+                    except Exception as signal_exc:
+                        logger.exception("Pending SELL signal emission failed for %s: %s", token_addr, signal_exc)
+
                     success = False
                     sell_res_info = "موجودی توکن برای فروش پیدا نشد"
                     for _ in range(3):
@@ -1861,13 +1880,12 @@ def check_positions_loop():
                     # خروج نهایی از یک مسیر واحد ارسال می‌شود:
                     # داخل ربات = جزئیات کامل؛ کانال = کارت تمیز + دکمه‌ها.
                     if success:
-                        send_signal_outcome(
-                            token_addr, pos, current_price, "SELL_SUCCESS", pnl_percent,
-                            tx_signature=sell_res_info,
-                            extra_text=(
-                                f"🧠 ضعف بازار: {'تأیید شد' if weakness else 'خیر'}\n"
-                                f"📌 دلیل خروج: {reason}"
-                            )
+                        send_telegram_msg(
+                            f"🟢 اجرای SELL موفق شد\n"
+                            f"🔴 موتور خروج: {pos.get('exit_engine_label') or pos.get('signal_engine_label') or pos.get('mode', 'موتور سیگنال')}\n"
+                            f"🪙 {symbol}\n"
+                            f"📊 سود/زیان: {pnl_percent:+.2f}%\n"
+                            f"🔗 https://solscan.io/tx/{sell_res_info}"
                         )
                     else:
                         # حتی اگر خرید واقعی قبلاً انجام نشده باشد یا در زمان خروج
@@ -2032,22 +2050,22 @@ def advanced_filter_enabled():
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
 CONSENSUS_MIN_SCORE = 4.0
 CONSENSUS_MIN_RATIO = 0.55
-CONSENSUS_COOLDOWN_SECONDS = 120
+CONSENSUS_COOLDOWN_SECONDS = 60
 
 # Daily signal cap: editable from the management panel, 1..50. Default: 15.
 DAILY_SIGNAL_LIMIT = 25
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 3 * 60
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 90
 # Signal budget is capacity only; quality thresholds never depend on this value.
 SIGNAL_BUDGET_MIN = 1
 SIGNAL_BUDGET_MAX = 50
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
 CONSENSUS_MIN_LIQUIDITY = 25000.0
-CONSENSUS_MIN_VOLUME_5M = 3000.0
+CONSENSUS_MIN_VOLUME_5M = 1800.0
 CONSENSUS_MIN_CHANGE_5M = 0.5
 CONSENSUS_MAX_CHANGE_5M = 40.0
-CONSENSUS_MIN_BUY_RATIO = 1.15
+CONSENSUS_MIN_BUY_RATIO = 1.10
 
 # V3: two-stage candidate pipeline.
 # These thresholds only decide whether a market is worth deeper analysis.
@@ -2064,7 +2082,7 @@ CANDIDATE_MIN_BUYS = 2
 # Higher liquidity can safely accept slightly lower 5m flow; lower liquidity
 # must compensate with stronger volume, buyer pressure and buyer count.
 ANALYSIS_QUALITY_MIN_LIQUIDITY = 15000.0
-ANALYSIS_QUALITY_MIN_VOLUME_5M = 1500.0
+ANALYSIS_QUALITY_MIN_VOLUME_5M = 1200.0
 ANALYSIS_QUALITY_MIN_BUY_RATIO = 1.10
 ANALYSIS_QUALITY_MIN_BUYS = 2
 ANALYSIS_HIGH_LIQUIDITY = 40000.0
@@ -2084,8 +2102,8 @@ ANALYSIS_QUALITY_MIN_SCORE = 4.0
 FINAL_ANALYSIS_MIN_LIQUIDITY = ANALYSIS_STANDARD_LIQUIDITY
 FINAL_ANALYSIS_MIN_VOLUME_5M = ANALYSIS_STANDARD_MIN_VOLUME_5M
 FINAL_ANALYSIS_MIN_BUY_RATIO = ANALYSIS_STANDARD_MIN_BUY_RATIO
-FINAL_BREAKOUT_MIN_VOLUME_5M = 2500.0
-FINAL_SUPPORT_MIN_VOLUME_5M = 1800.0
+FINAL_BREAKOUT_MIN_VOLUME_5M = 2200.0
+FINAL_SUPPORT_MIN_VOLUME_5M = 1600.0
 ADAPTIVE_TARGET_WIN_RATE = 80.0
 ADAPTIVE_LOOKBACK = 20
 ADAPTIVE_MIN_SAMPLE = 10
@@ -2190,7 +2208,7 @@ _SENTINEL_PAIR_CHOICES = 3
 # V17 TRUE HUNTER: scan the universe in rotating micro-batches.
 # This prevents the radar from waiting for hundreds of HTTP calls before making
 # a decision, while every discovered token is revisited continuously.
-TRUE_HUNTER_BATCH_SIZE = 30
+TRUE_HUNTER_BATCH_SIZE = 120
 _TRUE_HUNTER_CURSOR = 0
 _TRUE_HUNTER_CURSOR_LOCK = Lock()
 _sentinel_memory = {}
@@ -2291,13 +2309,13 @@ def _active_subengine_votes(token_addr, pair):
             return None
 
     advanced_jobs = []
-    if TECHNICAL_RUNNING:
+    if ADVANCED_AI_ENABLED and TECHNICAL_RUNNING:
         advanced_jobs.append(("Technical", lambda: check_major_support_resistance_pa(pair)[0]))
-    if ULTIMATE_21_ENGINE_ENABLED:
+    if ADVANCED_AI_ENABLED and ULTIMATE_21_ENGINE_ENABLED:
         advanced_jobs.append(("UltimateAI/21", lambda: evaluate_ultimate_super_signal(token_addr, pair)[0]))
-    if SOCIAL_SENTIMENT_ENABLED:
+    if ADVANCED_AI_ENABLED and SOCIAL_SENTIMENT_ENABLED:
         advanced_jobs.append(("Social/Hype", lambda: check_social_sentiment_and_hype(pair)[0]))
-    if SMART_FILTER_ENABLED:
+    if ADVANCED_AI_ENABLED and SMART_FILTER_ENABLED:
         advanced_jobs.append(("SmartFilter", lambda: is_token_worthy(pair)))
 
     if advanced_jobs:
@@ -2308,19 +2326,19 @@ def _active_subengine_votes(token_addr, pair):
                     advanced_votes.append(result)
 
     # Hulk predicates are pure local calculations, so evaluate them immediately.
-    if IS_RUNNING and chg >= FIRE_ENGINE_MIN_CHANGE_5M and vol >= FIRE_ENGINE_MIN_VOLUME_5M:
+    if SYNCHRONIZED_MODE and IS_RUNNING and chg >= FIRE_ENGINE_MIN_CHANGE_5M and vol >= FIRE_ENGINE_MIN_VOLUME_5M:
         hulk_votes.append("Fire")
-    if TREND_ALERT_RUNNING and chg >= TREND_ENGINE_MIN_CHANGE_5M and buys >= max(1, math.ceil(sells * TREND_ENGINE_MIN_BUY_RATIO)):
+    if SYNCHRONIZED_MODE and TREND_ALERT_RUNNING and chg >= TREND_ENGINE_MIN_CHANGE_5M and buys >= max(1, math.ceil(sells * TREND_ENGINE_MIN_BUY_RATIO)):
         hulk_votes.append("Trend")
-    if COMBO_RUNNING and buys >= max(1, math.ceil(sells * COMBO_ENGINE_MIN_BUY_RATIO)) and vol >= COMBO_ENGINE_MIN_VOLUME_5M and liq >= COMBO_ENGINE_MIN_LIQUIDITY:
+    if SYNCHRONIZED_MODE and COMBO_RUNNING and buys >= max(1, math.ceil(sells * COMBO_ENGINE_MIN_BUY_RATIO)) and vol >= COMBO_ENGINE_MIN_VOLUME_5M and liq >= COMBO_ENGINE_MIN_LIQUIDITY:
         hulk_votes.append("Combo")
-    if GOLDEN_OPTION and chg >= GOLDEN_ENGINE_MIN_CHANGE_5M and vol >= GOLDEN_ENGINE_MIN_VOLUME_5M and liq >= GOLDEN_ENGINE_MIN_LIQUIDITY:
+    if SYNCHRONIZED_MODE and GOLDEN_OPTION and chg >= GOLDEN_ENGINE_MIN_CHANGE_5M and vol >= GOLDEN_ENGINE_MIN_VOLUME_5M and liq >= GOLDEN_ENGINE_MIN_LIQUIDITY:
         hulk_votes.append("Golden")
-    if MEMPOOL_SMART_MONEY_ENABLED and buys >= max(MEMPOOL_ENGINE_MIN_BUYS, math.ceil(sells * MEMPOOL_ENGINE_MIN_BUY_RATIO)) and vol >= MEMPOOL_ENGINE_MIN_VOLUME_5M and liq >= MEMPOOL_ENGINE_MIN_LIQUIDITY:
+    if SYNCHRONIZED_MODE and MEMPOOL_SMART_MONEY_ENABLED and buys >= max(MEMPOOL_ENGINE_MIN_BUYS, math.ceil(sells * MEMPOOL_ENGINE_MIN_BUY_RATIO)) and vol >= MEMPOOL_ENGINE_MIN_VOLUME_5M and liq >= MEMPOOL_ENGINE_MIN_LIQUIDITY:
         hulk_votes.append("Mempool/SmartMoney")
-    if BOTTOM_WHALE_RUNNING and buys >= max(WHALE_ENGINE_MIN_BUYS, sells + WHALE_ENGINE_MIN_BUYS_OVER_SELLS) and vol >= WHALE_ENGINE_MIN_VOLUME_5M:
+    if SYNCHRONIZED_MODE and BOTTOM_WHALE_RUNNING and buys >= max(WHALE_ENGINE_MIN_BUYS, sells + WHALE_ENGINE_MIN_BUYS_OVER_SELLS) and vol >= WHALE_ENGINE_MIN_VOLUME_5M:
         hulk_votes.append("Whale")
-    if ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * ANTI_WASH_MAX_SELL_PRESSURE_RATIO):
+    if SYNCHRONIZED_MODE and ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * ANTI_WASH_MAX_SELL_PRESSURE_RATIO):
         hulk_votes.append("Anti-Wash")
 
     all_votes = advanced_votes + hulk_votes
@@ -2381,17 +2399,16 @@ def _mode_market_quality(pair):
     token_addr = (pair.get("baseToken") or {}).get("address", "")
     if price <= 0:
         _diag_reject("MARKET_QUALITY", "INVALID_PRICE", token_addr); return None
-    if liq < CONSENSUS_MIN_LIQUIDITY:
+    # MAX is a family-consensus mode, not a replacement Master gate.
+    # Keep only a light sanity floor here; each participating sub-engine owns
+    # its own trigger and quality rules.
+    if liq < 15000.0:
         _diag_reject("MARKET_QUALITY", "LOW_LIQUIDITY", token_addr); return None
-    if vol < CONSENSUS_MIN_VOLUME_5M:
+    if vol < 1000.0:
         _diag_reject("MARKET_QUALITY", "LOW_5M_VOLUME", token_addr); return None
-    if chg < CONSENSUS_MIN_CHANGE_5M:
-        _diag_reject("MARKET_QUALITY", "5M_CHANGE_TOO_LOW", token_addr); return None
-    if chg > CONSENSUS_MAX_CHANGE_5M:
-        _diag_reject("MARKET_QUALITY", "5M_CHANGE_TOO_HIGH", token_addr); return None
     if buys <= 0:
         _diag_reject("MARKET_QUALITY", "NO_BUYERS", token_addr); return None
-    if sells > 0 and buys < max(1, int(sells * CONSENSUS_MIN_BUY_RATIO)):
+    if sells > 0 and buys < sells:
         _diag_reject("MARKET_QUALITY", "BUY_PRESSURE_TOO_WEAK", token_addr); return None
     return {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
 
@@ -2408,11 +2425,9 @@ def build_consensus_signal(token_addr, pair):
             _diag_reject("FUSION", "MARKET_QUALITY_REJECTED", token_addr)
             return None
 
-        structure_ok, structure = _market_structure_gate(token_addr, pair)
-        if not structure_ok:
-            _diag_reject("FUSION", f"STRUCTURE_{structure.get('structure', 'REJECTED')}", token_addr)
-            return None
-
+        # No shared Master-style structure gate. The actual voting sub-engines
+        # decide according to their own methods.
+        structure = {"structure": "ENGINE_NATIVE", "structure_score": 0.0}
         evidence = _active_subengine_votes(token_addr, pair)
         adv = evidence["advanced_count"]
         hulk = evidence["hulk_count"]
@@ -2498,19 +2513,28 @@ def build_consensus_signal(token_addr, pair):
 # Learning may update engine weights from real closed-trade outcomes,
 # but it must not lower the fixed quality gate just to consume the daily budget.
 def fusion_quality_gate(fusion):
-    try:
-        liq = float(fusion.get("liq", 0) or 0)
-        vol = float(fusion.get("vol", 0) or 0)
-        score = float(fusion.get("score", 0) or 0)
-        buys = int(fusion.get("buys", 0) or 0)
-        sells = int(fusion.get("sells", 0) or 0)
+    """Compatibility gate only. Never acts as a hidden Master gate.
 
-        if liq < CONSENSUS_MIN_LIQUIDITY or vol < CONSENSUS_MIN_VOLUME_5M:
-            return False
-        if buys < 2 or (sells > 0 and buys < sells * CONSENSUS_MIN_BUY_RATIO):
-            return False
-        if score < CONSENSUS_MIN_SCORE:
-            return False
+    Individual Advanced/Hulk candidates have already passed their own engine
+    predicates, so they are accepted here. MAX keeps a small sanity check.
+    """
+    try:
+        group = str(fusion.get("hunter_group", "ENGINE") or "ENGINE").upper()
+        if group in ("ADVANCED", "HULK"):
+            return True
+        if group == "MAX":
+            liq = float(fusion.get("liq", 0) or 0)
+            vol = float(fusion.get("vol", 0) or 0)
+            buys = int(fusion.get("buys", 0) or 0)
+            sells = int(fusion.get("sells", 0) or 0)
+            return bool(
+                liq >= 15000.0 and
+                vol >= 1000.0 and
+                buys >= 1 and
+                (sells <= 0 or buys >= sells) and
+                fusion.get("advanced_votes") and
+                fusion.get("hulk_votes")
+            )
         return True
     except Exception:
         return False
@@ -3306,6 +3330,37 @@ _v7_load()
 v7_compact_learning_memory(force=False)
 
 
+def _engine_entry_quality_gate(fusion):
+    """Final gate for engine-native signals.
+
+    Analysis uses its adaptive quality gate; individual Hulk/Advanced lanes use
+    the shared market quality plus their own engine trigger. MAX keeps the
+    stronger family-consensus requirement from build_consensus_signal().
+    This prevents the old Master shortcut from being replaced by a second
+    unrelated Fusion gate that silently kills otherwise valid engine signals.
+    """
+    try:
+        group = str(fusion.get("hunter_group", "ENGINE") or "ENGINE").upper()
+        liq = float(fusion.get("liq", 0) or 0)
+        vol = float(fusion.get("vol", 0) or 0)
+        buys = int(fusion.get("buys", 0) or 0)
+        sells = int(fusion.get("sells", 0) or 0)
+        ratio = buys / max(1, sells)
+        if group == "ANALYSIS":
+            ok, _, reason = _analysis_quality_gate(liq, vol, ratio, buys)
+            return ok, reason
+        # Advanced and Alliance own their entry rules through their sub-engines.
+        # Never re-apply a hidden Master/Fusion gate here.
+        if group == "MAX":
+            if not fusion.get("advanced_votes") or not fusion.get("hulk_votes"):
+                return False, "MAX_FAMILY_VOTE"
+            if liq < 15000.0 or vol < 1000.0 or buys < 1:
+                return False, "MAX_MARKET_SANITY"
+        return True, "OK"
+    except Exception:
+        return False, "QUALITY_EXCEPTION"
+
+
 def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
     # V18: every real engine owns its own BUY lane. MAX is the combined
@@ -3364,15 +3419,15 @@ def send_fused_signal(token_addr, fusion):
             logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
             _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
             return False, "LEARNING_CIRCUIT_BREAKER"
-        if not fusion_quality_gate(fusion):
-            logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
-            _audit_signal_decision("QUALITY_GATE_REJECTED")
-            return False, "QUALITY_GATE_REJECTED"
+        quality_ok, quality_reason = _engine_entry_quality_gate(fusion)
+        if not quality_ok:
+            logger.info(f"Engine entry quality gate rejected {token_addr}: {quality_reason}; daily budget unchanged.")
+            _audit_signal_decision(f"ENGINE_QUALITY_REJECTED:{quality_reason}")
+            return False, f"ENGINE_QUALITY_REJECTED:{quality_reason}"
         now_global = time.time()
-        # MAX is a single attack and therefore uses the global cooldown.
-        # Outside MAX, Advanced/Hulk/individual engines have their own lane
-        # cooldown so one engine cannot suppress another engine's valid signal.
-        if MAX_FUSION_ENABLED and not is_analysis_signal:
+        # Every top-level engine has its own cooldown. There is deliberately no
+        # global cooldown for Analysis/Advanced/Alliance; MAX has its own lane.
+        if group == "MAX" and not is_analysis_signal:
             if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
                 _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
                 return False, "GLOBAL_SIGNAL_COOLDOWN"
@@ -3392,7 +3447,7 @@ def send_fused_signal(token_addr, fusion):
             return False, "EMERGENCY_STOP"
 
         # سهمیه در لحظه صدور سیگنال واقعی رزرو می‌شود؛ شکست خرید/کانال سهمیه را دور نمی‌زند.
-        if MAX_FUSION_ENABLED and not is_analysis_signal:
+        if group == "MAX" and not is_analysis_signal:
             last_global_signal_time = now_global
             UNIFIED_LAST_EMIT_TIME = now_global
         consensus_last_signal[emit_key] = now_global
@@ -3429,6 +3484,34 @@ def send_fused_signal(token_addr, fusion):
     dex_link = f"https://dexscreener.com/solana/{token_addr}"
     token_link = f"https://solscan.io/token/{token_addr}"
 
+    # IMPORTANT: emit the BUY signal BEFORE any wallet/network execution.
+    # A slow RPC/Jupiter/empty wallet must never hide the engine's signal.
+    pending_signal_msg = (
+        f"🚨 **سیگنال BUY توسط: {signal_engine_label}**\n"
+        f"⚡🤖 **{mode_name}**\n"
+        f"🎯 قدرت سیگنال: **{fusion['score']:.2f}**\n"
+        f"🤖 موتورهای مؤثر: {engine_display}\n"
+        f"🪙 توکن: {symbol}\n"
+        f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+        f"💵 نقطه ورود: ${price:.8f}\n"
+        f"💰 مقدار BUY: SOL {amount:g}\n"
+        f"🎯 تارگت اولیه: +{tp:.1f}%\n"
+        f"🛑 حد ضرر اولیه: {sl:.1f}%\n"
+        f"📊 حجم ۵ دقیقه: ${fusion['vol']:,.0f} | نقدینگی: ${fusion['liq']:,.0f}\n"
+        f"📊 خرید/فروش ۵ دقیقه: {fusion.get('buys', 0)}/{fusion.get('sells', 0)}\n"
+        f"⏳ **سیگنال صادر شد؛ اجرای BUY واقعی جداگانه در حال انجام است.**\n\n"
+        f"🔗 Solscan: {token_link}\n"
+        f"📈 DexScreener: {dex_link}"
+    )
+    send_telegram_msg(pending_signal_msg)
+    initial_channel_ok = send_graphic_signal_to_vip_channel(
+        token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
+        buy_amt=amount, volume=fusion['vol'], liquidity=fusion['liq'],
+        p_change=fusion['chg'], solscan_link=token_link,
+        signal_title=mode_name, side="BUY",
+        execution_status="⏳ سیگنال صادر شد؛ اجرای BUY واقعی در حال انجام است.", execution_tx=""
+    )
+
     # اجرای خرید واقعی مستقل از انتشار سیگنال است:
     # حتی اگر ولت موجودی نداشته باشد یا اجرای معامله خطا بدهد،
     # خود سیگنال BUY باید برای کانال منتشر شود.
@@ -3461,7 +3544,7 @@ def send_fused_signal(token_addr, fusion):
         execution_display = f"🔴 خرید واقعی ناموفق شد\n🤖 موتور/موتورهای مسئول: {engine_display}\n📌 دلیل: {result}"
 
     msg = (
-        f"🚨 **ورود توسط: {signal_engine_label}**\n"
+        f"📦 **گزارش اجرای BUY — سیگنال قبلی توسط: {signal_engine_label}**\n"
         f"⚡🤖 **{mode_name}**\n"
         f"🎯 قدرت سیگنال: **{fusion['score']:.2f}**\n"
         f"🤖 موتورهای مؤثر: {engine_display}\n"
@@ -3484,13 +3567,17 @@ def send_fused_signal(token_addr, fusion):
     )
     send_telegram_msg(msg)
 
-    channel_ok = send_graphic_signal_to_vip_channel(
-        token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
-        buy_amt=amount, volume=fusion['vol'], liquidity=fusion['liq'],
-        p_change=fusion['chg'], solscan_link=solscan_link,
-        signal_title=mode_name, side="BUY",
-        execution_status=execution_status, execution_tx=result if success else ""
-    )
+    # The signal card was already sent before execution. Retry only if the
+    # first channel delivery failed; never make channel delivery a signal gate.
+    channel_ok = bool(initial_channel_ok)
+    if not channel_ok:
+        channel_ok = send_graphic_signal_to_vip_channel(
+            token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
+            buy_amt=amount, volume=fusion['vol'], liquidity=fusion['liq'],
+            p_change=fusion['chg'], solscan_link=solscan_link,
+            signal_title=mode_name, side="BUY",
+            execution_status=execution_status, execution_tx=result if success else ""
+        )
     if channel_ok:
         V12_REAL_AUDIT["channel_sent"] += 1
         if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS":
@@ -3773,14 +3860,19 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
     evidence is then evaluated independently. No engine receives credit from
     another engine.
     """
-    q = _mode_market_quality(pair)
-    if not q:
+    # Engine-native lane: no shared Master/Fusion market gate.
+    price = float(pair.get("priceUsd", 0) or 0)
+    if price <= 0:
+        _diag_reject("ENGINE", "INVALID_PRICE", token_addr)
         return None
-    structure_ok, structure = _market_structure_gate(token_addr, pair)
-    if not structure_ok:
-        return None
-    chg, vol, liq = q["chg"], q["vol"], q["liq"]
-    buys, sells = q["buys"], q["sells"]
+    liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+    vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
+    chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+    txns = (pair.get("txns") or {}).get("m5", {}) or {}
+    buys = int(txns.get("buys", 0) or 0)
+    sells = int(txns.get("sells", 0) or 0)
+    q = {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
+    structure = {"structure": "ENGINE_NATIVE", "structure_score": 0.0}
     try:
         ok = False
         strength = 0.0
@@ -3811,12 +3903,9 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
             return None
 
         buy_ratio = buys / max(1, sells)
-        # Selection score only. Existing quality thresholds are not lowered.
-        score = (strength + min(5.0, chg / 5.0) + min(4.0, vol / 10000.0)
+        # Score is ranking-only; it is never a hidden shared entry gate.
+        score = (strength + min(5.0, max(0.0, chg) / 5.0) + min(4.0, vol / 10000.0)
                  + min(3.0, liq / 50000.0) + min(3.0, max(0.0, buy_ratio - 1.0)))
-        if score < 6.0:
-            _diag_reject("ENGINE", f"{engine_name}_SCORE_BELOW_6", token_addr)
-            return None
         now = time.time()
         cooldown_key = f"{token_addr}:{engine_name}"
         if now - consensus_last_signal.get(cooldown_key, 0) < CONSENSUS_COOLDOWN_SECONDS:
@@ -3881,12 +3970,11 @@ def _analysis_quality_gate(liq, vol, buy_ratio, buys):
 
 
 def _analysis_engine_candidate(token_addr, pair):
-    """Independent market-structure engine.
+    """Analysis engine: ONLY valid ceiling breakout OR floor bounce.
 
-    It does not borrow votes from Hulk/Advanced/MAX. It waits for enough real
-    price samples, estimates the linear trend, validates a liquid buyer-backed
-    support bounce, or a high-volume breakout above the previous resistance.
-    Touching resistance alone is never a BUY trigger.
+    Entry requires all core conditions: real liquidity, healthy 5m volume,
+    buyer participation, and an ascending price trend. No warm-up BUY and no
+    generic continuation/fast-flow BUY are allowed.
     """
     _analysis_diag("scanned", token_addr=token_addr)
     if not ANALYSIS_ENGINE_ENABLED:
@@ -3901,48 +3989,31 @@ def _analysis_engine_candidate(token_addr, pair):
         buys = int(tx.get("buys", 0) or 0)
         sells = int(tx.get("sells", 0) or 0)
         buy_ratio = buys / max(1, sells)
-        if price > 0:
-            _analysis_diag("data_ready", token_addr=token_addr)
-        if price <= 0:
-            _diag_reject("ANALYSIS", "INVALID_PRICE", token_addr); return None
-        # Adaptive quality gate: 40k+ liquidity is allowed to pass with healthy
-        # 5m flow, while smaller pools must compensate with stronger flow.
-        quality_ok, quality_score, quality_tier = _analysis_quality_gate(liq, vol, buy_ratio, buys)
-        if not quality_ok:
-            _diag_reject("ANALYSIS", f"ANALYSIS_QUALITY_{quality_tier}", token_addr); return None
-        # Do not require positive 5m change before evaluating structure: a valid
-        # support bounce can occur while the raw 5m change is still flat/negative.
 
+        if price <= 0:
+            _diag_reject("ANALYSIS", "INVALID_PRICE", token_addr)
+            return None
+        _analysis_diag("data_ready", token_addr=token_addr)
+
+        # Build real price history BEFORE quality gates. Weak early snapshots
+        # must not prevent the trend/ceiling/floor history from maturing.
+        # BUY still requires the complete quality gate below.
         samples = _update_structure_memory(token_addr, price)
-        # Fresh tokens need a first-pass signal path; full structure activates
-        # after enough samples are collected.
+
+        # Core market-quality gate: liquidity + volume + real buyer flow.
+        quality_ok, quality_score, quality_tier = _analysis_quality_gate(
+            liq, vol, buy_ratio, buys
+        )
+        if not quality_ok:
+            _diag_reject("ANALYSIS", f"ANALYSIS_QUALITY_{quality_tier}", token_addr)
+            return None
+
+        # A real trend-line decision needs actual price history. No provisional
+        # warm-up BUY is allowed.
         if len(samples) < STRUCTURE_MIN_SAMPLES:
-            # Provisional path: real liquidity + volume + stronger buyers. It is
-            # intentionally independent of MAX/consensus so the Analysis engine
-            # can emit while its own structure history is still warming up.
-            if quality_score < ANALYSIS_QUALITY_MIN_SCORE:
-                _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_QUALITY_SCORE", token_addr); return None
-            score = 6.0 + quality_score + min(2.0, buy_ratio - 1.0) + min(1.5, vol / 10000.0) + min(1.0, liq / 50000.0)
-            now = time.time()
-            if now - consensus_last_signal.get(f"{token_addr}:Analysis", 0) < CONSENSUS_COOLDOWN_SECONDS:
-                _diag_reject("ANALYSIS", "ANALYSIS_COOLDOWN", token_addr)
-                return None
-            q = {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
-            _analysis_diag("candidates", token_addr=token_addr)
-            return {
-                "score": float(score), "strength": float(score),
-                "votes": ["Analysis"], "advanced_votes": [], "hulk_votes": [],
-                "engines": ["Analysis"], "hunter_group": "ANALYSIS",
-                "mode": "📈 موتور تحلیل",
-                "reason": "تأیید اولیه: نقدینگی مناسب + فشار خریدار + حجم سالم",
-                **q,
-                "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
-                "tp": max(15.0, min(28.0, 16.0 + min(10.0, score))),
-                "sl": -8.0, "structure": "ANALYSIS_INITIAL_BUY_FLOW",
-                "support": float(price), "resistance": float(price),
-                "breakout": False, "trend_slope_pct": float(chg),
-                "rank_bonus": _sentinel_rank_bonus(token_addr, {"score": score, **q})
-            }
+            _diag_reject("ANALYSIS", "ANALYSIS_STRUCTURE_WARMUP", token_addr)
+            return None
+
         prices = [x[1] for x in samples]
         n = len(prices)
         xs = list(range(n))
@@ -3953,87 +4024,93 @@ def _analysis_engine_candidate(token_addr, pair):
         slope_pct = (slope / max(1e-18, my)) * 100.0
 
         prior = prices[:-1]
-        recent = prices[-min(8, n):]
-        support = min(recent)
-        resistance = max(prior) if prior else max(recent)
-        bounce_pct = (price - support) / max(1e-18, support) * 100.0
-        near_support = price <= support * (1.0 + STRUCTURE_SUPPORT_DISTANCE_PCT / 100.0)
-        near_resistance = price >= resistance * (1.0 - STRUCTURE_RESISTANCE_DISTANCE_PCT / 100.0)
-        breakout = price >= resistance * (1.0 + STRUCTURE_BREAKOUT_BUFFER_PCT / 100.0)
-
-        # A resistance touch is explicitly rejected. Breakout needs both
-        # meaningful volume and stronger buyer pressure.
-        if near_resistance and not breakout:
-            _diag_reject("ANALYSIS", "ANALYSIS_RESISTANCE_TOUCH_NO_BREAKOUT", token_addr)
+        recent_prior = prior[-min(8, len(prior)):]
+        if not recent_prior:
+            _diag_reject("ANALYSIS", "ANALYSIS_STRUCTURE_WARMUP", token_addr)
             return None
 
+        support = min(recent_prior)
+        resistance = max(prior)
+        bounce_pct = (price - support) / max(1e-18, support) * 100.0
+        near_support = price <= support * (1.0 + STRUCTURE_SUPPORT_DISTANCE_PCT / 100.0)
+        breakout = price >= resistance * (1.0 + STRUCTURE_BREAKOUT_BUFFER_PCT / 100.0)
+
+        # The trend line is mandatory for BOTH valid entry types.
+        if slope_pct <= 0:
+            _diag_reject("ANALYSIS", "ANALYSIS_TREND_SLOPE_NOT_UP", token_addr)
+            return None
+
+        # Buyer entry is mandatory; quality gate already checks the base flow,
+        # while these setup-specific thresholds ensure the move is backed by buyers.
+        if buys < 2 or buy_ratio < max(1.15, ANALYSIS_QUALITY_MIN_BUY_RATIO):
+            _diag_reject("ANALYSIS", "ANALYSIS_BUY_PRESSURE_WEAK", token_addr)
+            return None
+        if liq < ANALYSIS_QUALITY_MIN_LIQUIDITY:
+            _diag_reject("ANALYSIS", "ANALYSIS_LIQUIDITY_WEAK", token_addr)
+            return None
+
+        # SETUP 1: valid ceiling/resistance breakout.
         if breakout:
-            if slope_pct <= 0:
-                _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_TREND_NOT_UP", token_addr); return None
-            if liq < ANALYSIS_QUALITY_MIN_LIQUIDITY:
-                _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_LIQUIDITY_WEAK", token_addr); return None
             if vol < FINAL_BREAKOUT_MIN_VOLUME_5M:
-                _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_VOLUME_WEAK", token_addr); return None
+                _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_VOLUME_WEAK", token_addr)
+                return None
             if buy_ratio < STRUCTURE_MIN_BREAKOUT_BUY_RATIO:
-                _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_BUY_PRESSURE_WEAK", token_addr); return None
+                _diag_reject("ANALYSIS", "ANALYSIS_BREAKOUT_BUY_PRESSURE_WEAK", token_addr)
+                return None
             _analysis_diag("breakout_setups", token_addr=token_addr)
             structure = "ANALYSIS_RESISTANCE_BREAKOUT"
             structure_score = 4.0
-            reason = "روند صعودی + شکست پرقدرت سقف قبلی + حجم/خریدار قوی"
+            reason = "خط روند صعودی + شکست معتبر سقف + نقدینگی/حجم + ورود خریدار"
+
+        # SETUP 2: valid floor/support bounce.
         elif near_support:
-            if slope_pct <= 0:
-                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_TREND_NOT_UP", token_addr); return None
             if bounce_pct < 0.35:
-                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_NO_BOUNCE", token_addr); return None
-            if liq < ANALYSIS_QUALITY_MIN_LIQUIDITY:
-                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_LIQUIDITY_WEAK", token_addr); return None
+                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_NO_BOUNCE", token_addr)
+                return None
             if vol < FINAL_SUPPORT_MIN_VOLUME_5M:
-                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_VOLUME_WEAK", token_addr); return None
+                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_VOLUME_WEAK", token_addr)
+                return None
             if buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO:
-                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_BUY_PRESSURE_WEAK", token_addr); return None
+                _diag_reject("ANALYSIS", "ANALYSIS_SUPPORT_BUY_PRESSURE_WEAK", token_addr)
+                return None
             _analysis_diag("support_setups", token_addr=token_addr)
             structure = "ANALYSIS_SUPPORT_BOUNCE"
             structure_score = 4.0
-            reason = "روند صعودی + کف معتبر + نقدینگی + برگشت با خریدار"
+            reason = "خط روند صعودی + برگشت معتبر از کف + نقدینگی/حجم + ورود خریدار"
+
+        # No third entry type. Generic continuation/fast-flow is deliberately disabled.
         else:
-            # Continuation is allowed only when the linear trend is clearly up
-            # and price is not sitting at resistance.
-            if slope_pct < 0.20:
-                _diag_reject("ANALYSIS", "ANALYSIS_TREND_SLOPE_WEAK", token_addr); return None
-            if buy_ratio < ANALYSIS_STANDARD_MIN_BUY_RATIO:
-                _diag_reject("ANALYSIS", "ANALYSIS_TREND_BUY_PRESSURE_WEAK", token_addr); return None
-            if vol < ANALYSIS_STANDARD_MIN_VOLUME_5M:
-                _diag_reject("ANALYSIS", "ANALYSIS_TREND_VOLUME_WEAK", token_addr); return None
-            if liq < ANALYSIS_QUALITY_MIN_LIQUIDITY:
-                _diag_reject("ANALYSIS", "ANALYSIS_TREND_LIQUIDITY_WEAK", token_addr); return None
-            _analysis_diag("continuation_setups", token_addr=token_addr)
-            structure = "ANALYSIS_TREND_CONTINUATION"
-            structure_score = 2.5
-            reason = "روند خطی صعودی + جریان خرید سالم"
+            _diag_reject("ANALYSIS", "ANALYSIS_NO_VALID_BREAKOUT_OR_BOUNCE", token_addr)
+            return None
 
         score = 4.0 + structure_score
         score += min(2.0, max(0.0, slope_pct))
         score += min(2.0, max(0.0, buy_ratio - 1.0))
         score += min(2.0, vol / 10000.0)
         score += min(1.5, liq / 50000.0)
+
         now = time.time()
         if now - consensus_last_signal.get(f"{token_addr}:Analysis", 0) < CONSENSUS_COOLDOWN_SECONDS:
             _diag_reject("ANALYSIS", "ANALYSIS_COOLDOWN", token_addr)
             return None
+
         V12_REAL_AUDIT["analysis_candidates"] += 1
         _analysis_diag("candidates", token_addr=token_addr)
+        q = {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
         return {
             "score": float(score), "strength": float(score),
             "votes": ["Analysis"], "advanced_votes": [], "hulk_votes": [],
             "engines": ["Analysis"], "hunter_group": "ANALYSIS",
-            "mode": "📈 موتور تحلیل", "reason": reason, **_mode_market_quality(pair),
+            "mode": "📈 موتور تحلیل", "reason": reason, **q,
             "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
             "tp": max(15.0, min(30.0, 16.0 + min(12.0, score))), "sl": -8.0,
             "structure": structure, "support": float(support),
             "resistance": float(resistance), "breakout": bool(breakout),
             "trend_slope_pct": float(slope_pct),
-            "rank_bonus": _sentinel_rank_bonus(token_addr, {"score": score, **_mode_market_quality(pair)})
+            "rank_bonus": _sentinel_rank_bonus(token_addr, {"score": score, **q})
         }
+
+
     except Exception as e:
         logger.debug(f"Analysis engine failed for {token_addr}: {e}")
         return None
@@ -4073,6 +4150,8 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
         pairs = pair_cache.get(token_addr) or []
     else:
         token_addr, pairs = _fetch_best_solana_pair(token_addr)
+    # Four top-level engines only: Analysis, Advanced, Alliance(Hulk), MAX.
+    # Sub-engines are evidence inside their parent engine, never separate top-level modes.
     result = {"analysis": [], "fusion": []}
     if not pairs:
         _diag_reject("DISCOVERY", "NO_PAIR", token_addr)
@@ -4101,9 +4180,10 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                 _diag_reject("ANALYSIS", f"EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
 
         # ۲. سایر موتورها یا حالت MAX Fusion
-        if not _candidate_prefilter(pair):
-            continue
+        # No shared candidate prefilter: each engine must reach its own trigger.
         try:
+            # MAX is the fourth top-level engine; it is additional and never
+            # suppresses the independent Advanced or Alliance engines.
             if MAX_FUSION_ENABLED:
                 fusion = build_consensus_signal(token_addr, pair)
                 if fusion:
@@ -4111,20 +4191,21 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                     fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
                     fusion["rank_score"] = _candidate_rank_tuple(fusion)[0]
                     result["fusion"].append((token_addr, fusion))
-            else:
-                for engine_name in active:
-                    if engine_name == "Analysis":
-                        continue
-                    is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
-                    if is_adv and not ADVANCED_AI_ENABLED:
-                        continue
-                    if (not is_adv) and not SYNCHRONIZED_MODE:
-                        continue
-                    fusion = _independent_engine_candidate(token_addr, pair, engine_name)
-                    if fusion and fusion_quality_gate(fusion):
-                        fusion = dict(fusion)
-                        fusion["rank_score"] = _candidate_rank_tuple(fusion)[0]
-                        result["fusion"].append((token_addr, fusion))
+
+            for engine_name in active:
+                if engine_name == "Analysis":
+                    continue
+                is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
+                # Individual switches remain authoritative.
+                if is_adv and not ADVANCED_AI_ENABLED:
+                    continue
+                if (not is_adv) and not SYNCHRONIZED_MODE:
+                    continue
+                fusion = _independent_engine_candidate(token_addr, pair, engine_name)
+                if fusion and fusion_quality_gate(fusion):
+                    fusion = dict(fusion)
+                    fusion["rank_score"] = _candidate_rank_tuple(fusion)[0]
+                    result["fusion"].append((token_addr, fusion))
         except Exception as exc:
             _diag_reject("FUSION", f"EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
 
@@ -4138,24 +4219,29 @@ def _select_best_analysis(candidates):
 
 
 def _select_fusion_candidates(candidates):
+    """Select at most one live candidate per TOP-LEVEL engine.
+
+    The bot has exactly four top-level engines:
+      ANALYSIS, ADVANCED, HULK/ALLIANCE, MAX.
+    Technical/UltimateAI/etc. are sub-engines and only provide evidence for
+    their parent engine.  A strong sub-engine must therefore not become a
+    fifth/sixth top-level signal lane or steal the lane from another parent.
+    Different top-level engines remain independent and may all be enabled.
+    """
     if not candidates:
         return []
-    if MAX_FUSION_ENABLED:
-        return [max(candidates, key=_candidate_rank_tuple)]
-
-    # One best candidate per independent engine/group. This prevents one engine
-    # from suppressing another, while still preventing duplicate emission from
-    # the same engine lane in one sweep.
-    best_by_lane = {}
+    best_by_top_level = {}
     for item in candidates:
         _, candidate = item
-        engine = (candidate.get("engines") or candidate.get("votes") or ["ENGINE"])[0]
-        group = candidate.get("hunter_group", "ENGINE")
-        lane = (group, engine)
-        old = best_by_lane.get(lane)
+        group = str(candidate.get("hunter_group", "ENGINE") or "ENGINE").upper()
+        if group in ("UNIFIED", "ALLIANCE"):
+            group = "HULK"
+        elif group not in ("HULK", "ADVANCED", "MAX"):
+            group = group or "ENGINE"
+        old = best_by_top_level.get(group)
         if old is None or _candidate_rank_tuple(item) > _candidate_rank_tuple(old):
-            best_by_lane[lane] = item
-    return sorted(best_by_lane.values(), key=_candidate_rank_tuple, reverse=True)
+            best_by_top_level[group] = item
+    return sorted(best_by_top_level.values(), key=_candidate_rank_tuple, reverse=True)
 
 
 def _analysis_submit_worker(token_addr, candidate):
@@ -4252,7 +4338,7 @@ def unified_market_scanner_loop(app):
             analysis_candidates = []
             fusion_candidates = []
 
-            # Stage 0: one DexScreener request per 30 tokens, then parallel CPU-only evaluation.
+            # Stage 0: batched DexScreener requests, then parallel CPU-only evaluation.
             pair_cache = _fetch_best_solana_pairs_batch(scan_tokens)
             V12_REAL_AUDIT["dex_batches"] = int(V12_REAL_AUDIT.get("dex_batches", 0) or 0) + max(1, (len(scan_tokens) + DEX_BATCH_SIZE - 1) // DEX_BATCH_SIZE)
 
@@ -5699,22 +5785,13 @@ def start_telegram_bot():
                         reply_markup=_main_keyboard(False)
                     )
                     return
-                if MAX_FUSION_ENABLED:
-                    await q.edit_message_text(
-                        "🔒 **مدیریت موتورهای مستقل قفل است**\n\n"
-                        "👑 MAX FUSION فعال است.\n"
-                        "برای تغییر موتورهای جداگانه ابتدا MAX FUSION را خاموش کن.",
-                        reply_markup=_control_keyboard(),
-                        parse_mode="Markdown"
-                    )
-                else:
-                    await q.edit_message_text(
-                        "⚙️ **مدیریت موتورهای مستقل**\n\n"
-                        "هر موتور کلید مستقل خودش را دارد و می‌توانی جداگانه ON/OFF کنی.\n"
-                        "خاموش کردن یک موتور، اتحاد را خاموش نمی‌کند.",
-                        reply_markup=_engine_control_keyboard(),
-                        parse_mode="Markdown"
-                    )
+                await q.edit_message_text(
+                    "⚙️ **مدیریت موتورهای مستقل**\n\n"
+                    "هر موتور کلید مستقل خودش را دارد؛ حتی در حالت MAX هم می‌توانی جداگانه ON/OFF کنی.\n"
+                    "MAX فقط یک موتور ترکیبیِ اضافه است.",
+                    reply_markup=_engine_control_keyboard(),
+                    parse_mode="Markdown"
+                )
                 return
 
             elif data.startswith("toggle_"):
@@ -5723,35 +5800,15 @@ def start_telegram_bot():
 
                 if data == "toggle_max_fusion":
                     if not MAX_FUSION_ENABLED:
-                        _MAX_FUSION_PREV = {
-                            "unified": SYNCHRONIZED_MODE,
-                            "advanced": ADVANCED_AI_ENABLED,
-                            "engines": {var_name: bool(globals().get(var_name)) for _, var_name, _ in ENGINE_SWITCHES}
-                        }
                         MAX_FUSION_ENABLED = True
-                        SYNCHRONIZED_MODE = True
-                        ADVANCED_AI_ENABLED = True
-                        # وضعیت دستی موتورها حفظ می‌شود؛ MAX FUSION موتور خاموش‌شده را خودکار روشن نمی‌کند.
-                        message = "👑 **MAX FUSION روشن شد**\n\n⚡ اتحاد هالک + 🧠 سیستم پیشرفته هم‌زمان فعال شدند.\n🔒 وضعیت دستی موتورهای زیرمجموعه حفظ شد.\n🎯 فقط سخت‌گیرترین سیگنال نهایی منتشر می‌شود."
+                        message = "👑 **MAX FUSION روشن شد**\n\nMAX به‌عنوان موتور ترکیبیِ مستقل فعال شد.\n🔬 Analysis، 🧠 Advanced و 🤖 اتحاد مسیرهای مستقل خودشان را حفظ می‌کنند.\n🎯 هر سیگنال نام موتور صادرکننده را نشان می‌دهد."
                     else:
                         MAX_FUSION_ENABLED = False
-                        if _MAX_FUSION_PREV:
-                            SYNCHRONIZED_MODE = bool(_MAX_FUSION_PREV.get("unified", True))
-                            ADVANCED_AI_ENABLED = bool(_MAX_FUSION_PREV.get("advanced", False))
-                            for var_name, value in _MAX_FUSION_PREV.get("engines", {}).items():
-                                globals()[var_name] = value
-                        _MAX_FUSION_PREV = None
-                        message = "🔴 **MAX FUSION خاموش شد**\n\nکنترل اتحاد هالک و سیستم پیشرفته دوباره مستقل است."
+                        message = "🔴 **MAX FUSION خاموش شد**\n\nموتورهای مستقل بدون تغییر ادامه می‌دهند."
                     await q.edit_message_text(message, reply_markup=_control_keyboard(), parse_mode="Markdown")
                     return
 
                 if data == "toggle_advanced":
-                    if MAX_FUSION_ENABLED:
-                        await q.edit_message_text(
-                            "🔒 **سیستم پیشرفته AI قفل است**\n\n👑 MAX FUSION فعال است؛ اتحاد هالک و سیستم پیشرفته هم‌زمان روشن و قفل هستند.",
-                            reply_markup=_control_keyboard(), parse_mode="Markdown"
-                        )
-                        return
                     ADVANCED_AI_ENABLED = not ADVANCED_AI_ENABLED
                     await q.edit_message_text(
                         ("🟢 **سیستم پیشرفته AI روشن شد**\n\nتمام فیلترهای پیشرفته در مسیر تصمیم‌گیری فعال شدند و سیگنال‌ها سخت‌گیرانه‌تر می‌شوند." if ADVANCED_AI_ENABLED else "🔴 **سیستم پیشرفته AI خاموش شد**\n\nاتحاد هالک، در صورت روشن بودن، مستقل ادامه می‌دهد."),
@@ -5770,9 +5827,7 @@ def start_telegram_bot():
                     return
 
                 if data == "toggle_unified":
-                    if MAX_FUSION_ENABLED:
-                        await q.edit_message_text("🔒 **اتحاد هالک AI قفل است**\n\n👑 MAX FUSION فعال است؛ اتحاد هالک و سیستم پیشرفته هم‌زمان روشن هستند.", reply_markup=_control_keyboard(), parse_mode="Markdown")
-                        return
+                    # MAX does not lock the family switch.
                     # اتحاد فقط موتورهایی را به کار می‌گیرد که در تنظیمات دستی ON هستند.
                     # روشن‌شدن اتحاد نباید وضعیت هیچ موتور را تغییر دهد.
                     SYNCHRONIZED_MODE = not SYNCHRONIZED_MODE
@@ -5797,13 +5852,7 @@ def start_telegram_bot():
                     name = engine_map.get(data)
                     if not name:
                         return
-                    # Analysis remains independently switchable even while MAX is ON.
-                    if MAX_FUSION_ENABLED and name != "ANALYSIS_ENGINE_ENABLED":
-                        await q.edit_message_text(
-                            "🔒 کنترل تکی موتورها در حالت MAX FUSION قفل است. ابتدا MAX FUSION را خاموش کن.",
-                            reply_markup=_control_keyboard(), parse_mode="Markdown"
-                        )
-                        return
+                    # Every engine remains individually switchable even while MAX is ON.
                     globals()[name] = not bool(globals()[name])
 
                 await q.edit_message_text("⚙️ **موتورهای مستقل**\n\n"+_engine_status_lines(),reply_markup=_engine_control_keyboard(),parse_mode="Markdown")
