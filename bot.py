@@ -985,7 +985,8 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         result_line = f"📊 سود/ضرر نهایی: {pnl_icon} {pnl:+.2f}%"
         price_label = "🔴 نقطه فروش"
     else:
-        result_line = "📌 وضعیت: سیگنال خرید"
+        # کانال فقط خودِ سیگنال را نشان می‌دهد؛ نتیجه خرید/موجودی/خطای کیف پول خصوصی است.
+        result_line = "📌 نوع سیگنال: خرید"
         price_label = "🎯 نقطه ورود"
 
     # مقدارهای آماری برای جلوگیری از توقف ارسال کانال در صورت نبودن داده کامل
@@ -1320,8 +1321,14 @@ def execute_real_buy(token_mint, amount_sol):
 
     dynamic_amount = get_dynamic_buy_amount(amount_sol)
     current_sol = get_sol_balance()
-    if current_sol < (dynamic_amount + 0.003):
-        return False, "سولانای ناکافی ❌"
+    required_sol = dynamic_amount + 0.003
+    if current_sol < required_sol:
+        return False, (
+            f"موجودی SOL کافی نیست ❌ | "
+            f"موجودی ولت: {current_sol:.6f} SOL | "
+            f"موردنیاز: {required_sol:.6f} SOL | "
+            f"کسری: {max(0.0, required_sol - current_sol):.6f} SOL"
+        )
 
     lamports = int(dynamic_amount * 1_000_000_000)
     headers = {
@@ -1800,15 +1807,26 @@ def check_positions_loop():
                             )
                         )
                     else:
-                        # شکست اجرای فروش فقط داخل ربات/لاگ می‌ماند؛ کانال پیام «موجودی ناکافی»
-                        # یا خطای اجرایی دریافت نمی‌کند. پوزیشن برای تلاش مجدد حفظ می‌شود.
+                        # حتی اگر خرید واقعی قبلاً انجام نشده باشد یا در زمان خروج
+                        # موجودی توکن در ولت صفر باشد، «سیگنال فروش» باید منتشر شود.
+                        # این پیام یک SELL SIGNAL است، نه ادعای فروش موفق روی بلاکچین.
                         send_telegram_msg(
-                            f"⚠️ تلاش فروش انجام نشد\n"
+                            f"⚠️ سیگنال فروش صادر شد؛ فروش واقعی انجام نشد\n"
                             f"🪙 {symbol}\n"
                             f"📍 آدرس: {token_addr}\n"
                             f"📊 وضعیت فعلی: {pnl_percent:+.2f}%\n"
-                            f"📌 علت داخلی: {sell_res_info}\n"
-                            f"🔄 پوزیشن همچنان تحت مدیریت است."
+                            f"📌 علت اجرای واقعی: {sell_res_info}\n"
+                            f"🔄 پوزیشن برای تلاش مجدد تحت مدیریت است."
+                        )
+                        send_signal_outcome(
+                            token_addr, pos, current_price, "SELL_FAILED", pnl_percent,
+                            tx_signature="",
+                            extra_text=(
+                                f"🧠 این خروج مستقل از خرید واقعی است؛ سیگنال فروش بر اساس "
+                                f"قیمت/TP/SL صادر شد.\n"
+                                f"📌 وضعیت اجرای واقعی: {sell_res_info}\n"
+                                f"🔄 فروش واقعی در صورت وجود موجودی توکن دوباره تلاش می‌شود."
+                            )
                         )
 
                     # اگر فروش ناموفق بود پوزیشن را حذف نکن؛ در دور بعد دوباره تلاش می‌شود.
@@ -3259,7 +3277,15 @@ def send_fused_signal(token_addr, fusion):
     dex_link = f"https://dexscreener.com/solana/{token_addr}"
     token_link = f"https://solscan.io/token/{token_addr}"
 
-    success, result = execute_real_buy(token_addr, amount)
+    # اجرای خرید واقعی مستقل از انتشار سیگنال است:
+    # حتی اگر ولت موجودی نداشته باشد یا اجرای معامله خطا بدهد،
+    # خود سیگنال BUY باید برای کانال منتشر شود.
+    try:
+        success, result = execute_real_buy(token_addr, amount)
+    except Exception as exc:
+        success, result = False, f"خطای اجرای خرید واقعی: {type(exc).__name__}: {exc}"
+        logger.exception("Real BUY execution crashed for %s", token_addr)
+
     if success:
         V12_REAL_AUDIT["real_buy_success"] += 1
         if is_analysis_signal:
@@ -3269,19 +3295,31 @@ def send_fused_signal(token_addr, fusion):
         if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS":
             _analysis_diag("real_buy_failed", f"REAL_BUY_FAILED:{result}", token_addr)
         _diag_reject("EXECUTION", f"REAL_BUY_FAILED:{result}", token_addr)
-    execution_status = "🟢 خرید موفق روی بلاکچین" if success else f"⚠️ خرید واقعی انجام نشد: {result}"
+    execution_status = (
+        "🟢 خرید واقعی موفق روی بلاکچین"
+        if success
+        else f"⚠️ سیگنال صادر شد؛ خرید واقعی انجام نشد: {result}"
+    )
     solscan_link = f"https://solscan.io/tx/{result}" if success else token_link
+
+    engine_display = ", ".join(str(x) for x in engine_names if x) or str(mode_name)
+    if success:
+        execution_display = f"🟢 خرید واقعی موفق شد\n🤖 موتور/موتورهای مسئول: {engine_display}\n📌 تراکنش: {result}"
+    else:
+        execution_display = f"🔴 خرید واقعی ناموفق شد\n🤖 موتور/موتورهای مسئول: {engine_display}\n📌 دلیل: {result}"
 
     msg = (
         f"⚡🤖 **{mode_name}**\n"
         f"🎯 قدرت سیگنال: **{fusion['score']:.2f}**\n"
-        f"🤖 موتورهای مؤثر: {reason}\n\n"
+        f"🤖 موتورهای مؤثر: {engine_display}\n"
+        f"🧠 مسیر اجرا: {'مستقل — موتور تحلیل' if is_analysis_signal else 'Master/Fusion'}\n\n"
         f"🪙 توکن: {symbol}\n"
         f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
         f"💵 نقطه ورود دقیق: ${price:.8f}\n"
         f"💰 مقدار خرید: SOL {amount:g}\n"
         f"🎯 تارگت اولیه: +{tp:.1f}%\n"
-        f"🛑 حد ضرر اولیه: {sl:.1f}%\n\n"
+        f"🛑 حد ضرر اولیه: {sl:.1f}%\n"
+        f"\n📦 نتیجه خرید واقعی:\n{execution_display}\n\n"
         f"📊 آمار لحظه‌ای بازار:\n"
         f"🔹 تغییر ۵ دقیقه: {fusion['chg']:+.2f}%\n"
         f"🔹 حجم ۵ دقیقه: ${fusion['vol']:,.0f}\n"
@@ -3894,9 +3932,9 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
             if master_candidate is not None:
                 master_candidate["rank_score"] = 100.0
                 result["fusion"].append((token_addr, master_candidate))
-                # کلید مادر باید اولین کاندید واقعی را ترجیح دهد و هیچ موتور دیگری
-                # حق ندارد آن را پشت فیلترهای خودش پنهان کند.
-                continue
+                # Master فقط کاندید خودش را اضافه می‌کند؛ موتور تحلیل مستقل
+                # همچنان حق دارد همین بازار را جداگانه ارزیابی کند.
+                # جلوگیری از خرید دوباره توسط قفل پوزیشن در send_fused_signal انجام می‌شود.
 
         # ۱. موتور تحلیل مستقل
         if analysis_enabled:
