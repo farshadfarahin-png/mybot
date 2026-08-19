@@ -4090,7 +4090,7 @@ def unified_market_scanner_loop(app):
                     for token in scan_tokens
                     if token and not _token_lock_is_open(token)
                 }
-                for future in __import__("concurrent.futures").as_completed(futures):
+                for future in __import__("concurrent.futures", fromlist=["as_completed"]).as_completed(futures):
                     source_token = futures[future]
                     try:
                         token_addr, lanes = future.result()
