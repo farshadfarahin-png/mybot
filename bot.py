@@ -2050,12 +2050,12 @@ def advanced_filter_enabled():
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
 CONSENSUS_MIN_SCORE = 4.0
 CONSENSUS_MIN_RATIO = 0.55
-CONSENSUS_COOLDOWN_SECONDS = 60
+CONSENSUS_COOLDOWN_SECONDS = 2
 
 # Daily signal cap: editable from the management panel, 1..50. Default: 15.
 DAILY_SIGNAL_LIMIT = 25
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 90
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 2
 # Signal budget is capacity only; quality thresholds never depend on this value.
 SIGNAL_BUDGET_MIN = 1
 SIGNAL_BUDGET_MAX = 50
@@ -2120,7 +2120,7 @@ consensus_last_signal = {}
 STRUCTURE_FILTER_ENABLED = True
 STRUCTURE_LOOKBACK = 30
 STRUCTURE_MIN_SAMPLES = 3
-STRUCTURE_SAMPLE_MIN_GAP = 0.5
+STRUCTURE_SAMPLE_MIN_GAP = 0.25
 STRUCTURE_SUPPORT_DISTANCE_PCT = 4.0
 STRUCTURE_RESISTANCE_DISTANCE_PCT = 2.5
 STRUCTURE_BREAKOUT_BUFFER_PCT = 0.6
@@ -2179,9 +2179,9 @@ def _market_structure_gate(token_addr, pair):
         return True, {"structure": "ERROR_BYPASS", "structure_score": 0.0}
 
 # سرعت رصد فقط — هیچ آستانه کیفیت، تعداد سیگنال یا منطق موتور تغییر نمی‌کند.
-FAST_SCAN_INTERVAL_SECONDS = 0.50
+FAST_SCAN_INTERVAL_SECONDS = 0.25
 MARKET_DISCOVERY_WORKERS = 4
-PAIR_SCAN_WORKERS = 16
+PAIR_SCAN_WORKERS = 24
 
 # ELITE RADAR + HULK SENTINEL: فقط معماری رصد/رتبه‌بندی ارتقا یافته؛ هیچ آستانه کیفیت، سقف سیگنال یا کلید کنترلی تغییر نمی‌کند.
 # بازار در پس‌زمینه تازه می‌شود تا رادار منتظر HTTP discovery نماند.
@@ -2208,7 +2208,7 @@ _SENTINEL_PAIR_CHOICES = 3
 # V17 TRUE HUNTER: scan the universe in rotating micro-batches.
 # This prevents the radar from waiting for hundreds of HTTP calls before making
 # a decision, while every discovered token is revisited continuously.
-TRUE_HUNTER_BATCH_SIZE = 120
+TRUE_HUNTER_BATCH_SIZE = 40
 _TRUE_HUNTER_CURSOR = 0
 _TRUE_HUNTER_CURSOR_LOCK = Lock()
 _sentinel_memory = {}
@@ -2218,13 +2218,13 @@ _sentinel_lock = Lock()
 # the short-lived batch cache during the same radar sweep. This avoids one HTTP
 # request per token and reduces 429 pressure without weakening market gates.
 DEX_BATCH_SIZE = 30
-DEX_BATCH_CACHE_TTL_SECONDS = 4.0
+DEX_BATCH_CACHE_TTL_SECONDS = 2.0
 _dex_batch_cache = {}
 _dex_batch_cache_time = 0.0
 _dex_batch_lock = RLock()
 _dex_rate_lock = Lock()
 _dex_last_request_time = 0.0
-DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.12
+DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.08
 
 def _sentinel_ratio(buys, sells):
     return float(buys) / max(1.0, float(sells))
