@@ -1334,10 +1334,20 @@ def trigger_copy_trading_for_subscribers(token_mint, amount_sol, side="BUY", tx_
 
 
 
+def _load_wallet_trade_permission():
+    global WALLET_TRADE_PERMISSION
+    try:
+        saved = _get_bot_setting("wallet_trade_permission", "0")
+        WALLET_TRADE_PERMISSION = str(saved).strip().lower() not in ("0", "false", "off", "")
+    except Exception:
+        WALLET_TRADE_PERMISSION = False
+    return WALLET_TRADE_PERMISSION
+
 def set_wallet_trade_permission(enabled: bool):
     """Independent safety switch for real BUY/SELL wallet spending."""
     global WALLET_TRADE_PERMISSION
     WALLET_TRADE_PERMISSION = bool(enabled)
+    _set_bot_setting("wallet_trade_permission", "1" if WALLET_TRADE_PERMISSION else "0")
     logger.warning(
         "🔐 مجوز معامله واقعی از ولت: %s",
         "ON" if WALLET_TRADE_PERMISSION else "OFF"
@@ -1490,6 +1500,8 @@ def close_wsol_account():
         logger.warning(f"⚠️ هشدار در بستن اکانت WSOL: {e}")
 
 def execute_real_sell(token_mint, token_amount):
+    if not WALLET_TRADE_PERMISSION:
+        return False, "مجوز معامله از ولت خاموش است 🔒 — فروش واقعی انجام نشد"
     if not WALLET_PUBKEY or sender_keypair is None:
         return False, "ولتی یافت نشد ❌"
 
@@ -1590,7 +1602,10 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     solscan, dex = _signal_links(token_addr, tx_signature)
 
     if outcome == "SELL_SUCCESS":
-        title, status = "🔴 فروش خودکار موفق", "🟢 فروش موفق روی بلاکچین"
+        if float(pnl_percent or 0.0) < 0:
+            title, status = "🔴 فروش خودکار موفق — خروج با ضرر", "🟢 فروش انجام شد؛ معامله با ضرر بسته شد"
+        else:
+            title, status = "🔴 فروش خودکار موفق", "🟢 فروش موفق روی بلاکچین"
     elif outcome == "SELL_FAILED":
         title, status = "⚠️ سیگنال خروج / فروش ناموفق", "⚠️ فروش انجام نشد"
     elif outcome == "SIGNAL_TP":
@@ -1628,12 +1643,18 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
         )
 
 def _adaptive_locked_floor(highest_pnl, current_floor):
-    """حدضرر پله‌ای؛ فقط رو به بالا حرکت می‌کند."""
+    """قفل سود پله‌ای؛ فقط رو به بالا حرکت می‌کند و بعد از آخرین پله هم ادامه دارد."""
+    h = float(highest_pnl or 0.0)
     floor = float(current_floor)
+
     for high, lock in TRAILING_LOCK_TABLE:
-        if highest_pnl >= high:
-            floor = max(floor, lock)
+        if h >= float(high):
+            floor = max(floor, float(lock))
             break
+
+    if h > 1000.0:
+        floor = max(floor, h - 50.0)
+
     return floor
 
 def _update_trailing_state(pos, current_price, pnl_percent, pair):
@@ -1815,7 +1836,7 @@ def check_positions_loop():
 
                     is_profit = pnl_percent >= 0
                     sticker = "🤑" if is_profit else "🧐"
-                    reason = exit_reason_text or (f"حد سود فعال شد 🎯 {sticker}" if is_profit else "حد ضرر فعال شد 🛑")
+                    reason = exit_reason_text or ("حد سود/قفل سود فعال شد 🎯" if is_profit else "خروج با ضرر / حد ضرر 🛑")
                     sell_status = "🟢 فروش موفق روی بلاکچین" if success else f"⚠️ فروش انجام نشد: {sell_res_info}"
 
                     # مقدار P/L برای داشبورد تقریبی و بر اساس سرمایه نمونه موجود در پوزیشن.
@@ -4838,6 +4859,10 @@ def _main_keyboard(is_admin=False):
             f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}",
             callback_data="toggle_master_diagnostic"
         )])
+        rows.append([InlineKeyboardButton(
+            f"🔐 ولت BUY/SELL واقعی: {'🟢 ON' if WALLET_TRADE_PERMISSION else '🔴 OFF'}",
+            callback_data="toggle_wallet_trade_permission"
+        )])
         rows.append([InlineKeyboardButton("🪟🔮 کنترل شیشه‌ای کامل سیگنال", callback_data="signal_glass")])
         rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
         rows.append([InlineKeyboardButton(
@@ -5089,7 +5114,7 @@ def start_telegram_bot():
                 )
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 سیگنال اصلی: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data == "toggle_master_signal":
@@ -5105,8 +5130,8 @@ def start_telegram_bot():
                     message = (
                         "🟢 **کلید مادر BUY/SELL روشن شد**\n\n"
                         "تمام مسیرهای تولید سیگنال فعال شدند و کلیدهای خانواده‌های دیگر مانع شروع نمی‌شوند.\n"
-                        "⚡ اولین Pair واقعیِ داده‌دار در دور اسکن بعدی برای سیگنال بررسی می‌شود.\n"
-                        "⚠️ این حالت فیلتر کیفیت را دور می‌زند؛ خرید همچنان فقط با داده واقعی Pair و اجرای واقعی شبکه انجام می‌شود."
+                        "⚡ موتورهای فعال در دور اسکن بعدی کاندیدهای واقعی را بررسی می‌کنند.\n"
+                        "✅ Master فقط اجازه عبور سیگنال‌های موتورهای واقعی را می‌دهد و خودش موتور نیست."
                     )
                 else:
                     message = (
@@ -5114,6 +5139,24 @@ def start_telegram_bot():
                         "⛔ تولید و انتشار سیگنال جدید متوقف شد.\n"
                         "✅ مدیریت پوزیشن‌های باز برای TP/SL/Trailing ادامه دارد."
                     )
+                await q.edit_message_text(message, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
+                return
+            elif data == "toggle_wallet_trade_permission":
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین اجازه تغییر مجوز ولت را دارد.", reply_markup=_main_keyboard(False))
+                    return
+                new_state = not WALLET_TRADE_PERMISSION
+                set_wallet_trade_permission(new_state)
+                state_text = (
+                    "🟢 **ولت روشن شد** — BUY/SELL واقعی از ولت مجاز است."
+                    if new_state else
+                    "🔴 **ولت خاموش شد** — هیچ BUY/SELL واقعی از ولت اجرا نمی‌شود."
+                )
+                message = (
+                    f"🔐 **کلید ولت BUY/SELL واقعی**\n\n{state_text}\n\n"
+                    "✅ وضعیت در DB ذخیره شد و بعد از ری‌استارت هم حفظ می‌شود.\n"
+                    "📢 خودِ سیگنال می‌تواند جداگانه تولید شود؛ این کلید فقط خرج‌کردن واقعی از ولت را کنترل می‌کند."
+                )
                 await q.edit_message_text(message, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
                 return
             elif data == "toggle_master_diagnostic":
@@ -5188,11 +5231,47 @@ def start_telegram_bot():
                 return
             elif data=="engines": await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n"+_engine_status_lines(),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت",callback_data="home")]]),parse_mode="Markdown")
             elif data=="controls": await q.edit_message_text(("🎛 **کنترل موتورها**\n\n🤖 اتحاد هالک روشن است.\nهمه موتورهای تحلیلی با هم رأی می‌دهند و فقط یک سیگنال واحد منتشر می‌شود.\n\nبرای کنترل تک‌تک موتورها، اتحاد را خاموش کنید." if SYNCHRONIZED_MODE else "🎛 **کنترل موتورها**\n\n🔴 اتحاد خاموش است.\nحالا هر موتور کلید مستقل خودش را دارد و می‌توانید هرکدام را جداگانه روشن/خاموش کنید."),reply_markup=_control_keyboard(),parse_mode="Markdown") if is_admin else await q.edit_message_text("⛔ این بخش فقط برای ادمین است.",reply_markup=_main_keyboard(False))
+            elif data=="toggle_wallet_trade_permission":
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین اجازه تغییر مجوز ولت را دارد.", reply_markup=_main_keyboard(False))
+                    return
+                new_state = not WALLET_TRADE_PERMISSION
+                set_wallet_trade_permission(new_state)
+                state_text = "🟢 روشن — BUY/SELL واقعی مجاز است" if new_state else "🔴 خاموش — هیچ BUY/SELL واقعی از ولت مجاز نیست"
+                await q.edit_message_text(
+                    f"🔐 **مجوز معامله واقعی از ولت**\n\n{state_text}\n\n"
+                    "⚠️ شارژ ولت به‌تنهایی مجوز برداشت نیست؛ فقط این کلید اجازه امضا و ارسال معامله واقعی را می‌دهد.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            f"🔐 مجوز معامله واقعی: {'🟢 ON' if new_state else '🔴 OFF'}",
+                            callback_data="toggle_wallet_trade_permission"
+                        )],
+                        [InlineKeyboardButton("💼 وضعیت ولت", callback_data="wallet")],
+                    ]),
+                    parse_mode="Markdown"
+                )
+                return
             elif data=="wallet":
-                if not is_admin: await q.edit_message_text("⛔ اطلاعات ولت اصلی خصوصی است.",reply_markup=_main_keyboard(False))
+                if not is_admin:
+                    await q.edit_message_text("⛔ اطلاعات ولت اصلی خصوصی است.",reply_markup=_main_keyboard(False))
                 else:
                     sol_balance = await _tg_bg(get_sol_balance)
-                    await q.edit_message_text(f"💼 **ولت اصلی**\n\n💰 موجودی: `{sol_balance:.6f} SOL`\n\n📍 `{WALLET_PUBKEY or '-'} `",reply_markup=_main_keyboard(True),parse_mode="Markdown")
+                    wallet_state = "🟢 ON — BUY/SELL واقعی مجاز است" if WALLET_TRADE_PERMISSION else "🔴 OFF — برداشت و معامله واقعی ممنوع است"
+                    await q.edit_message_text(
+                        f"💼 **ولت اصلی**\n\n"
+                        f"💰 موجودی: `{sol_balance:.6f} SOL`\n"
+                        f"🔐 مجوز معامله واقعی: **{wallet_state}**\n\n"
+                        f"📍 `{WALLET_PUBKEY or '-'}`",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton(
+                                f"🔐 مجوز معامله واقعی: {'🟢 ON' if WALLET_TRADE_PERMISSION else '🔴 OFF'}",
+                                callback_data="toggle_wallet_trade_permission"
+                            )],
+                            [InlineKeyboardButton("🔄 بروزرسانی موجودی", callback_data="wallet")],
+                            [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
+                        ]),
+                        parse_mode="Markdown"
+                    )
             elif data=="stats":
                 a=await _tg_bg(get_advanced_trade_analytics); await q.edit_message_text(f"📊 **آمار واقعی ثبت‌شده**\n\nمعاملات: `{a['total_trades']}`\nWin Rate: `{a['win_rate']:.2f}%`\nسود/زیان: `{a['total_pct']:+.2f}%`\nP/L: `${a['total_usd']:+.2f}`",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data=="security":
@@ -5682,6 +5761,8 @@ if __name__ == "__main__":
     except Exception:
         MASTER_SIGNAL_ENABLED = False
         MASTER_SIGNAL_FIRE_NOW = False
+    # وضعیت کلید مستقل ولت نیز از DB بازیابی می‌شود تا بعد از ری‌استارت حفظ شود.
+    _load_wallet_trade_permission()
     ensure_channel_invite_link()
 
     threads = [
