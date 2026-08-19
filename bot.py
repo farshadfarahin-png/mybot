@@ -137,6 +137,8 @@ EMERGENCY_STOP = False
 # کلید مادر سیگنال: ON = مسیر تولید سیگنال BUY/SELL فعال، OFF = هیچ سیگنال جدیدی تولید/منتشر نمی‌شود.
 # Master فقط کلید اصلی فعال/غیرفعال‌سازی کل سیستم سیگنال است؛ موتور محسوب نمی‌شود.
 MASTER_SIGNAL_ENABLED = False
+# مجوز مستقل خرج‌کردن از ولت برای BUY/SELL واقعی؛ پیش‌فرض خاموش
+WALLET_TRADE_PERMISSION = False
 MASTER_SIGNAL_FIRE_NOW = False  # legacy UI pulse; never used as a signal source
 # کلید مستقل عیب‌یابی: فقط گزارش Diagnostic را کنترل می‌کند و روی تولید/اجرای سیگنال اثر ندارد.
 MASTER_DIAGNOSTIC_ENABLED = True
@@ -166,6 +168,19 @@ TRAILING_LOCK_TABLE = (
     (50.0, 35.0), (40.0, 28.0), (30.0, 20.0), (25.0, 16.0), (20.0, 13.0),
     (15.0, 10.0), (13.0, 10.0), (12.0, 8.0), (10.0, 6.0), (8.0, 4.0),
 )
+
+# بعد از آخرین پله هم قفل سود ادامه دارد؛ سقف مصنوعی ندارد.
+# +1000% => +950% و بعد از آن هر 50% رشد جدید، 50% دیگر به کف قفل اضافه می‌شود.
+def get_unlimited_trailing_floor(highest_pnl):
+    h = max(0.0, float(highest_pnl or 0.0))
+    floor = 0.0
+    for trigger, lock_floor in TRAILING_LOCK_TABLE:
+        if h >= trigger:
+            floor = max(floor, lock_floor)
+    if h > 1000.0:
+        floor = max(floor, h - 50.0)
+    return floor
+
 TRAILING_WEAKNESS_ENABLED = True
 TRAILING_WEAK_SELL_RATIO = 1.45
 TRAILING_WEAKNESS_M5_MAX = 0.0
@@ -1318,7 +1333,20 @@ def trigger_copy_trading_for_subscribers(token_mint, amount_sol, side="BUY", tx_
             logger.error(f"Copy-trade dispatch error for subscriber {sub.get('telegram_id')}: {e}")
 
 
+
+def set_wallet_trade_permission(enabled: bool):
+    """Independent safety switch for real BUY/SELL wallet spending."""
+    global WALLET_TRADE_PERMISSION
+    WALLET_TRADE_PERMISSION = bool(enabled)
+    logger.warning(
+        "🔐 مجوز معامله واقعی از ولت: %s",
+        "ON" if WALLET_TRADE_PERMISSION else "OFF"
+    )
+    return WALLET_TRADE_PERMISSION
+
 def execute_real_buy(token_mint, amount_sol):
+    if not WALLET_TRADE_PERMISSION:
+        return False, "مجوز معامله از ولت خاموش است 🔒 — خرید واقعی انجام نشد"
     if not WALLET_PUBKEY or sender_keypair is None:
         return False, "کلید عمومی ولت نامعتبر است"
 
@@ -4056,7 +4084,7 @@ def unified_market_scanner_loop(app):
             V12_REAL_AUDIT["scans"] = int(V12_REAL_AUDIT.get("scans", 0) or 0) + 1
             V12_REAL_AUDIT["last_scan"] = time.time()
 
-            if daily_signal_cap_reached() and not MASTER_SIGNAL_ENABLED:
+            if daily_signal_cap_reached():
                 _diag_reject("EXECUTION", "DAILY_SIGNAL_CAP_REACHED")
                 time.sleep(FAST_SCAN_INTERVAL_SECONDS)
                 continue
