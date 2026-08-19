@@ -1996,10 +1996,15 @@ def technical_analysis_scanner_loop(app):
 # اجماع عمداً کمی سخت‌گیرتر شده تا فقط گزینه‌های باکیفیت‌تر منتشر شوند.
 # حداقل 82٪ موتورهای روشن باید رأی مثبت بدهند و در حالت معمول حداقل 7 رأی لازم است.
 def new_trade_system_enabled():
-    """Whether the unified signal pipeline is allowed to look for new trades."""
-    if MASTER_SIGNAL_ENABLED:
-        return True
-    return (SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED) and not EMERGENCY_STOP
+    """Master is only the master ON/OFF gate; an actual engine must be ON too."""
+    if not MASTER_SIGNAL_ENABLED:
+        return False
+    if EMERGENCY_STOP:
+        return False
+    try:
+        return bool(_active_independent_engine_names())
+    except Exception:
+        return False
 
 def advanced_filter_enabled():
     return ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED
@@ -3268,6 +3273,20 @@ def send_fused_signal(token_addr, fusion):
         if not MASTER_SIGNAL_ENABLED:
             _audit_signal_decision("MASTER_SIGNAL_OFF")
             return False, "MASTER_SIGNAL_OFF"
+
+        # Master is only permission to use real engines; it is never an engine itself.
+        active_engine_names = _active_independent_engine_names()
+        if not active_engine_names:
+            _audit_signal_decision("NO_ACTIVE_ENGINE")
+            return False, "NO_ACTIVE_ENGINE"
+        candidate_engines = list(fusion.get("engines") or fusion.get("votes") or [])
+        if not candidate_engines:
+            _audit_signal_decision("SIGNAL_WITHOUT_ENGINE")
+            return False, "SIGNAL_WITHOUT_ENGINE"
+        if not any(str(e) in active_engine_names for e in candidate_engines):
+            _audit_signal_decision("ENGINE_NOT_ENABLED")
+            return False, "ENGINE_NOT_ENABLED"
+
         if _token_lock_is_open(token_addr):
             if is_analysis_signal:
                 _analysis_diag("blocked_duplicate", token_addr=token_addr)
@@ -3958,6 +3977,9 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
         return token_addr, result
 
     active = _active_independent_engine_names()
+    if not active:
+        _diag_reject("SYSTEM", "NO_ACTIVE_ENGINE", token_addr)
+        return token_addr, result
     analysis_enabled = ("Analysis" in active) and ANALYSIS_ENGINE_ENABLED
 
     for pair in pairs:
@@ -4859,10 +4881,6 @@ def _main_keyboard(is_admin=False):
             f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}",
             callback_data="toggle_master_diagnostic"
         )])
-        rows.append([InlineKeyboardButton(
-            f"🔐 ولت BUY/SELL واقعی: {'🟢 ON' if WALLET_TRADE_PERMISSION else '🔴 OFF'}",
-            callback_data="toggle_wallet_trade_permission"
-        )])
         rows.append([InlineKeyboardButton("🪟🔮 کنترل شیشه‌ای کامل سیگنال", callback_data="signal_glass")])
         rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
         rows.append([InlineKeyboardButton(
@@ -5122,7 +5140,7 @@ def start_telegram_bot():
                     await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
                     return
                 MASTER_SIGNAL_ENABLED = not MASTER_SIGNAL_ENABLED
-                MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
+                MASTER_SIGNAL_FIRE_NOW = False
                 _set_bot_setting("master_signal_enabled", "1" if MASTER_SIGNAL_ENABLED else "0")
                 if MASTER_SIGNAL_ENABLED:
                     # کلید مادر عمداً مستقل از MAX/Advanced/Hulk/اتحاد است.
@@ -5139,24 +5157,6 @@ def start_telegram_bot():
                         "⛔ تولید و انتشار سیگنال جدید متوقف شد.\n"
                         "✅ مدیریت پوزیشن‌های باز برای TP/SL/Trailing ادامه دارد."
                     )
-                await q.edit_message_text(message, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
-                return
-            elif data == "toggle_wallet_trade_permission":
-                if not is_admin:
-                    await q.edit_message_text("⛔ فقط ادمین اجازه تغییر مجوز ولت را دارد.", reply_markup=_main_keyboard(False))
-                    return
-                new_state = not WALLET_TRADE_PERMISSION
-                set_wallet_trade_permission(new_state)
-                state_text = (
-                    "🟢 **ولت روشن شد** — BUY/SELL واقعی از ولت مجاز است."
-                    if new_state else
-                    "🔴 **ولت خاموش شد** — هیچ BUY/SELL واقعی از ولت اجرا نمی‌شود."
-                )
-                message = (
-                    f"🔐 **کلید ولت BUY/SELL واقعی**\n\n{state_text}\n\n"
-                    "✅ وضعیت در DB ذخیره شد و بعد از ری‌استارت هم حفظ می‌شود.\n"
-                    "📢 خودِ سیگنال می‌تواند جداگانه تولید شود؛ این کلید فقط خرج‌کردن واقعی از ولت را کنترل می‌کند."
-                )
                 await q.edit_message_text(message, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
                 return
             elif data == "toggle_master_diagnostic":
@@ -5757,12 +5757,10 @@ if __name__ == "__main__":
     # وضعیت Master از آخرین تنظیم پنل برمی‌گردد؛ اگر قبلاً ذخیره نشده بود خاموش می‌ماند.
     try:
         MASTER_SIGNAL_ENABLED = str(_get_bot_setting("master_signal_enabled", "0")).strip() not in ("0", "false", "off")
-        MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
+        MASTER_SIGNAL_FIRE_NOW = False
     except Exception:
         MASTER_SIGNAL_ENABLED = False
         MASTER_SIGNAL_FIRE_NOW = False
-    # وضعیت کلید مستقل ولت نیز از DB بازیابی می‌شود تا بعد از ری‌استارت حفظ شود.
-    _load_wallet_trade_permission()
     ensure_channel_invite_link()
 
     threads = [
