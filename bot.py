@@ -953,12 +953,8 @@ def ensure_channel_invite_link():
     return ""
 
 def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="", execution_tx="", pnl_percent=None):
-    # در MAX FUSION، پیام BUY فقط از مسیر Unified Fusion اجازه انتشار دارد.
-    # پیام SELL همیشه مجاز است تا خروج پوزیشن‌ها بدون مانع ادامه پیدا کند.
-    is_analysis_card = str(signal_title or "").strip() == "سیستم تحلیل مستقل" or "Analysis" in str(signal_title or "") or "تحلیل مستقل" in str(signal_title or "")
-    if str(side).upper() == "BUY" and MAX_FUSION_ENABLED and not is_analysis_card and signal_title not in (UNIFIED_ENGINE_NAME, "MAX FUSION"):
-        logger.info(f"Blocked legacy BUY channel card while MAX FUSION is active: {signal_title}")
-        return False
+    # کانال باید تمام سیگنال‌های معتبر BUY و SELL را که از مسیر اصلی آمده‌اند منتشر کند.
+    # Master فقط تولید/ورود BUY جدید را کنترل می‌کند و نباید جلوی انتشار کانال را بگیرد.
     """کارت سیگنال VIP برای موبایل.
     نکته: وضعیت موجودی/اجرای کیف پول هرگز در کانال نمایش داده نمی‌شود.
     لینک‌ها فقط روی دکمه‌ها هستند؛ متن کانال لینک خام ندارد.
@@ -4026,7 +4022,7 @@ def unified_market_scanner_loop(app):
     Analysis and Fusion have separate candidate containers, selection, submission,
     and diagnostics. No Fusion/MAX condition is allowed to suppress Analysis.
     """
-    global _TRUE_HUNTER_CURSOR
+    global _TRUE_HUNTER_CURSOR, MASTER_SIGNAL_FIRE_NOW
     logger.info("%s / %s: CLEAN SIGNAL CORE started", UNIFIED_ENGINE_NAME, BOT_BUILD_VERSION)
     send_telegram_msg(f"🚀 رادار {BOT_BUILD_VERSION} فعال شد")
 
