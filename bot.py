@@ -19,7 +19,7 @@ from threading import Thread, Lock, RLock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from flask import Flask, render_template_string, request, jsonify
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -5002,6 +5002,38 @@ def _main_keyboard(is_admin=False):
         rows.append([InlineKeyboardButton("🎁 عضویت رایگان کاربر",callback_data="free_users")])
     return InlineKeyboardMarkup(rows)
 
+def _persistent_bottom_keyboard(is_admin=False):
+    """
+    پنل پایین تلگرام به‌صورت Reply Keyboard.
+    پنل Inline فعلی حذف/جابجا نمی‌شود؛ این فقط یک نسخهٔ دوم و دائمی از
+    کنترل‌های اصلی است تا هنگام زیاد شدن سیگنال‌ها همچنان پایین چت در دسترس باشد.
+    """
+    rows = [
+        ["📊 وضعیت موتورها", "💼 وضعیت ولت"],
+        ["📈 آمار معاملات", "🎛 کنترل موتورها"],
+    ]
+    if WEBAPP_URL:
+        rows.append(["📱 Mini App VIP"])
+    elif CHANNEL_INVITE_LINK:
+        rows.append(["📢 کانال VIP"])
+    if is_admin:
+        rows += [
+            [f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"],
+            [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"],
+            ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"],
+            ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"],
+            [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"],
+            [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
+            ["🎁 عضویت رایگان کاربر"],
+        ]
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        is_persistent=True,
+        selective=False,
+    )
+
 ENGINE_SWITCHES = [
     ("Analysis", "ANALYSIS_ENGINE_ENABLED", "toggle_engine_analysis"),
     ("Fire", "IS_RUNNING", "toggle_engine_fire"),
@@ -5091,6 +5123,14 @@ def start_telegram_bot():
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            # پنل فعلی بالا عمداً حفظ می‌شود.
+            # این پیام دوم فقط Reply Keyboard دائمی پایین تلگرام را فعال می‌کند.
+            await update.message.reply_text(
+                "🎛 **پنل کنترل پایین فعال است**\n"
+                "هر زمان سیگنال‌های جدید بیایند، این پنل پایین چت باقی می‌ماند.",
+                reply_markup=_persistent_bottom_keyboard(is_admin),
+                parse_mode="Markdown"
+            )
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             cid = str(update.effective_user.id)
             if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
@@ -5238,6 +5278,256 @@ def start_telegram_bot():
                     f"❌ مقدار نامعتبر است: {e}\n\nیک عدد دلخواه مثل `0.0175` یا `0.25` SOL بفرست.",
                     parse_mode="Markdown"
                 )
+
+
+        async def persistent_bottom_panel_handler(update:Update, context:ContextTypes.DEFAULT_TYPE):
+            """
+            کنترل‌های Reply Keyboard پایین.
+            این handler فقط میانبرهای پنل موجود است؛ موتورهای سیگنال و منطق
+            اصلی callbackها دست‌نخورده باقی می‌مانند.
+            """
+            global MASTER_SIGNAL_ENABLED, MASTER_SIGNAL_FIRE_NOW
+            global MASTER_DIAGNOSTIC_ENABLED, ANALYSIS_ENGINE_ENABLED
+
+            msg = update.message
+            if not msg or not msg.text:
+                return
+
+            label = msg.text.strip()
+            cid = str(update.effective_user.id)
+            is_admin = bool(TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID))
+
+            # وضعیت موتورها
+            if label == "📊 وضعیت موتورها":
+                await msg.reply_text(
+                    "🎛 **وضعیت موتورهای هوشمند**\n\n" + _engine_status_lines(),
+                    reply_markup=_persistent_bottom_keyboard(is_admin),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # وضعیت ولت
+            if label == "💼 وضعیت ولت":
+                if not is_admin:
+                    await msg.reply_text(
+                        "⛔ اطلاعات ولت اصلی خصوصی است.",
+                        reply_markup=_persistent_bottom_keyboard(is_admin)
+                    )
+                    return
+                sol_balance = await _tg_bg(get_sol_balance)
+                wallet_state = (
+                    "🟢 ON — BUY/SELL واقعی مجاز است"
+                    if WALLET_TRADE_PERMISSION
+                    else "🔴 OFF — برداشت و معامله واقعی ممنوع است"
+                )
+                await msg.reply_text(
+                    f"💼 **ولت اصلی**\n\n"
+                    f"💰 موجودی SOL: `{sol_balance:.6f}`\n"
+                    f"🔐 مجوز معامله: {wallet_state}",
+                    reply_markup=_persistent_bottom_keyboard(is_admin),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # آمار
+            if label == "📈 آمار معاملات":
+                a = await _tg_bg(get_advanced_trade_analytics)
+                await msg.reply_text(
+                    f"📊 **آمار واقعی ثبت‌شده**\n\n"
+                    f"معاملات: `{a['total_trades']}`\n"
+                    f"Win Rate: `{a['win_rate']:.2f}%`\n"
+                    f"سود/زیان: `{a['total_pct']:+.2f}%`\n"
+                    f"P/L: `${a['total_usd']:+.2f}`",
+                    reply_markup=_persistent_bottom_keyboard(is_admin),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # کنترل موتورها: همان پنل جزئیات فعلی باز می‌شود.
+            if label == "🎛 کنترل موتورها":
+                if not is_admin:
+                    await msg.reply_text(
+                        "⛔ این بخش فقط برای ادمین است.",
+                        reply_markup=_persistent_bottom_keyboard(False)
+                    )
+                    return
+                await msg.reply_text(
+                    (
+                        "🎛 **کنترل موتورها**\n\n🤖 اتحاد هالک روشن است.\n"
+                        "برای کنترل تک‌تک موتورها، اتحاد را خاموش کنید."
+                        if SYNCHRONIZED_MODE else
+                        "🎛 **کنترل موتورها**\n\n🔴 اتحاد خاموش است.\n"
+                        "هر موتور کلید مستقل خودش را دارد."
+                    ),
+                    reply_markup=_control_keyboard(),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Mini App / VIP channel
+            if label == "📱 Mini App VIP":
+                if WEBAPP_URL:
+                    await msg.reply_text(
+                        "📱 Mini App VIP",
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("📱 باز کردن Mini App VIP", web_app=WebAppInfo(url=WEBAPP_URL))]]
+                        )
+                    )
+                return
+
+            if label == "📢 کانال VIP":
+                if CHANNEL_INVITE_LINK:
+                    await msg.reply_text(
+                        "📢 کانال VIP",
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("📢 ورود به کانال VIP", url=CHANNEL_INVITE_LINK)]]
+                        )
+                    )
+                return
+
+            # کلید اصلی BUY/SELL — همان منطق فعلی
+            if label.startswith("🔘 سیگنال BUY/SELL:"):
+                if not is_admin:
+                    await msg.reply_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                MASTER_SIGNAL_ENABLED = not MASTER_SIGNAL_ENABLED
+                MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
+                _set_bot_setting("master_signal_enabled", "1" if MASTER_SIGNAL_ENABLED else "0")
+                message = (
+                    "🟢 **کلید مادر BUY/SELL روشن شد**\n\n"
+                    "تمام مسیرهای تولید سیگنال فعال شدند و در دور اسکن بعدی بررسی می‌شوند.\n"
+                    "مدیریت پوزیشن‌های باز مستقل از این کلید ادامه دارد."
+                    if MASTER_SIGNAL_ENABLED else
+                    "🔴 **کلید مادر BUY/SELL خاموش شد**\n\n"
+                    "⛔ تولید و انتشار سیگنال جدید متوقف شد.\n"
+                    "✅ مدیریت پوزیشن‌های باز برای TP/SL/Trailing ادامه دارد."
+                )
+                await msg.reply_text(
+                    message,
+                    reply_markup=_persistent_bottom_keyboard(True),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Diagnostic
+            if label.startswith("🩺 عیب‌یابی سیگنال:"):
+                if not is_admin:
+                    await msg.reply_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                MASTER_DIAGNOSTIC_ENABLED = not MASTER_DIAGNOSTIC_ENABLED
+                _set_bot_setting(
+                    "master_diagnostic_enabled",
+                    "1" if MASTER_DIAGNOSTIC_ENABLED else "0"
+                )
+                if MASTER_DIAGNOSTIC_ENABLED:
+                    with _MASTER_DIAG_STATE_LOCK:
+                        _MASTER_DIAG_ENABLED_SINCE = time.time()
+                        _MASTER_DIAG_LAST_SENT = 0.0
+                        _MASTER_DIAG_LAST_SIGNAL_SEEN = float(V12_REAL_AUDIT.get("last_signal", 0) or 0)
+                    message = (
+                        "🟢 **عیب‌یابی سیگنال روشن شد**\n\n"
+                        "🩺 گزارش خلاصه و دوره‌ای فعال شد.\n"
+                        "⚙️ این کلید اثری روی تولید، خرید یا انتشار سیگنال ندارد."
+                    )
+                else:
+                    with _MASTER_DIAG_STATE_LOCK:
+                        _MASTER_DIAG_ENABLED_SINCE = 0.0
+                        _MASTER_DIAG_LAST_SENT = 0.0
+                        _MASTER_DIAG_LAST_SIGNAL_SEEN = 0.0
+                    message = (
+                        "🔴 **عیب‌یابی سیگنال خاموش شد**\n\n"
+                        "✅ گزارش Diagnostic جدید ارسال نمی‌شود.\n"
+                        "🚀 تولید سیگنال و مدیریت پوزیشن‌ها بدون تغییر ادامه دارد."
+                    )
+                await msg.reply_text(
+                    message,
+                    reply_markup=_persistent_bottom_keyboard(True),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Signal glass: همان پنل فعلی را باز می‌کند.
+            if label == "🪟🔮 کنترل شیشه‌ای کامل سیگنال":
+                if not is_admin:
+                    await msg.reply_text("⛔ این بخش فقط برای ادمین است.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                await msg.reply_text(
+                    _signal_glass_summary(),
+                    reply_markup=_signal_glass_keyboard(),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Admin / security
+            if label == "👑 پنل مدیریت":
+                if not is_admin:
+                    await msg.reply_text("⛔ دسترسی غیرمجاز.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                await msg.reply_text(
+                    f"👑 **پنل مدیریت**\n\n"
+                    f"کاربران: `{len(get_all_subscribers())}`\n"
+                    f"معاملات: `{get_advanced_trade_analytics()['total_trades']}`",
+                    reply_markup=_persistent_bottom_keyboard(True),
+                    parse_mode="Markdown"
+                )
+                return
+
+            if label == "🔐 امنیت/وضعیت":
+                if not is_admin:
+                    await msg.reply_text("⛔ فقط ادمین.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                await msg.reply_text(
+                    f"🔐 **امنیت**\n\n"
+                    f"Private Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\n"
+                    f"RPCها: `{len(RPC_ENDPOINTS)}`\n"
+                    f"Admin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",
+                    reply_markup=_persistent_bottom_keyboard(True),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Daily limit: existing manual-input handler will receive the number.
+            if label.startswith("🎯 سقف روزانه"):
+                if not is_admin:
+                    await msg.reply_text("⛔ دسترسی غیرمجاز.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                context.user_data["awaiting_daily_signal_limit"] = True
+                await msg.reply_text(
+                    f"🎯 **سقف روزانه سیگنال**\n\n"
+                    f"مقدار فعلی: `{daily_signal_status_text()}`\n"
+                    "یک عدد بین `1` تا `50` بفرست.",
+                    reply_markup=_persistent_bottom_keyboard(True),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Analysis engine: same variable, same switch semantics.
+            if label.startswith("📈 موتور تحلیل:"):
+                if not is_admin:
+                    await msg.reply_text("⛔ فقط ادمین.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                ANALYSIS_ENGINE_ENABLED = not ANALYSIS_ENGINE_ENABLED
+                await msg.reply_text(
+                    f"📈 **موتور تحلیل:** {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}",
+                    reply_markup=_persistent_bottom_keyboard(True),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Free users
+            if label == "🎁 عضویت رایگان کاربر":
+                if not is_admin:
+                    await msg.reply_text("⛔ دسترسی غیرمجاز.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                await msg.reply_text(
+                    _admin_free_panel_text(),
+                    reply_markup=_persistent_bottom_keyboard(True),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Any non-panel text continues to the existing manual input handler.
+            return
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION
@@ -5847,6 +6137,8 @@ def start_telegram_bot():
         app.add_handler(CommandHandler("setvipchannel",setvipchannel_cmd))
         app.add_handler(CommandHandler("settradesol",settradesol_cmd))
         app.add_handler(CommandHandler("cancel",cancel_trade_limit_cmd))
+        # Persistent bottom panel must run before the existing manual-input handler.
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persistent_bottom_panel_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
