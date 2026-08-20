@@ -185,9 +185,9 @@ TRAILING_WEAKNESS_ENABLED = True
 TRAILING_WEAK_SELL_RATIO = 1.45
 TRAILING_WEAKNESS_M5_MAX = 0.0
 TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT = 1.5
-# وقتی قیمت به TP اسمی رسید، خروج واقعی/سیگنال خروج انجام می‌شود.
-# Trailing همچنان برای مدیریت پوزیشن‌هایی که هنوز به TP نرسیده‌اند فعال می‌ماند.
-EXIT_ON_TP_HIT = True
+# TP فقط تارگت نمایشی/مرجع است؛ لمس TP باعث فروش فوری نمی‌شود.
+# پوزیشن تا زمان فعال‌شدن قفل سود، ریزش از سقف/ضعف بازار، یا SL اولیه باز می‌ماند.
+EXIT_ON_TP_HIT = False
    
 
 SECTION_ULTRA_OPEN = True
@@ -1728,15 +1728,12 @@ def evaluate_signal_only_positions():
             pnl = ((current_price - entry) / entry) * 100.0
             locked_floor, weakness = _update_trailing_state(pos, current_price, pnl, pair)
 
-            # TP یک خروج واقعی است؛ trailing فقط نقش مدیریت پوزیشن قبل از رسیدن به TP
-            # و محافظت از سودهای بالاتر را دارد. این تغییر مسیر تولید BUY را دست نمی‌زند.
+            # TP صرفاً مرجع است و نباید باعث فروش فوری شود.
+            # پوزیشن باید باز بماند تا trailing/قفل سود یا SL اولیه خروج را فعال کند.
             should_close = False
             outcome = "SIGNAL_TP"
             tp_target = float(pos.get("tp", 0) or 0)
-            if EXIT_ON_TP_HIT and tp_target > 0 and pnl >= tp_target:
-                should_close = True
-                outcome = "SIGNAL_TP"
-            elif pnl <= float(pos.get("sl", -8.0)) and pos.get("highest_pnl", 0) < 10:
+            if pnl <= float(pos.get("sl", -8.0)) and pos.get("highest_pnl", 0) < 10:
                 should_close = True
                 outcome = "SIGNAL_SL"
             elif pnl <= locked_floor and pos.get("highest_pnl", 0) >= 10:
@@ -1778,6 +1775,11 @@ def check_positions_loop():
             with state_lock:
                 current_positions = list(active_positions.items())
 
+            # تمام پوزیشن‌های باز در هر دور مستقل از هم بررسی می‌شوند.
+            # بسته‌شدن یک پوزیشن هیچ‌وقت مانیتورینگ بقیه را متوقف نمی‌کند.
+            if current_positions:
+                logger.info(f"🔎 مانیتور پوزیشن‌ها: {len(current_positions)} پوزیشن باز در حال بررسی مداوم")
+
             for token_addr, pos in current_positions:
                 try:
                     res = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4)
@@ -1802,14 +1804,12 @@ def check_positions_loop():
                     pos["p_change"] = float(pair.get("priceChange", {}).get("m5") or 0.0)
                     highest_pnl = float(pos.get("highest_pnl", pnl_percent))
 
-                    # اگر به سقف‌های بسیار بزرگ رسید، حدضرر نیز همراه آن بالا می‌رود.
-                    # نمونه: +1000% => حدود +950%؛ +500% => حدود +430%.
+                    # TP فقط مرجع است؛ بعد از رسیدن به آن پوزیشن نگه داشته می‌شود.
+                    # هرچه سقف سود بالاتر برود، locked_floor نیز پله‌به‌پله بالاتر می‌رود
+                    # و فقط برگشت قیمت تا کف قفل‌شده باعث فروش می‌شود.
                     should_exit = False
                     tp_target = float(pos.get("tp", 0) or 0)
-                    if EXIT_ON_TP_HIT and tp_target > 0 and pnl_percent >= tp_target:
-                        should_exit = True
-                        exit_reason_text = f"فروش خودکار؛ تارگت سود +{tp_target:.2f}% لمس شد 🎯"
-                    elif pnl_percent <= sl and highest_pnl < 10.0:
+                    if pnl_percent <= sl and highest_pnl < 10.0:
                         should_exit = True
                         exit_reason_text = "فروش خودکار حد ضرر اولیه (SL) فعال شد 🛑"
                     elif pnl_percent <= locked_floor and highest_pnl >= 10.0:
