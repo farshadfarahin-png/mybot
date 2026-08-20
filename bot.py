@@ -147,7 +147,7 @@ MASTER_SIGNAL_FIRE_NOW = False  # legacy UI pulse; never used as a signal source
 AUTO_LEARNING_ENABLED = True
 AUTO_IMPROVEMENT_ENABLED = False
 # ==============================================================
-MASTER_DIAGNOSTIC_ENABLED = True
+MASTER_DIAGNOSTIC_ENABLED = False
 COPY_TRADING_ENABLED = True
 _MAX_FUSION_PREV = None
 
@@ -2508,6 +2508,9 @@ learning_state = {
     "equity_now": 0.0,
     "consecutive_losses": 0,
     "paused_until": 0.0,
+    # Persistent human-readable memory; stored outside the Python source file.
+    "learning_events": [],
+    "improvement_events": [],
 }
 
 def _load_learning_state():
@@ -2566,12 +2569,14 @@ def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
         else:
             learning_state["consecutive_losses"] = 0
 
+        weight_changes = []
         for name in item["engines"]:
             st = learning_state["engines"].setdefault(
                 name,
                 {"trades": 0, "wins": 0, "losses": 0,
                  "avg_pnl": 0.0, "weight": 1.0}
             )
+            old_weight = float(st.get("weight", 1.0) or 1.0)
             st["trades"] += 1
             st["wins"] += int(pnl > 0)
             st["losses"] += int(pnl <= 0)
@@ -2582,6 +2587,41 @@ def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
                 (1.0 - LEARNING_ALPHA) * st["weight"]
                 + LEARNING_ALPHA * target
             )
+            new_weight = float(st["weight"])
+            if abs(new_weight - old_weight) >= 0.0001:
+                weight_changes.append({
+                    "engine": str(name),
+                    "old_weight": round(old_weight, 4),
+                    "new_weight": round(new_weight, 4),
+                })
+
+        lesson = (
+            "الگوی این معامله با نتیجه مثبت تأیید شد و وزن موتورهای درگیر بر اساس نتیجه واقعی تنظیم شد."
+            if pnl > 0 else
+            "الگوی این معامله نتیجه منفی داشت و وزن موتورهای درگیر بر اساس نتیجه واقعی تنظیم شد."
+            if pnl < 0 else
+            "نتیجه خنثی بود و وزن‌ها طبق میانگین واقعی به‌روزرسانی شدند."
+        )
+        learning_state.setdefault("learning_events", []).append({
+            "ts": time.time(),
+            "symbol": str(symbol or "-"),
+            "pnl_pct": round(pnl, 4),
+            "engines": list(item["engines"]),
+            "regime": regime or "UNKNOWN",
+            "lesson": lesson,
+        })
+        learning_state["learning_events"] = learning_state["learning_events"][-500:]
+
+        if weight_changes:
+            learning_state.setdefault("improvement_events", []).append({
+                "ts": time.time(),
+                "symbol": str(symbol or "-"),
+                "pnl_pct": round(pnl, 4),
+                "changes": weight_changes,
+                "description": "وزن موتورهای درگیر بر پایه نتیجه واقعی معامله تنظیم شد.",
+            })
+            learning_state["improvement_events"] = learning_state["improvement_events"][-500:]
+
         _save_learning_state()
     except Exception as e:
         logger.warning(f"Closed-trade learning update failed: {e}")
@@ -2630,6 +2670,33 @@ def learning_stats():
         "win_rate": (wins / len(trades) * 100.0) if trades else 0.0,
         "net_pnl_pct_sum": pnl,
         "loss_streak": int(learning_state.get("consecutive_losses", 0) or 0),
+        "learning_events": len(learning_state.get("learning_events", [])),
+        "improvement_events": len(learning_state.get("improvement_events", [])),
+    }
+
+def learning_memory_report():
+    """Human-readable persistent learning/improvement memory."""
+    trades = learning_state.get("trades", [])
+    engines = learning_state.get("engines", {}) or {}
+    events = learning_state.get("learning_events", []) or []
+    improvements = learning_state.get("improvement_events", []) or []
+    engine_rows = []
+    for name, st in sorted(engines.items(), key=lambda x: x[1].get("trades", 0), reverse=True):
+        n = max(1, int(st.get("trades", 0) or 0))
+        engine_rows.append({
+            "name": str(name),
+            "trades": n,
+            "win_rate": float(st.get("wins", 0) or 0) / n * 100.0,
+            "avg_pnl": float(st.get("avg_pnl", 0.0) or 0.0),
+            "weight": float(st.get("weight", 1.0) or 1.0),
+        })
+    return {
+        "trades": len(trades),
+        "learning_events": len(events),
+        "improvement_events": len(improvements),
+        "engines": engine_rows,
+        "recent_learning": list(reversed(events[-5:])),
+        "recent_improvements": list(reversed(improvements[-5:])),
     }
 
 _load_learning_state()
@@ -5032,6 +5099,7 @@ def _persistent_bottom_keyboard(is_admin=False):
             [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
             [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"],
             [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
+            ["📚 حافظه یادگیری و بهبود"],
             ["🎁 عضویت رایگان کاربر"],
         ]
     return ReplyKeyboardMarkup(
@@ -5116,6 +5184,7 @@ def _control_keyboard():
         [InlineKeyboardButton("📊 داشبورد PRO MAX", callback_data="v7_dashboard")],
                         [InlineKeyboardButton("🧪 اعتبارسنجی V10", callback_data="v10_validation")],
                         [InlineKeyboardButton("🧠 تحلیل داده‌محور V11", callback_data="v11_data")],
+                        [InlineKeyboardButton("📚 حافظه یادگیری و بهبود", callback_data="learning_memory")],
                         [InlineKeyboardButton("🩺 عیب‌یابی واقعی سیگنال", callback_data="v12_real_audit")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ]
@@ -5526,6 +5595,22 @@ def start_telegram_bot():
                 )
                 return
 
+            if label == "📚 حافظه یادگیری و بهبود":
+                if not is_admin:
+                    await msg.reply_text("⛔ فقط ادمین.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                mem = learning_memory_report()
+                await msg.reply_text(
+                    "📚 حافظه دائمی یادگیری و بهبود\n\n"
+                    f"🧠 یادگیری‌های ثبت‌شده: {mem['learning_events']}\n"
+                    f"🛠️ بهبودهای ثبت‌شده: {mem['improvement_events']}\n"
+                    f"📊 معاملات مبنا: {mem['trades']}\n\n"
+                    "💾 این اطلاعات خارج از کد و در فایل‌های حافظه ذخیره می‌شود؛ "
+                    "با Restart یا بارگذاری کد اصلاح‌شده حفظ می‌گردد.",
+                    reply_markup=_persistent_bottom_keyboard(True)
+                )
+                return
+
             # Automatic improvement: limited surface-level adaptation only.
             if label.startswith("🛠️ بهبود خودکار:"):
                 if not is_admin:
@@ -5758,6 +5843,68 @@ def start_telegram_bot():
                     "فیلتر کیفیت را ضعیف نمی‌کند.",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
+                    ])
+                )
+                return
+
+            elif data == "learning_memory":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                mem = await _tg_bg(learning_memory_report)
+                lines = [
+                    "📚 **حافظه دائمی یادگیری و بهبود**",
+                    "",
+                    f"🧠 یادگیری‌های ثبت‌شده: `{mem['learning_events']}`",
+                    f"🛠️ بهبودهای ثبت‌شده: `{mem['improvement_events']}`",
+                    f"📊 معاملات مبنای یادگیری: `{mem['trades']}`",
+                    "",
+                    "⚙️ **وزن موتورهای یادگرفته‌شده**",
+                ]
+                if mem["engines"]:
+                    for e in mem["engines"][:10]:
+                        lines.append(
+                            f"• {e['name']}: `{e['trades']}` معامله | "
+                            f"WR `{e['win_rate']:.1f}%` | میانگین `{e['avg_pnl']:+.2f}%` | "
+                            f"وزن `{e['weight']:.3f}`"
+                        )
+                else:
+                    lines.append("• هنوز داده واقعی برای یادگیری ثبت نشده.")
+                lines += ["", "🧠 **آخرین چیزهایی که یاد گرفته**"]
+                if mem["recent_learning"]:
+                    for e in mem["recent_learning"]:
+                        engines = ", ".join(e.get("engines") or ["UNKNOWN"])
+                        lines.append(
+                            f"• `{e.get('symbol','-')}` | PnL `{float(e.get('pnl_pct',0)):+.2f}%` | "
+                            f"موتورها: {engines}"
+                        )
+                        lines.append(f"  ↳ {e.get('lesson','')}")
+                else:
+                    lines.append("• هنوز یادگیری ثبت نشده.")
+                lines += ["", "🛠️ **آخرین بهبودهای اعمال‌شده**"]
+                if mem["recent_improvements"]:
+                    for e in mem["recent_improvements"]:
+                        changes = e.get("changes") or []
+                        change_text = " | ".join(
+                            f"{c.get('engine')}: {c.get('old_weight',1):.3f}→{c.get('new_weight',1):.3f}"
+                            for c in changes[:5]
+                        )
+                        lines.append(f"• `{e.get('symbol','-')}` | PnL `{float(e.get('pnl_pct',0)):+.2f}%`")
+                        lines.append(f"  ↳ {change_text or e.get('description','')}")
+                else:
+                    lines.append("• هنوز بهبود وزنی ثبت نشده.")
+                lines += [
+                    "",
+                    "💾 حافظه خارج از کد ذخیره می‌شود؛ با Restart یا جایگزینی فایل Python پاک نمی‌شود.",
+                    "⚠️ فقط حذف فایل‌های حافظه یا پاک‌شدن دیسک محل اجرا باعث از دست رفتن آن می‌شود.",
+                ]
+                await q.edit_message_text(
+                    "\n".join(lines),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 بروزرسانی حافظه", callback_data="learning_memory")],
+                        [InlineKeyboardButton("🧠 V11", callback_data="v11_data")],
                         [InlineKeyboardButton("🔙 بازگشت", callback_data="controls")]
                     ])
                 )
@@ -6189,11 +6336,11 @@ if __name__ == "__main__":
     logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
     _load_channel_config()
     _load_trade_limit()
-    # وضعیت کلید Diagnostic از DB برمی‌گردد؛ اگر قبلاً تنظیم نشده باشد روشن است.
+    # وضعیت کلید Diagnostic از DB برمی‌گردد؛ اگر قبلاً تنظیم نشده باشد خاموش است.
     try:
-        MASTER_DIAGNOSTIC_ENABLED = str(_get_bot_setting("master_diagnostic_enabled", "1")).strip() not in ("0", "false", "off")
+        MASTER_DIAGNOSTIC_ENABLED = str(_get_bot_setting("master_diagnostic_enabled", "0")).strip() not in ("0", "false", "off")
     except Exception:
-        MASTER_DIAGNOSTIC_ENABLED = True
+        MASTER_DIAGNOSTIC_ENABLED = False
     # وضعیت Master از آخرین تنظیم پنل برمی‌گردد؛ اگر قبلاً ذخیره نشده بود خاموش می‌ماند.
     try:
         MASTER_SIGNAL_ENABLED = str(_get_bot_setting("master_signal_enabled", "0")).strip() not in ("0", "false", "off")
@@ -6255,7 +6402,32 @@ PRO_TRADER_LEARNING_ENABLED = True
 PRO_TRADER_AUTO_IMPROVEMENT_ENABLED = False
 PRO_TRADER_CACHE_CLEANUP_DAYS = 30
 PRO_TRADER_MIN_PATTERN_SAMPLES = 8
+PRO_TRADER_MEMORY_FILE = "pro_trader_memory.json"
 PRO_TRADER_MEMORY = {"patterns": {}, "regimes": {}, "engines": {}, "last_cleanup": 0.0}
+
+def _pro_memory_load():
+    global PRO_TRADER_MEMORY
+    try:
+        p = Path(PRO_TRADER_MEMORY_FILE)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for key in ("patterns", "regimes", "engines"):
+                    if isinstance(data.get(key), dict):
+                        PRO_TRADER_MEMORY[key] = data[key]
+                PRO_TRADER_MEMORY["last_cleanup"] = float(data.get("last_cleanup", 0) or 0)
+    except Exception as e:
+        logger.warning(f"Pro trader memory load failed: {e}")
+
+def _pro_memory_save():
+    try:
+        tmp = Path(PRO_TRADER_MEMORY_FILE + ".tmp")
+        tmp.write_text(json.dumps(PRO_TRADER_MEMORY, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(PRO_TRADER_MEMORY_FILE)
+    except Exception as e:
+        logger.warning(f"Pro trader memory save failed: {e}")
+
+_pro_memory_load()
 
 def _pro_regime(pair):
     try:
@@ -6316,6 +6488,7 @@ def _pro_learn_closed_trade(position, exit_price, reason=""):
         if pnl > 0: r["wins"] += 1
         elif pnl < 0: r["losses"] += 1
         r["pnl_sum"] += pnl
+        _pro_memory_save()
     except Exception:
         pass
 
