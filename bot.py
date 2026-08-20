@@ -161,12 +161,12 @@ DYNAMIC_TRAILING_TP_ENABLED = True
 # مدیریت سود پله‌ای بر پایه سقف سود: حدضرر فقط بالا می‌رود و هیچ‌وقت پایین نمی‌آید.
 # مثال: اگر سقف سود به +1000% برسد، حدضرر روی حدود +950% قفل می‌شود.
 TRAILING_LOCK_TABLE = (
-    # قفل سود نزدیک‌تر: کف سود فقط بالا می‌رود و هیچ‌وقت پایین نمی‌آید.
-    # مثال: سقف +13.52% => کف سود +10.00%؛ برگشت به +10% یا پایین‌تر => خروج.
+    # قفل سود از +8% شروع می‌شود و فقط رو به بالا حرکت می‌کند.
+    # قبل از +8% هیچ قفل سودی فعال نیست.
     (1000.0, 950.0), (750.0, 650.0), (500.0, 350.0), (300.0, 230.0),
     (200.0, 155.0), (150.0, 110.0), (100.0, 75.0), (75.0, 55.0),
-    (50.0, 35.0), (40.0, 28.0), (30.0, 20.0), (25.0, 16.0), (20.0, 13.0),
-    (15.0, 10.0), (13.0, 10.0), (12.0, 8.0), (10.0, 6.0), (8.0, 4.0),
+    (50.0, 35.0), (40.0, 30.0), (30.0, 22.0), (25.0, 18.0), (20.0, 14.0),
+    (15.0, 10.0), (12.0, 8.0), (10.0, 6.0), (8.0, 4.0),
 )
 
 # بعد از آخرین پله هم قفل سود ادامه دارد؛ سقف مصنوعی ندارد.
@@ -185,9 +185,9 @@ TRAILING_WEAKNESS_ENABLED = True
 TRAILING_WEAK_SELL_RATIO = 1.45
 TRAILING_WEAKNESS_M5_MAX = 0.0
 TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT = 1.5
-# TP فقط تارگت نمایشی/مرجع است؛ لمس TP باعث فروش فوری نمی‌شود.
-# پوزیشن تا زمان فعال‌شدن قفل سود، ریزش از سقف/ضعف بازار، یا SL اولیه باز می‌ماند.
-EXIT_ON_TP_HIT = False
+# وقتی قیمت به TP اسمی رسید، خروج واقعی/سیگنال خروج انجام می‌شود.
+# Trailing همچنان برای مدیریت پوزیشن‌هایی که هنوز به TP نرسیده‌اند فعال می‌ماند.
+EXIT_ON_TP_HIT = True
    
 
 SECTION_ULTRA_OPEN = True
@@ -1728,15 +1728,16 @@ def evaluate_signal_only_positions():
             pnl = ((current_price - entry) / entry) * 100.0
             locked_floor, weakness = _update_trailing_state(pos, current_price, pnl, pair)
 
-            # TP صرفاً مرجع است و نباید باعث فروش فوری شود.
-            # پوزیشن باید باز بماند تا trailing/قفل سود یا SL اولیه خروج را فعال کند.
+            # TP یک خروج واقعی است؛ trailing فقط نقش مدیریت پوزیشن قبل از رسیدن به TP
+            # و محافظت از سودهای بالاتر را دارد. این تغییر مسیر تولید BUY را دست نمی‌زند.
             should_close = False
             outcome = "SIGNAL_TP"
             tp_target = float(pos.get("tp", 0) or 0)
-            if pnl <= float(pos.get("sl", -8.0)) and pos.get("highest_pnl", 0) < 10:
+            # TP اسمی دیگر خروج فوری نیست؛ از +8% به بعد قفل سود پله‌ای مدیریت می‌کند.
+            if pnl <= float(pos.get("sl", -8.0)) and pos.get("highest_pnl", 0) < 8:
                 should_close = True
                 outcome = "SIGNAL_SL"
-            elif pnl <= locked_floor and pos.get("highest_pnl", 0) >= 10:
+            elif pnl <= locked_floor and pos.get("highest_pnl", 0) >= 8:
                 should_close = True
                 outcome = "SIGNAL_TP"
             elif weakness and pnl <= locked_floor:
@@ -1775,11 +1776,6 @@ def check_positions_loop():
             with state_lock:
                 current_positions = list(active_positions.items())
 
-            # تمام پوزیشن‌های باز در هر دور مستقل از هم بررسی می‌شوند.
-            # بسته‌شدن یک پوزیشن هیچ‌وقت مانیتورینگ بقیه را متوقف نمی‌کند.
-            if current_positions:
-                logger.info(f"🔎 مانیتور پوزیشن‌ها: {len(current_positions)} پوزیشن باز در حال بررسی مداوم")
-
             for token_addr, pos in current_positions:
                 try:
                     res = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4)
@@ -1804,15 +1800,15 @@ def check_positions_loop():
                     pos["p_change"] = float(pair.get("priceChange", {}).get("m5") or 0.0)
                     highest_pnl = float(pos.get("highest_pnl", pnl_percent))
 
-                    # TP فقط مرجع است؛ بعد از رسیدن به آن پوزیشن نگه داشته می‌شود.
-                    # هرچه سقف سود بالاتر برود، locked_floor نیز پله‌به‌پله بالاتر می‌رود
-                    # و فقط برگشت قیمت تا کف قفل‌شده باعث فروش می‌شود.
+                    # اگر به سقف‌های بسیار بزرگ رسید، حدضرر نیز همراه آن بالا می‌رود.
+                    # نمونه: +1000% => حدود +950%؛ +500% => حدود +430%.
                     should_exit = False
                     tp_target = float(pos.get("tp", 0) or 0)
-                    if pnl_percent <= sl and highest_pnl < 10.0:
+                    # TP اسمی خروج فوری نیست؛ پوزیشن تا برگشت به کف قفل سود مدیریت می‌شود.
+                    if pnl_percent <= sl and highest_pnl < 8.0:
                         should_exit = True
                         exit_reason_text = "فروش خودکار حد ضرر اولیه (SL) فعال شد 🛑"
-                    elif pnl_percent <= locked_floor and highest_pnl >= 10.0:
+                    elif pnl_percent <= locked_floor and highest_pnl >= 8.0:
                         should_exit = True
                         exit_reason_text = (
                             f"قفل سود فعال شد؛ سقف سود {highest_pnl:+.2f}% "
