@@ -5853,6 +5853,21 @@ def start_telegram_bot():
         app.run_polling(drop_pending_updates=False)
     except Exception as e: logger.exception(f"Telegram bot runtime error: {e}")
 
+def pro_trader_cache_maintenance_loop():
+    """Monthly cache maintenance only; never deletes trade/learning databases."""
+    while True:
+        try:
+            now = time.time()
+            last = float(PRO_TRADER_MEMORY.get("last_cleanup", 0.0) or 0.0)
+            if now - last >= PRO_TRADER_CACHE_CLEANUP_DAYS * 86400:
+                _pro_cache_cleanup()
+                # Keep persistent learning files and DB untouched.
+                logger.info("🧹 Professional-trader temporary cache cleaned; persistent learning retained.")
+        except Exception as exc:
+            logger.debug("Professional cache maintenance error: %s", exc)
+        time.sleep(3600)
+
+
 if __name__ == "__main__":
     logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
     _load_channel_config()
@@ -6010,21 +6025,6 @@ PRO_TRADER_PANEL_CONTROLS = {
     "PRO_TRADER_AUTO_IMPROVEMENT_ENABLED": False,
 }
 # =====================================================================
-
-
-def pro_trader_cache_maintenance_loop():
-    """Monthly cache maintenance only; never deletes trade/learning databases."""
-    while True:
-        try:
-            now = time.time()
-            last = float(PRO_TRADER_MEMORY.get("last_cleanup", 0.0) or 0.0)
-            if now - last >= PRO_TRADER_CACHE_CLEANUP_DAYS * 86400:
-                _pro_cache_cleanup()
-                # Keep persistent learning files and DB untouched.
-                logger.info("🧹 Professional-trader temporary cache cleaned; persistent learning retained.")
-        except Exception as exc:
-            logger.debug("Professional cache maintenance error: %s", exc)
-        time.sleep(3600)
 
 
 
