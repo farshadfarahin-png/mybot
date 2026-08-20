@@ -66,7 +66,7 @@ VIP_PRICE_USDC = 50.0
 COPY_TRADING_FEE_PERCENT = 1.0  
 COPY_DEFAULT_ASSET = "USDC"
 UNIFIED_ENGINE_NAME = "🤖⚡ هالک AI — موتور متحد بازار"
-BOT_BUILD_VERSION = "V30-MASTER-ULTIMATE-BATCH-VIP-2026"
+BOT_BUILD_VERSION = "V31-PRO-TRADER-SAFE-LAYER-2026"
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -161,12 +161,12 @@ DYNAMIC_TRAILING_TP_ENABLED = True
 # مدیریت سود پله‌ای بر پایه سقف سود: حدضرر فقط بالا می‌رود و هیچ‌وقت پایین نمی‌آید.
 # مثال: اگر سقف سود به +1000% برسد، حدضرر روی حدود +950% قفل می‌شود.
 TRAILING_LOCK_TABLE = (
-    # قفل سود از +8% شروع می‌شود و فقط رو به بالا حرکت می‌کند.
-    # قبل از +8% هیچ قفل سودی فعال نیست.
+    # قفل سود نزدیک‌تر: کف سود فقط بالا می‌رود و هیچ‌وقت پایین نمی‌آید.
+    # مثال: سقف +13.52% => کف سود +10.00%؛ برگشت به +10% یا پایین‌تر => خروج.
     (1000.0, 950.0), (750.0, 650.0), (500.0, 350.0), (300.0, 230.0),
     (200.0, 155.0), (150.0, 110.0), (100.0, 75.0), (75.0, 55.0),
-    (50.0, 35.0), (40.0, 30.0), (30.0, 22.0), (25.0, 18.0), (20.0, 14.0),
-    (15.0, 10.0), (12.0, 8.0), (10.0, 6.0), (8.0, 4.0),
+    (50.0, 35.0), (40.0, 28.0), (30.0, 20.0), (25.0, 16.0), (20.0, 13.0),
+    (15.0, 10.0), (13.0, 10.0), (12.0, 8.0), (10.0, 6.0), (8.0, 4.0),
 )
 
 # بعد از آخرین پله هم قفل سود ادامه دارد؛ سقف مصنوعی ندارد.
@@ -307,6 +307,14 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS ai_learning_params (
                     param_name TEXT PRIMARY KEY,
                     param_value REAL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS open_positions (
+                    token_address TEXT PRIMARY KEY,
+                    position_json TEXT NOT NULL,
+                    position_type TEXT NOT NULL DEFAULT 'REAL',
+                    updated_at REAL NOT NULL
                 )
             """)
             conn.commit()
@@ -1697,14 +1705,16 @@ def _update_trailing_state(pos, current_price, pnl_percent, pair):
 
 def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_change,
                       reason, buy_amt, buy_status):
+    pos = {
+        "entry_price": price, "symbol": symbol, "tp": tp, "sl": sl,
+        "volume": volume, "liquidity": liquidity, "p_change": p_change,
+        "reason": reason, "buy_amt": buy_amt, "buy_status": buy_status,
+        "created_at": time.time(), "highest_pnl": 0.0, "highest_price": price,
+        "locked_floor": sl, "trailing_active": True, "side": "BUY"
+    }
     with state_lock:
-        signal_positions[token_addr] = {
-            "entry_price": price, "symbol": symbol, "tp": tp, "sl": sl,
-            "volume": volume, "liquidity": liquidity, "p_change": p_change,
-            "reason": reason, "buy_amt": buy_amt, "buy_status": buy_status,
-            "created_at": time.time(), "highest_pnl": 0.0, "highest_price": price,
-            "locked_floor": sl, "trailing_active": True, "side": "BUY"
-        }
+        signal_positions[token_addr] = pos
+    _persist_open_position(token_addr, pos, "SIGNAL")
 
 def evaluate_signal_only_positions():
     finished = []
@@ -1727,17 +1737,19 @@ def evaluate_signal_only_positions():
                 continue
             pnl = ((current_price - entry) / entry) * 100.0
             locked_floor, weakness = _update_trailing_state(pos, current_price, pnl, pair)
+            _persist_open_position(token_addr, pos, "SIGNAL")
 
             # TP یک خروج واقعی است؛ trailing فقط نقش مدیریت پوزیشن قبل از رسیدن به TP
             # و محافظت از سودهای بالاتر را دارد. این تغییر مسیر تولید BUY را دست نمی‌زند.
             should_close = False
             outcome = "SIGNAL_TP"
             tp_target = float(pos.get("tp", 0) or 0)
-            # TP اسمی دیگر خروج فوری نیست؛ از +8% به بعد قفل سود پله‌ای مدیریت می‌کند.
+            # TP is a milestone, not an automatic sale. Profit-lock/trailing owns the exit.
             if pnl <= float(pos.get("sl", -8.0)) and pos.get("highest_pnl", 0) < 8:
+
                 should_close = True
                 outcome = "SIGNAL_SL"
-            elif pnl <= locked_floor and pos.get("highest_pnl", 0) >= 8:
+            elif pnl <= locked_floor and pos.get("highest_pnl", 0) >= 10:
                 should_close = True
                 outcome = "SIGNAL_TP"
             elif weakness and pnl <= locked_floor:
@@ -1799,16 +1811,20 @@ def check_positions_loop():
                     pos["liquidity"] = float((pair.get("liquidity") or {}).get("usd") or 0.0)
                     pos["p_change"] = float(pair.get("priceChange", {}).get("m5") or 0.0)
                     highest_pnl = float(pos.get("highest_pnl", pnl_percent))
+                    # Persist the live trailing state so a restart does not forget a captured profit peak.
+                    pos["last_persisted_at"] = time.time()
+                    _persist_open_position(token_addr, pos, "REAL")
 
                     # اگر به سقف‌های بسیار بزرگ رسید، حدضرر نیز همراه آن بالا می‌رود.
                     # نمونه: +1000% => حدود +950%؛ +500% => حدود +430%.
                     should_exit = False
                     tp_target = float(pos.get("tp", 0) or 0)
-                    # TP اسمی خروج فوری نیست؛ پوزیشن تا برگشت به کف قفل سود مدیریت می‌شود.
+                    # TP is only a milestone. Do not sell at the first target.
+                    # The +8% profit-lock ladder/trailing manager decides the exit.
                     if pnl_percent <= sl and highest_pnl < 8.0:
                         should_exit = True
                         exit_reason_text = "فروش خودکار حد ضرر اولیه (SL) فعال شد 🛑"
-                    elif pnl_percent <= locked_floor and highest_pnl >= 8.0:
+                    elif pnl_percent <= locked_floor and highest_pnl >= 10.0:
                         should_exit = True
                         exit_reason_text = (
                             f"قفل سود فعال شد؛ سقف سود {highest_pnl:+.2f}% "
@@ -2005,15 +2021,19 @@ def advanced_filter_enabled():
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
 CONSENSUS_MIN_SCORE = 4.0
 CONSENSUS_MIN_RATIO = 0.55
-CONSENSUS_COOLDOWN_SECONDS = 120
+CONSENSUS_COOLDOWN_SECONDS = 20
 
 # Daily signal cap: editable from the management panel, 1..50. Default: 15.
 DAILY_SIGNAL_LIMIT = 25
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 3 * 60
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 15
 # Signal budget is capacity only; quality thresholds never depend on this value.
 SIGNAL_BUDGET_MIN = 1
 SIGNAL_BUDGET_MAX = 50
+# Final entry-safety guard: a BUY cannot execute when the 5m move is only
+# a 1-2% sideways fluctuation. This is applied after candidate generation
+# and quality scoring, so engine scoring/signal rules remain untouched.
+MIN_ENTRY_MOMENTUM_5M = 3.0
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
 CONSENSUS_MIN_LIQUIDITY = 25000.0
@@ -3285,6 +3305,14 @@ def send_fused_signal(token_addr, fusion):
             logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
             _audit_signal_decision("QUALITY_GATE_REJECTED")
             return False, "QUALITY_GATE_REJECTED"
+        # Final execution safety only: do not enter a token whose live 5m move
+        # is merely a 1-2% sideways fluctuation. Candidate generation/scoring
+        # remains untouched; this guard only prevents the actual BUY entry.
+        live_change_5m = float(fusion.get("chg", fusion.get("change_5m", 0.0)) or 0.0)
+        if live_change_5m < MIN_ENTRY_MOMENTUM_5M:
+            logger.info(f"Entry blocked for low momentum {token_addr}: 5m change={live_change_5m:.2f}% < {MIN_ENTRY_MOMENTUM_5M:.2f}%")
+            _audit_signal_decision("LOW_ENTRY_MOMENTUM")
+            return False, "LOW_ENTRY_MOMENTUM"
         now_global = time.time()
         # MAX is a single attack and therefore uses the global cooldown.
         # Outside MAX, Advanced/Hulk/individual engines have their own lane
@@ -3413,21 +3441,23 @@ def send_fused_signal(token_addr, fusion):
 
     if success:
         txlink = f"https://solscan.io/tx/{result}"
+        pos = {
+            "entry_price": price, "symbol": symbol,
+            "tp": tp, "sl": sl, "highest_price": price,
+            "highest_pnl": 0.0, "locked_floor": sl,
+            "trailing_active": DYNAMIC_TRAILING_TP_ENABLED,
+            "side": "BUY", "reason": f"{mode_name} | {reason}", "engines": engine_names, "engine_names": engine_names, "mode": mode_name, "opened_at": time.time(), "buy_amt": amount,
+            "entry_lock": True,
+            "volume": float(fusion.get("vol", 0.0) or 0.0),
+            "liquidity": float(fusion.get("liq", 0.0) or 0.0),
+            "p_change": float(fusion.get("chg", 0.0) or 0.0),
+            "buys_m5": int(fusion.get("buys", 0) or 0),
+            "sells_m5": int(fusion.get("sells", 0) or 0)
+        }
         with state_lock:
             processed_tokens.add(token_addr)
-            active_positions[token_addr] = {
-                "entry_price": price, "symbol": symbol,
-                "tp": tp, "sl": sl, "highest_price": price,
-                "highest_pnl": 0.0, "locked_floor": sl,
-                "trailing_active": DYNAMIC_TRAILING_TP_ENABLED,
-                "side": "BUY", "reason": f"{mode_name} | {reason}", "engines": engine_names, "engine_names": engine_names, "mode": mode_name, "opened_at": time.time(), "buy_amt": amount,
-                "entry_lock": True,
-                "volume": float(fusion.get("vol", 0.0) or 0.0),
-                "liquidity": float(fusion.get("liq", 0.0) or 0.0),
-                "p_change": float(fusion.get("chg", 0.0) or 0.0),
-                "buys_m5": int(fusion.get("buys", 0) or 0),
-                "sells_m5": int(fusion.get("sells", 0) or 0)
-            }
+            active_positions[token_addr] = pos
+        _persist_open_position(token_addr, pos, "REAL")
         # کپی‌ترید فقط بعد از خرید واقعی مرجع فعال می‌شود.
         trigger_copy_trading_for_subscribers(token_addr, amount, side="BUY", tx_signature=result)
         send_telegram_msg(
@@ -3480,8 +3510,70 @@ def _unlock_token_entry(token_addr):
     with state_lock:
         TOKEN_ENTRY_LOCKS.pop(token_addr, None)
 
+def _persist_open_position(token_addr, pos, position_type="REAL"):
+    """Persist an open position so a process restart can recover its exit management."""
+    if not token_addr or not isinstance(pos, dict):
+        return False
+    try:
+        payload = json.dumps(pos, ensure_ascii=False, separators=(",", ":"))
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            conn.execute(
+                "INSERT OR REPLACE INTO open_positions(token_address,position_json,position_type,updated_at) VALUES(?,?,?,?)",
+                (token_addr, payload, str(position_type), time.time())
+            )
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Open-position persist failed for {token_addr}: {e}")
+        return False
+
+
+def _delete_persisted_position(token_addr):
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            conn.execute("DELETE FROM open_positions WHERE token_address=?", (token_addr,))
+            conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Open-position delete failed for {token_addr}: {e}")
+        return False
+
+
+def _restore_open_positions():
+    """Recover real/signal-only position state before background monitors start."""
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            rows = conn.execute("SELECT token_address,position_json,position_type FROM open_positions").fetchall()
+            conn.close()
+        restored = 0
+        with state_lock:
+            for token_addr, raw, position_type in rows:
+                try:
+                    pos = json.loads(raw)
+                    if not isinstance(pos, dict) or float(pos.get("entry_price", 0) or 0) <= 0:
+                        continue
+                    if position_type == "SIGNAL":
+                        signal_positions[token_addr] = pos
+                    else:
+                        active_positions[token_addr] = pos
+                    TOKEN_ENTRY_LOCKS[token_addr] = {"status": "RECOVERED_OPEN", "opened_at": float(pos.get("opened_at", time.time()) or time.time())}
+                    restored += 1
+                except Exception as item_error:
+                    logger.warning(f"Could not restore open position {token_addr}: {item_error}")
+        if restored:
+            logger.warning(f"♻️ {restored} open position(s) restored; exit management continues after restart.")
+        return restored
+    except Exception as e:
+        logger.warning(f"Open-position recovery failed: {e}")
+        return 0
+
+
 def _mark_token_closed(token_addr):
-    # Release only after a complete exit.
+    # Release only after a complete exit. Persisted state is removed at the same moment.
+    _delete_persisted_position(token_addr)
     _unlock_token_entry(token_addr)
 
 
@@ -5778,8 +5870,11 @@ if __name__ == "__main__":
         MASTER_SIGNAL_ENABLED = False
         MASTER_SIGNAL_FIRE_NOW = False
     ensure_channel_invite_link()
+    # Recover open positions before any scanner starts. Signal switches do not control this manager.
+    _restore_open_positions()
 
     threads = [
+        Thread(target=pro_trader_cache_maintenance_loop, daemon=True, name="ProTraderCache"),
         Thread(target=self_learning_ai_optimizer_loop, daemon=True, name="AILearning"),
         # رادار واحد فقط یک Thread اجرایی دارد؛ رفتار آن بر اساس سه حالت اصلی تغییر می‌کند و خرید فقط از بهترین کاندیدای هر sweep انجام می‌شود.
         Thread(target=subscription_monitor_loop, daemon=True, name="SubMonitor"),
@@ -5816,7 +5911,175 @@ def learning_record_exit(token_addr, position, exit_price, reason=""):
             hold_seconds=max(0, int(time.time() - float(position.get("opened_at", time.time())))),
             regime=position.get("regime", "UNKNOWN")
         )
+        _pro_learn_closed_trade(position, exit_price, reason)
     except Exception as e:
         logger.warning(f"Learning exit bridge failed: {e}")
 
 
+
+
+# ================= PROFESSIONAL TRADER ADAPTIVE LAYER =================
+PRO_TRADER_LEARNING_ENABLED = True
+PRO_TRADER_AUTO_IMPROVEMENT_ENABLED = False
+PRO_TRADER_CACHE_CLEANUP_DAYS = 30
+PRO_TRADER_MIN_PATTERN_SAMPLES = 8
+PRO_TRADER_MEMORY = {"patterns": {}, "regimes": {}, "engines": {}, "last_cleanup": 0.0}
+
+def _pro_regime(pair):
+    try:
+        chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+        vol = float((pair.get("volume") or {}).get("m5", 0) or 0)
+        tx = (pair.get("txns") or {}).get("m5") or {}
+        buys, sells = int(tx.get("buys", 0) or 0), int(tx.get("sells", 0) or 0)
+        ratio = buys / max(1, sells)
+        if abs(chg) <= 1.5: return "RANGE"
+        if chg >= 5 and ratio >= 1.15: return "BULL"
+        if chg <= -5: return "BEAR"
+        if vol < 1000: return "LOW_VOL"
+        if abs(chg) >= 10: return "HIGH_VOL"
+        return "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+def _pro_entry_context(pair):
+    try:
+        chg = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+        tx = (pair.get("txns") or {}).get("m5") or {}
+        buys, sells = int(tx.get("buys", 0) or 0), int(tx.get("sells", 0) or 0)
+        ratio = buys / max(1, sells)
+        late = chg >= 18.0
+        return {"late_entry": late, "fomo_risk": bool(late and ratio < 1.10),
+                "buy_ratio": ratio, "m5_change": chg}
+    except Exception:
+        return {"late_entry": False, "fomo_risk": False, "buy_ratio": 0.0, "m5_change": 0.0}
+
+def _pro_pattern_key(pair, engine_name=""):
+    ctx = _pro_entry_context(pair)
+    regime = _pro_regime(pair)
+    chg_bucket = round(max(-20, min(50, ctx["m5_change"])) / 2) * 2
+    ratio_bucket = round(max(0, min(5, ctx["buy_ratio"])) * 2) / 2
+    return f"{engine_name}|{regime}|chg:{chg_bucket:.0f}|br:{ratio_bucket:.1f}|late:{int(ctx['late_entry'])}"
+
+def _pro_learn_closed_trade(position, exit_price, reason=""):
+    if not PRO_TRADER_LEARNING_ENABLED or not position: return
+    try:
+        entry = float(position.get("entry_price") or position.get("price") or 0)
+        exit_p = float(exit_price or 0)
+        if entry <= 0 or exit_p <= 0: return
+        pnl = (exit_p - entry) / entry * 100.0
+        names = position.get("engines") or position.get("engine_names") or ["UNKNOWN"]
+        if isinstance(names, str): names = [names]
+        pattern = position.get("pattern_key", "UNKNOWN")
+        regime = position.get("regime", "UNKNOWN")
+        b = PRO_TRADER_MEMORY["patterns"].setdefault(pattern, {"wins":0,"losses":0,"pnl_sum":0.0})
+        if pnl > 0: b["wins"] += 1
+        elif pnl < 0: b["losses"] += 1
+        b["pnl_sum"] += pnl
+        for name in names:
+            e = PRO_TRADER_MEMORY["engines"].setdefault(str(name), {"wins":0,"losses":0,"pnl_sum":0.0})
+            if pnl > 0: e["wins"] += 1
+            elif pnl < 0: e["losses"] += 1
+            e["pnl_sum"] += pnl
+        r = PRO_TRADER_MEMORY["regimes"].setdefault(regime, {"wins":0,"losses":0,"pnl_sum":0.0})
+        if pnl > 0: r["wins"] += 1
+        elif pnl < 0: r["losses"] += 1
+        r["pnl_sum"] += pnl
+    except Exception:
+        pass
+
+def _pro_learning_adjustment(position_or_pair):
+    try:
+        b = PRO_TRADER_MEMORY["patterns"].get(position_or_pair.get("pattern_key"), {})
+        n = int(b.get("wins",0)) + int(b.get("losses",0))
+        if n < PRO_TRADER_MIN_PATTERN_SAMPLES: return 0.0
+        wr = b.get("wins",0) / max(1,n)
+        return -5.0 if wr < 0.35 else (3.0 if wr > 0.70 else 0.0)
+    except Exception:
+        return 0.0
+
+def _pro_cache_cleanup():
+    try:
+        import gc
+        gc.collect()
+        PRO_TRADER_MEMORY["last_cleanup"] = time.time()
+    except Exception:
+        pass
+
+PRO_TRADER_PANEL_CONTROLS = {
+    "PRO_TRADER_LEARNING_ENABLED": True,
+    "PRO_TRADER_AUTO_IMPROVEMENT_ENABLED": False,
+}
+# =====================================================================
+
+
+def pro_trader_cache_maintenance_loop():
+    """Monthly cache maintenance only; never deletes trade/learning databases."""
+    while True:
+        try:
+            now = time.time()
+            last = float(PRO_TRADER_MEMORY.get("last_cleanup", 0.0) or 0.0)
+            if now - last >= PRO_TRADER_CACHE_CLEANUP_DAYS * 86400:
+                _pro_cache_cleanup()
+                # Keep persistent learning files and DB untouched.
+                logger.info("🧹 Professional-trader temporary cache cleaned; persistent learning retained.")
+        except Exception as exc:
+            logger.debug("Professional cache maintenance error: %s", exc)
+        time.sleep(3600)
+
+
+
+# ================= SAFE BOTTOM CONTROL MIRROR =================
+# Additive UI only: the original control panel remains untouched.
+def render_safe_bottom_control_mirror():
+    try:
+        import streamlit as st
+    except Exception:
+        return
+
+    st.markdown(
+        """
+        <style>
+        .safe-bottom-bar {
+            position: sticky;
+            bottom: 0;
+            z-index: 9999;
+            padding: 8px 6px 6px 6px;
+            margin-top: 12px;
+            background: rgba(255,255,255,.98);
+            border-top: 1px solid rgba(120,120,120,.25);
+            box-shadow: 0 -3px 12px rgba(0,0,0,.08);
+            border-radius: 10px 10px 0 0;
+        }
+        </style>
+        <div class="safe-bottom-bar"></div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption("کنترل سریع — پنل اصلی بدون تغییر")
+
+    # These are mirrors only when the corresponding existing session-state
+    # controls already exist. No new trading behavior is invented here.
+    keys = [
+        ("bot_running", "▶️ / ⏹️ ربات"),
+        ("learning_enabled", "🧠 یادگیری"),
+        ("auto_improvement_enabled", "🛠️ بهبود خودکار"),
+        ("signals_enabled", "📡 سیگنال"),
+    ]
+
+    existing = [(k, label) for k, label in keys if k in st.session_state]
+    if not existing:
+        return
+
+    cols = st.columns(len(existing))
+    changed = False
+    for col, (key, label) in zip(cols, existing):
+        with col:
+            current = bool(st.session_state.get(key, False))
+            new_value = st.toggle(label, value=current, key=f"safe_bottom_{key}")
+            if new_value != current:
+                st.session_state[key] = new_value
+                changed = True
+
+    if changed:
+        st.rerun()
+# =============================================================
