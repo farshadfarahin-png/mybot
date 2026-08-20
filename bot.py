@@ -141,6 +141,12 @@ MASTER_SIGNAL_ENABLED = False
 WALLET_TRADE_PERMISSION = False
 MASTER_SIGNAL_FIRE_NOW = False  # legacy UI pulse; never used as a signal source
 # کلید مستقل عیب‌یابی: فقط گزارش Diagnostic را کنترل می‌کند و روی تولید/اجرای سیگنال اثر ندارد.
+# ================= SAFE AI LEARNING CONTROLS =================
+# These switches affect only the learning/adaptation layer.
+# They do NOT rewrite or disable the existing signal engines.
+AUTO_LEARNING_ENABLED = True
+AUTO_IMPROVEMENT_ENABLED = False
+# ==============================================================
 MASTER_DIAGNOSTIC_ENABLED = True
 COPY_TRADING_ENABLED = True
 _MAX_FUSION_PREV = None
@@ -5024,6 +5030,8 @@ def _persistent_bottom_keyboard(is_admin=False):
             ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"],
             [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"],
             [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
+            [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"],
+            [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
             ["🎁 عضویت رایگان کاربر"],
         ]
     return ReplyKeyboardMarkup(
@@ -5288,6 +5296,7 @@ def start_telegram_bot():
             """
             global MASTER_SIGNAL_ENABLED, MASTER_SIGNAL_FIRE_NOW
             global MASTER_DIAGNOSTIC_ENABLED, ANALYSIS_ENGINE_ENABLED
+            global AUTO_LEARNING_ENABLED, AUTO_IMPROVEMENT_ENABLED
 
             msg = update.message
             if not msg or not msg.text:
@@ -5499,6 +5508,34 @@ def start_telegram_bot():
                 ANALYSIS_ENGINE_ENABLED = not ANALYSIS_ENGINE_ENABLED
                 await msg.reply_text(
                     f"📈 **موتور تحلیل:** {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}",
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Automatic learning: records/uses experience only.
+            if label.startswith("🧠 یادگیری خودکار:"):
+                if not is_admin:
+                    await msg.reply_text("⛔ فقط ادمین.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                AUTO_LEARNING_ENABLED = not AUTO_LEARNING_ENABLED
+                await msg.reply_text(
+                    f"🧠 **یادگیری خودکار:** {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}\n\n"
+                    "این کلید فقط لایه یادگیری را کنترل می‌کند و به موتورهای اصلی سیگنال دست نمی‌زند.",
+                    reply_markup=_persistent_bottom_keyboard(True),
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Automatic improvement: limited surface-level adaptation only.
+            if label.startswith("🛠️ بهبود خودکار:"):
+                if not is_admin:
+                    await msg.reply_text("⛔ فقط ادمین.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                AUTO_IMPROVEMENT_ENABLED = not AUTO_IMPROVEMENT_ENABLED
+                await msg.reply_text(
+                    f"🛠️ **بهبود خودکار:** {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}\n\n"
+                    "فقط تنظیمات سطحی/کم‌خطر مجاز است؛ هسته سیگنال، منطق خرید/فروش و موتورهای اصلی خودکار بازنویسی نمی‌شوند.",
+                    reply_markup=_persistent_bottom_keyboard(True),
                     parse_mode="Markdown"
                 )
                 return
