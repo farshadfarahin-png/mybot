@@ -5030,7 +5030,7 @@ def _persistent_bottom_keyboard(is_admin=False):
         rows,
         resize_keyboard=True,
         one_time_keyboard=False,
-        is_persistent=True,
+        is_persistent=False,
         selective=False,
     )
 
@@ -5301,7 +5301,6 @@ def start_telegram_bot():
             if label == "📊 وضعیت موتورها":
                 await msg.reply_text(
                     "🎛 **وضعیت موتورهای هوشمند**\n\n" + _engine_status_lines(),
-                    reply_markup=_persistent_bottom_keyboard(is_admin),
                     parse_mode="Markdown"
                 )
                 return
@@ -5310,8 +5309,7 @@ def start_telegram_bot():
             if label == "💼 وضعیت ولت":
                 if not is_admin:
                     await msg.reply_text(
-                        "⛔ اطلاعات ولت اصلی خصوصی است.",
-                        reply_markup=_persistent_bottom_keyboard(is_admin)
+                        "⛔ اطلاعات ولت اصلی خصوصی است."
                     )
                     return
                 sol_balance = await _tg_bg(get_sol_balance)
@@ -5324,7 +5322,6 @@ def start_telegram_bot():
                     f"💼 **ولت اصلی**\n\n"
                     f"💰 موجودی SOL: `{sol_balance:.6f}`\n"
                     f"🔐 مجوز معامله: {wallet_state}",
-                    reply_markup=_persistent_bottom_keyboard(is_admin),
                     parse_mode="Markdown"
                 )
                 return
@@ -5338,7 +5335,6 @@ def start_telegram_bot():
                     f"Win Rate: `{a['win_rate']:.2f}%`\n"
                     f"سود/زیان: `{a['total_pct']:+.2f}%`\n"
                     f"P/L: `${a['total_usd']:+.2f}`",
-                    reply_markup=_persistent_bottom_keyboard(is_admin),
                     parse_mode="Markdown"
                 )
                 return
@@ -5347,8 +5343,7 @@ def start_telegram_bot():
             if label == "🎛 کنترل موتورها":
                 if not is_admin:
                     await msg.reply_text(
-                        "⛔ این بخش فقط برای ادمین است.",
-                        reply_markup=_persistent_bottom_keyboard(False)
+                        "⛔ این بخش فقط برای ادمین است."
                     )
                     return
                 await msg.reply_text(
@@ -5388,7 +5383,7 @@ def start_telegram_bot():
             # کلید اصلی BUY/SELL — همان منطق فعلی
             if label.startswith("🔘 سیگنال BUY/SELL:"):
                 if not is_admin:
-                    await msg.reply_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_persistent_bottom_keyboard(False))
+                    await msg.reply_text("⛔ این کلید فقط برای ادمین است.")
                     return
                 MASTER_SIGNAL_ENABLED = not MASTER_SIGNAL_ENABLED
                 MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
@@ -5404,7 +5399,6 @@ def start_telegram_bot():
                 )
                 await msg.reply_text(
                     message,
-                    reply_markup=_persistent_bottom_keyboard(True),
                     parse_mode="Markdown"
                 )
                 return
@@ -5412,7 +5406,7 @@ def start_telegram_bot():
             # Diagnostic
             if label.startswith("🩺 عیب‌یابی سیگنال:"):
                 if not is_admin:
-                    await msg.reply_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_persistent_bottom_keyboard(False))
+                    await msg.reply_text("⛔ این کلید فقط برای ادمین است.")
                     return
                 MASTER_DIAGNOSTIC_ENABLED = not MASTER_DIAGNOSTIC_ENABLED
                 _set_bot_setting(
@@ -5441,7 +5435,6 @@ def start_telegram_bot():
                     )
                 await msg.reply_text(
                     message,
-                    reply_markup=_persistent_bottom_keyboard(True),
                     parse_mode="Markdown"
                 )
                 return
@@ -5449,7 +5442,7 @@ def start_telegram_bot():
             # Signal glass: همان پنل فعلی را باز می‌کند.
             if label == "🪟🔮 کنترل شیشه‌ای کامل سیگنال":
                 if not is_admin:
-                    await msg.reply_text("⛔ این بخش فقط برای ادمین است.", reply_markup=_persistent_bottom_keyboard(False))
+                    await msg.reply_text("⛔ این بخش فقط برای ادمین است.")
                     return
                 await msg.reply_text(
                     _signal_glass_summary(),
@@ -5461,27 +5454,25 @@ def start_telegram_bot():
             # Admin / security
             if label == "👑 پنل مدیریت":
                 if not is_admin:
-                    await msg.reply_text("⛔ دسترسی غیرمجاز.", reply_markup=_persistent_bottom_keyboard(False))
+                    await msg.reply_text("⛔ دسترسی غیرمجاز.")
                     return
                 await msg.reply_text(
                     f"👑 **پنل مدیریت**\n\n"
                     f"کاربران: `{len(get_all_subscribers())}`\n"
                     f"معاملات: `{get_advanced_trade_analytics()['total_trades']}`",
-                    reply_markup=_persistent_bottom_keyboard(True),
                     parse_mode="Markdown"
                 )
                 return
 
             if label == "🔐 امنیت/وضعیت":
                 if not is_admin:
-                    await msg.reply_text("⛔ فقط ادمین.", reply_markup=_persistent_bottom_keyboard(False))
+                    await msg.reply_text("⛔ فقط ادمین.")
                     return
                 await msg.reply_text(
                     f"🔐 **امنیت**\n\n"
                     f"Private Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\n"
                     f"RPCها: `{len(RPC_ENDPOINTS)}`\n"
                     f"Admin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",
-                    reply_markup=_persistent_bottom_keyboard(True),
                     parse_mode="Markdown"
                 )
                 return
@@ -5489,14 +5480,13 @@ def start_telegram_bot():
             # Daily limit: existing manual-input handler will receive the number.
             if label.startswith("🎯 سقف روزانه"):
                 if not is_admin:
-                    await msg.reply_text("⛔ دسترسی غیرمجاز.", reply_markup=_persistent_bottom_keyboard(False))
+                    await msg.reply_text("⛔ دسترسی غیرمجاز.")
                     return
                 context.user_data["awaiting_daily_signal_limit"] = True
                 await msg.reply_text(
                     f"🎯 **سقف روزانه سیگنال**\n\n"
                     f"مقدار فعلی: `{daily_signal_status_text()}`\n"
                     "یک عدد بین `1` تا `50` بفرست.",
-                    reply_markup=_persistent_bottom_keyboard(True),
                     parse_mode="Markdown"
                 )
                 return
@@ -5504,12 +5494,11 @@ def start_telegram_bot():
             # Analysis engine: same variable, same switch semantics.
             if label.startswith("📈 موتور تحلیل:"):
                 if not is_admin:
-                    await msg.reply_text("⛔ فقط ادمین.", reply_markup=_persistent_bottom_keyboard(False))
+                    await msg.reply_text("⛔ فقط ادمین.")
                     return
                 ANALYSIS_ENGINE_ENABLED = not ANALYSIS_ENGINE_ENABLED
                 await msg.reply_text(
                     f"📈 **موتور تحلیل:** {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}",
-                    reply_markup=_persistent_bottom_keyboard(True),
                     parse_mode="Markdown"
                 )
                 return
@@ -5517,11 +5506,10 @@ def start_telegram_bot():
             # Free users
             if label == "🎁 عضویت رایگان کاربر":
                 if not is_admin:
-                    await msg.reply_text("⛔ دسترسی غیرمجاز.", reply_markup=_persistent_bottom_keyboard(False))
+                    await msg.reply_text("⛔ دسترسی غیرمجاز.")
                     return
                 await msg.reply_text(
                     _admin_free_panel_text(),
-                    reply_markup=_persistent_bottom_keyboard(True),
                     parse_mode="Markdown"
                 )
                 return
