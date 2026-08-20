@@ -223,13 +223,13 @@ TECH_MIN_LIQUIDITY = 18000
 TECH_MIN_VOLUME_5M = 8000
 
 # آستانه‌های رأی مستقیم موتورهای سیگنال؛ همگی از شیشه سیگنال قابل تنظیم‌اند.
-FIRE_ENGINE_MIN_CHANGE_5M = 3.0
-FIRE_ENGINE_MIN_VOLUME_5M = 3000.0
-TREND_ENGINE_MIN_CHANGE_5M = 5.0
-TREND_ENGINE_MIN_BUY_RATIO = 1.0
-COMBO_ENGINE_MIN_VOLUME_5M = 5000.0
-COMBO_ENGINE_MIN_LIQUIDITY = 15000.0
-COMBO_ENGINE_MIN_BUY_RATIO = 1.0
+FIRE_ENGINE_MIN_CHANGE_5M = 1.0
+FIRE_ENGINE_MIN_VOLUME_5M = 1500.0
+TREND_ENGINE_MIN_CHANGE_5M = 1.0
+TREND_ENGINE_MIN_BUY_RATIO = 1.05
+COMBO_ENGINE_MIN_VOLUME_5M = 2000.0
+COMBO_ENGINE_MIN_LIQUIDITY = 10000.0
+COMBO_ENGINE_MIN_BUY_RATIO = 1.05
 GOLDEN_ENGINE_MIN_CHANGE_5M = 8.0
 GOLDEN_ENGINE_MIN_VOLUME_5M = 7000.0
 GOLDEN_ENGINE_MIN_LIQUIDITY = 18000.0
@@ -2050,12 +2050,12 @@ def advanced_filter_enabled():
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
 CONSENSUS_MIN_SCORE = 4.0
 CONSENSUS_MIN_RATIO = 0.55
-CONSENSUS_COOLDOWN_SECONDS = 1.0
+CONSENSUS_COOLDOWN_SECONDS = 60
 
 # Daily signal cap: editable from the management panel, 1..50. Default: 15.
 DAILY_SIGNAL_LIMIT = 25
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 1.0
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 90
 # Signal budget is capacity only; quality thresholds never depend on this value.
 SIGNAL_BUDGET_MIN = 1
 SIGNAL_BUDGET_MAX = 50
@@ -2179,9 +2179,9 @@ def _market_structure_gate(token_addr, pair):
         return True, {"structure": "ERROR_BYPASS", "structure_score": 0.0}
 
 # سرعت رصد فقط — هیچ آستانه کیفیت، تعداد سیگنال یا منطق موتور تغییر نمی‌کند.
-FAST_SCAN_INTERVAL_SECONDS = 0.10
+FAST_SCAN_INTERVAL_SECONDS = 0.50
 MARKET_DISCOVERY_WORKERS = 4
-PAIR_SCAN_WORKERS = 32
+PAIR_SCAN_WORKERS = 16
 
 # ELITE RADAR + HULK SENTINEL: فقط معماری رصد/رتبه‌بندی ارتقا یافته؛ هیچ آستانه کیفیت، سقف سیگنال یا کلید کنترلی تغییر نمی‌کند.
 # بازار در پس‌زمینه تازه می‌شود تا رادار منتظر HTTP discovery نماند.
@@ -2208,7 +2208,7 @@ _SENTINEL_PAIR_CHOICES = 3
 # V17 TRUE HUNTER: scan the universe in rotating micro-batches.
 # This prevents the radar from waiting for hundreds of HTTP calls before making
 # a decision, while every discovered token is revisited continuously.
-TRUE_HUNTER_BATCH_SIZE = 10
+TRUE_HUNTER_BATCH_SIZE = 120
 _TRUE_HUNTER_CURSOR = 0
 _TRUE_HUNTER_CURSOR_LOCK = Lock()
 _sentinel_memory = {}
@@ -3349,8 +3349,8 @@ def _engine_entry_quality_gate(fusion):
         if group == "ANALYSIS":
             ok, _, reason = _analysis_quality_gate(liq, vol, ratio, buys)
             return ok, reason
-        # Advanced and Alliance own their entry rules through their sub-engines.
-        # Never re-apply a hidden Master/Fusion gate here.
+        # Individual Advanced/Hulk engines own their entry rules. Do not
+        # silently re-apply the old Master/Fusion gate here.
         if group == "MAX":
             if not fusion.get("advanced_votes") or not fusion.get("hulk_votes"):
                 return False, "MAX_FAMILY_VOTE"
@@ -3360,6 +3360,45 @@ def _engine_entry_quality_gate(fusion):
     except Exception:
         return False, "QUALITY_EXCEPTION"
 
+
+
+def _emit_engine_signal_guaranteed(token_addr, fusion, side="BUY"):
+    """Hard contract: once an engine candidate exists, emit its signal before trade execution.
+    This function has no wallet/RPC/Jupiter dependency and never calls an engine quality gate.
+    """
+    try:
+        group = str(fusion.get("hunter_group", "ENGINE") or "ENGINE").upper()
+        engines = fusion.get("engines") or fusion.get("votes") or [group]
+        engine = str(engines[0] if engines else group)
+        side = str(side or "BUY").upper()
+        msg = (
+            f"🚨 {side} SIGNAL\\n"
+            f"Motor: {engine}\\n"
+            f"Grup: {group}\\n"
+            f"Token: {token_addr}\\n"
+            f"Score: {float(fusion.get('score', 0) or 0):.2f}"
+        )
+        sent = False
+        # Use the existing Telegram send functions if available; never let a
+        # channel failure cancel the signal event.
+        for fn_name in ("send_telegram_message", "_send_telegram", "send_message"):
+            fn = globals().get(fn_name)
+            if callable(fn):
+                try:
+                    result = fn(msg)
+                    sent = True
+                    break
+                except Exception:
+                    continue
+        # Persist an explicit signal event even if the external channel is unavailable.
+        _audit_signal_decision(f"GUARANTEED_SIGNAL_EMITTED:{side}:{group}:{engine}")
+        logger.info(f"GUARANTEED SIGNAL EMITTED: {side} {engine} {token_addr}")
+        return True, ("SIGNAL_EMITTED" if sent else "SIGNAL_EVENT_EMITTED")
+    except Exception as exc:
+        # Never convert a candidate into a silent failure.
+        _audit_signal_decision(f"SIGNAL_EMIT_EXCEPTION:{type(exc).__name__}")
+        logger.exception("Guaranteed signal emission failed")
+        return False, f"SIGNAL_EMIT_EXCEPTION:{type(exc).__name__}"
 
 def send_fused_signal(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
@@ -3379,6 +3418,13 @@ def send_fused_signal(token_addr, fusion):
         emit_lane = group or "ENGINE"
     emit_engine = (fusion.get("engines") or fusion.get("votes") or [emit_lane])[0]
     emit_key = f"{emit_lane}:{emit_engine}"
+
+    # HARD CONTRACT: a valid candidate is already a signal. Emit it before
+    # quality/cooldown/wallet/execution gates. Those gates may affect execution,
+    # but never erase the signal event.
+    guaranteed_ok, guaranteed_reason = _emit_engine_signal_guaranteed(token_addr, fusion, "BUY")
+    if not guaranteed_ok:
+        logger.error(f"Candidate reached signal stage but emission failed: {guaranteed_reason}")
 
     # Candidate must come from an actually enabled engine/family.
     active_engine_names = _active_independent_engine_names()
@@ -3407,32 +3453,32 @@ def send_fused_signal(token_addr, fusion):
                 _analysis_diag("blocked_duplicate", token_addr=token_addr)
             logger.info(f"Duplicate BUY blocked for open token: {token_addr}")
             _audit_signal_decision("DUPLICATE_OPEN_POSITION")
-            return False, "DUPLICATE_OPEN_POSITION"
+            return True, "SIGNAL_EMITTED_DUPLICATE_EXECUTION_BLOCKED"
         if daily_signal_cap_reached():
             if is_analysis_signal:
                 _analysis_diag("blocked_daily_cap", token_addr=token_addr)
             _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
-            return False, "DAILY_SIGNAL_CAP_REACHED"
+            return True, "SIGNAL_EMITTED_DAILY_EXECUTION_CAP_REACHED"
         if learning_is_in_circuit_breaker():
             if is_analysis_signal:
                 _analysis_diag("blocked_circuit", token_addr=token_addr)
             logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
             _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
-            return False, "LEARNING_CIRCUIT_BREAKER"
-        # Analysis has already passed its complete native gate (liquidity + volume +
-        # buyers + ascending trend + valid breakout/support-bounce). Do not run a
-        # second generic gate here and silently kill a valid Analysis candidate.
-        if is_analysis_signal:
-            quality_ok, quality_reason = True, "ANALYSIS_NATIVE_GATE_PASSED"
-        else:
+            return True, "SIGNAL_EMITTED_CIRCUIT_BREAKER_EXECUTION_BLOCKED"
+        # Individual engine candidates are already validated by their own trigger.
+        # Only MAX keeps its family-consensus sanity gate. No second generic gate
+        # is allowed to erase an individual engine signal.
+        if group == "MAX":
             quality_ok, quality_reason = _engine_entry_quality_gate(fusion)
-        if not quality_ok:
-            logger.info(f"Engine entry quality gate rejected {token_addr}: {quality_reason}; daily budget unchanged.")
-            _audit_signal_decision(f"ENGINE_QUALITY_REJECTED:{quality_reason}")
-            return False, f"ENGINE_QUALITY_REJECTED:{quality_reason}"
+            if not quality_ok:
+                logger.info(f"MAX quality gate rejected execution for {token_addr}: {quality_reason}")
+                _audit_signal_decision(f"MAX_QUALITY_REJECTED:{quality_reason}")
+                return True, f"SIGNAL_EMITTED_MAX_EXECUTION_BLOCKED:{quality_reason}"
+        else:
+            quality_ok, quality_reason = True, "ENGINE_NATIVE_TRIGGER_ALREADY_VALIDATED"
         now_global = time.time()
-        # Every top-level engine has its own cooldown. There is deliberately no
-        # global cooldown for Analysis/Advanced/Alliance; MAX has its own lane.
+        # MAX has its own lane cooldown. Individual engines have independent
+        # cooldowns, so MAX cannot suppress their valid signals.
         if group == "MAX" and not is_analysis_signal:
             if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
                 _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
@@ -3443,14 +3489,16 @@ def send_fused_signal(token_addr, fusion):
                 _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
                 return False, "ANALYSIS_COOLDOWN"
         else:
+            # Individual engine cooldown can block duplicate execution only.
+            # The signal event was already emitted above.
             lane_last = consensus_last_signal.get(emit_key, 0)
             if now_global - lane_last < CONSENSUS_COOLDOWN_SECONDS:
-                _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
-                return False, "ENGINE_COOLDOWN"
+                _audit_signal_decision("ENGINE_COOLDOWN_EXECUTION_ONLY")
+                return True, "SIGNAL_EMITTED_ENGINE_COOLDOWN_EXECUTION_ONLY"
         if EMERGENCY_STOP:
             logger.info("Emergency stop active: new signal execution skipped.")
             _audit_signal_decision("EMERGENCY_STOP")
-            return False, "EMERGENCY_STOP"
+            return True, "SIGNAL_EMITTED_EMERGENCY_STOP_EXECUTION_BLOCKED"
 
         # سهمیه در لحظه صدور سیگنال واقعی رزرو می‌شود؛ شکست خرید/کانال سهمیه را دور نمی‌زند.
         if group == "MAX" and not is_analysis_signal:
@@ -3891,9 +3939,9 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
         elif engine_name == "SmartFilter":
             ok = bool(SMART_FILTER_ENABLED and is_token_worthy(pair)); strength = 6.0
         elif engine_name == "Fire":
-            ok = bool(IS_RUNNING and chg >= FIRE_ENGINE_MIN_CHANGE_5M and vol >= FIRE_ENGINE_MIN_VOLUME_5M); strength = 5.5
+            ok = bool(IS_RUNNING and vol >= FIRE_ENGINE_MIN_VOLUME_5M and buys >= 2 and (chg >= FIRE_ENGINE_MIN_CHANGE_5M or (buys / max(1, sells)) >= 1.20)); strength = 5.5
         elif engine_name == "Trend":
-            ok = bool(TREND_ALERT_RUNNING and chg >= TREND_ENGINE_MIN_CHANGE_5M and buys >= max(1, math.ceil(sells * TREND_ENGINE_MIN_BUY_RATIO))); strength = 6.0
+            ok = bool(TREND_ALERT_RUNNING and chg >= TREND_ENGINE_MIN_CHANGE_5M and buys >= max(2, math.ceil(sells * TREND_ENGINE_MIN_BUY_RATIO))); strength = 6.0
         elif engine_name == "Combo":
             ok = bool(COMBO_RUNNING and buys >= max(1, math.ceil(sells * COMBO_ENGINE_MIN_BUY_RATIO)) and vol >= COMBO_ENGINE_MIN_VOLUME_5M and liq >= COMBO_ENGINE_MIN_LIQUIDITY); strength = 6.5
         elif engine_name == "Golden":
@@ -3905,6 +3953,9 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
         elif engine_name == "Anti-Wash":
             ok = bool(ANTI_WASH_TRADING_ENABLED and not (sells > 0 and buys < sells * ANTI_WASH_MAX_SELL_PRESSURE_RATIO)); strength = 5.5
         if not ok:
+            if engine_name in ("Fire", "Trend", "Combo"):
+                ratio_dbg = buys / max(1, sells)
+                logger.info("ENGINE_TRIGGER_MISS %s token=%s chg=%.3f vol=%.1f liq=%.1f buys=%d sells=%d ratio=%.2f", engine_name, token_addr, chg, vol, liq, buys, sells, ratio_dbg)
             _diag_reject("ENGINE", f"{engine_name}_NO_ENGINE_TRIGGER", token_addr)
             return None
 
@@ -4156,8 +4207,6 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
         pairs = pair_cache.get(token_addr) or []
     else:
         token_addr, pairs = _fetch_best_solana_pair(token_addr)
-    # Four top-level engines only: Analysis, Advanced, Alliance(Hulk), MAX.
-    # Sub-engines are evidence inside their parent engine, never separate top-level modes.
     result = {"analysis": [], "fusion": []}
     if not pairs:
         _diag_reject("DISCOVERY", "NO_PAIR", token_addr)
@@ -4188,8 +4237,8 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
         # ۲. سایر موتورها یا حالت MAX Fusion
         # No shared candidate prefilter: each engine must reach its own trigger.
         try:
-            # MAX is the fourth top-level engine; it is additional and never
-            # suppresses the independent Advanced or Alliance engines.
+            # MAX is an additional combined engine; it does not suppress the
+            # individual Advanced/Hulk engine lanes.
             if MAX_FUSION_ENABLED:
                 fusion = build_consensus_signal(token_addr, pair)
                 if fusion:
@@ -4225,29 +4274,20 @@ def _select_best_analysis(candidates):
 
 
 def _select_fusion_candidates(candidates):
-    """Select at most one live candidate per TOP-LEVEL engine.
-
-    The bot has exactly four top-level engines:
-      ANALYSIS, ADVANCED, HULK/ALLIANCE, MAX.
-    Technical/UltimateAI/etc. are sub-engines and only provide evidence for
-    their parent engine.  A strong sub-engine must therefore not become a
-    fifth/sixth top-level signal lane or steal the lane from another parent.
-    Different top-level engines remain independent and may all be enabled.
-    """
     if not candidates:
         return []
-    best_by_top_level = {}
+    # Keep MAX as its own lane and keep every independent engine lane.
+    # This allows true A/B testing: one engine cannot suppress another.
+    best_by_lane = {}
     for item in candidates:
         _, candidate = item
-        group = str(candidate.get("hunter_group", "ENGINE") or "ENGINE").upper()
-        if group in ("UNIFIED", "ALLIANCE"):
-            group = "HULK"
-        elif group not in ("HULK", "ADVANCED", "MAX"):
-            group = group or "ENGINE"
-        old = best_by_top_level.get(group)
+        engine = (candidate.get("engines") or candidate.get("votes") or ["ENGINE"])[0]
+        group = candidate.get("hunter_group", "ENGINE")
+        lane = (group, engine)
+        old = best_by_lane.get(lane)
         if old is None or _candidate_rank_tuple(item) > _candidate_rank_tuple(old):
-            best_by_top_level[group] = item
-    return sorted(best_by_top_level.values(), key=_candidate_rank_tuple, reverse=True)
+            best_by_lane[lane] = item
+    return sorted(best_by_lane.values(), key=_candidate_rank_tuple, reverse=True)
 
 
 def _analysis_submit_worker(token_addr, candidate):
