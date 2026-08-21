@@ -6002,7 +6002,7 @@ def start_telegram_bot():
             return
 
         def _three_motor_position_stats():
-            """ادمین: آمار مستقل سه لاین اصلی + MAX بدون تغییر در آمار کلی معاملات."""
+            """ادمین: آمار واقعی ۳ لاین اصلی + MAX؛ مستقل از آمار کلی معاملات."""
             groups = {
                 "analysis": {"name": "🔬 موتور تحلیل", "open": 0, "closed": 0, "wins": 0, "losses": 0},
                 "advanced": {"name": "🧠 موتور پیشرفته", "open": 0, "closed": 0, "wins": 0, "losses": 0},
@@ -6010,54 +6010,70 @@ def start_telegram_bot():
                 "max": {"name": "👑 موتور MAX", "open": 0, "closed": 0, "wins": 0, "losses": 0},
             }
 
-            def classify_position(pos):
+            def _keys_from_position(pos):
                 if not isinstance(pos, dict):
                     return set()
                 out = set()
-                group = str(pos.get("hunter_group", "") or "").upper()
-                engines = pos.get("engines") or pos.get("votes") or []
+                group = str(pos.get("hunter_group", "") or "").upper().strip()
+                engines = pos.get("engines") or pos.get("engine_names") or pos.get("votes") or []
                 if isinstance(engines, str):
-                    engines = [x.strip() for x in engines.replace("+", ",").split(",") if x.strip()]
+                    engines = [x.strip() for x in engines.replace("|", "+").replace(",", "+").split("+") if x.strip()]
                 names = {str(x).strip().upper() for x in engines}
-                if group == "ANALYSIS" or "ANALYSIS" in names or "موتور تحلیل" in names:
+
+                if group == "ANALYSIS" or any(x in names for x in ("ANALYSIS", "FIRE", "ANALYSIS_ENGINE", "موتور تحلیل")):
                     out.add("analysis")
-                if group == "ADVANCED" or "ADVANCED" in names or "موتور پیشرفته" in names:
+                if group == "ADVANCED" or any("ADVANCED" in x or x in ("ADV", "موتور پیشرفته") for x in names):
                     out.add("advanced")
-                if group in ("HULK", "UNIFIED", "ALLIANCE") or "HULK" in names or "ALLIANCE" in names or "UNIFIED" in names or "موتور اتحاد" in names:
+                if group in ("HULK", "UNIFIED", "ALLIANCE") or any(
+                    x in names or "HULK" in x or "ALLIANCE" in x or "UNIFIED" in x or x == "موتور اتحاد"
+                    for x in names
+                ):
                     out.add("alliance")
-                # MAX is reported as its own management statistic.
-                if group == "MAX" or any("MAX" in n for n in names):
+                if group == "MAX" or any("MAX" in x for x in names):
                     out.add("max")
                 return out
 
+            # Open positions: snapshot by token, so a recovered/dual state is counted once.
             with state_lock:
-                open_snapshot = [dict(v) for v in active_positions.values()] + [dict(v) for v in signal_positions.values()]
-            for pos in open_snapshot:
-                for key in classify_position(pos):
+                open_map = {}
+                for token, pos in active_positions.items():
+                    open_map[str(token)] = dict(pos)
+                for token, pos in signal_positions.items():
+                    open_map.setdefault(str(token), dict(pos))
+            for pos in open_map.values():
+                for key in _keys_from_position(pos):
                     groups[key]["open"] += 1
 
+            # Closed positions: use the persistent learning records because they retain
+            # the actual engine list at the moment of close. The previous implementation
+            # tried to reconstruct engines from trades.entry_reason, which is not reliable.
+            closed_records = []
             try:
-                with db_lock:
-                    conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-                    cur = conn.cursor()
-                    rows = cur.execute("SELECT pnl_percent, entry_reason FROM trades").fetchall()
-                    conn.close()
-                for pnl, reason in rows:
-                    text = str(reason or "")
-                    pseudo = {"hunter_group": "", "engines": [x.strip() for x in text.replace("|", "+").split("+") if x.strip()]}
-                    # Closed records historically stored engine names in entry_reason.
-                    for key in classify_position(pseudo):
-                        groups[key]["closed"] += 1
-                        try:
-                            value = float(pnl or 0)
-                        except (TypeError, ValueError):
-                            continue
-                        if value > 0:
-                            groups[key]["wins"] += 1
-                        elif value < 0:
-                            groups[key]["losses"] += 1
-            except Exception as exc:
-                logger.exception("Three-motor stats failed: %s", exc)
+                with state_lock:
+                    closed_records = [dict(x) for x in (learning_state.get("trades") or []) if isinstance(x, dict)]
+            except Exception:
+                closed_records = []
+
+            for item in closed_records:
+                try:
+                    pnl = float(item.get("pnl_pct", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+
+                keys = _keys_from_position({
+                    "engines": item.get("engines") or [],
+                    "hunter_group": item.get("top_level_mode", "")
+                })
+                if not keys:
+                    # Explicitly keep old/unknown records out of a motor's win-rate;
+                    # assigning them to a guessed motor would make the displayed stats false.
+                    continue
+                for key in keys:
+                    groups[key]["closed"] += 1
+                    if pnl > 0:
+                        groups[key]["wins"] += 1
+                    elif pnl < 0:
+                        groups[key]["losses"] += 1
 
             for item in groups.values():
                 decided = item["wins"] + item["losses"]
