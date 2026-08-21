@@ -376,7 +376,8 @@ def _ensure_production_trade_schema():
             for name, definition in {
                 "position_uid":"TEXT", "execution_type":"TEXT DEFAULT 'LEGACY'",
                 "buy_tx_signature":"TEXT DEFAULT ''", "sell_tx_signature":"TEXT DEFAULT ''",
-                "exit_reason":"TEXT DEFAULT ''", "closed_at":"TEXT DEFAULT ''", "is_real":"INTEGER DEFAULT 0"
+                "exit_reason":"TEXT DEFAULT ''", "closed_at":"TEXT DEFAULT ''", "is_real":"INTEGER DEFAULT 0",
+                "motor_group":"TEXT DEFAULT ''", "motor_engines":"TEXT DEFAULT ''", "motor_mode":"TEXT DEFAULT ''"
             }.items():
                 if name not in cols:
                     cur.execute(f"ALTER TABLE trades ADD COLUMN {name} {definition}")
@@ -490,12 +491,52 @@ def get_adaptive_consensus_settings(enabled_count):
         logger.debug(f"Adaptive learning read error: {e}")
         return CONSENSUS_MIN_SCORE, CONSENSUS_MIN_RATIO, {}, {"sample":0,"win_rate":0.0}
 
-def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason, position_uid="", execution_type="LEGACY", buy_tx_signature="", sell_tx_signature="", is_real=False):
+def _motor_group_from_position(pos):
+    """Deterministic attribution for the four admin-reporting lanes only.
+    This function is observational: it does not participate in signal generation.
+    """
+    pos = pos if isinstance(pos, dict) else {}
+    group = str(pos.get("hunter_group") or "").upper()
+    mode = str(pos.get("mode") or pos.get("motor_mode") or "").upper()
+    engines = pos.get("engines") or pos.get("engine_names") or []
+    if isinstance(engines, str):
+        engines = [x.strip() for x in engines.split(",") if x.strip()]
+    eng_upper = {str(x).upper() for x in engines}
+    if group == "MAX" or "MAX" in mode:
+        return "MAX"
+    if group == "ANALYSIS" or "ANALYSIS" in eng_upper or "موتور تحلیل" in str(pos.get("mode") or ""):
+        return "ANALYSIS"
+    if group in ("ADVANCED",):
+        return "ADVANCED"
+    if group in ("HULK", "UNIFIED", "ALLIANCE"):
+        return "ALLIANCE"
+    if pos.get("advanced_votes"):
+        return "ADVANCED"
+    if pos.get("hulk_votes"):
+        return "ALLIANCE"
+    # Conservative legacy fallback from the recorded reason.
+    reason = str(pos.get("reason") or "").upper()
+    if "ANALYSIS" in reason:
+        return "ANALYSIS"
+    if any(k in reason for k in ("TECHNICAL", "ULTIMATEAI", "SOCIAL/HYPE", "SMARTFILTER")):
+        return "ADVANCED"
+    if any(k in reason for k in ("FIRE", "TREND", "COMBO", "GOLDEN", "MEMPOOL", "SMARTMONEY", "WHALE", "ANTI-WASH")):
+        return "ALLIANCE"
+    return ""
+
+def _motor_engine_names_from_position(pos):
+    pos = pos if isinstance(pos, dict) else {}
+    names = pos.get("engines") or pos.get("engine_names") or pos.get("votes") or []
+    if isinstance(names, str):
+        names = [x.strip() for x in names.split(",") if x.strip()]
+    return [str(x) for x in names if str(x).strip()]
+
+def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason, position_uid="", execution_type="LEGACY", buy_tx_signature="", sell_tx_signature="", is_real=False, motor_group="", motor_engines=None, motor_mode=""):
     try:
         with db_lock:
             conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
             closed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cur.execute("""INSERT OR IGNORE INTO trades(token_address,symbol,entry_price,exit_price,pnl_percent,pnl_usd,entry_reason,timestamp,position_uid,execution_type,buy_tx_signature,sell_tx_signature,exit_reason,closed_at,is_real) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(token_addr,symbol,float(entry_p or 0),float(exit_p or 0),float(pnl_pct or 0),float(pnl_u or 0),str(reason or ""),closed_at,str(position_uid or ""),str(execution_type or "LEGACY"),str(buy_tx_signature or ""),str(sell_tx_signature or ""),str(reason or ""),closed_at,1 if is_real else 0))
+            cur.execute("""INSERT OR IGNORE INTO trades(token_address,symbol,entry_price,exit_price,pnl_percent,pnl_usd,entry_reason,timestamp,position_uid,execution_type,buy_tx_signature,sell_tx_signature,exit_reason,closed_at,is_real,motor_group,motor_engines,motor_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(token_addr,symbol,float(entry_p or 0),float(exit_p or 0),float(pnl_pct or 0),float(pnl_u or 0),str(reason or ""),closed_at,str(position_uid or ""),str(execution_type or "LEGACY"),str(buy_tx_signature or ""),str(sell_tx_signature or ""),str(reason or ""),closed_at,1 if is_real else 0,str(motor_group or ""),json.dumps(motor_engines or [], ensure_ascii=False),str(motor_mode or "")))
             inserted=cur.rowcount>0; conn.commit()
             if inserted: _update_adaptive_learning(conn); conn.commit()
             conn.close(); return inserted
@@ -511,10 +552,92 @@ def _record_closed_position(token_addr,pos,exit_price,pnl_pct,reason,sell_tx_sig
     if pos.get("trade_recorded"): return True
     invested=float(pos.get("buy_amt",0) or 0); pnl_usd=invested*float(pnl_pct or 0)/100.0
     is_real=bool(pos.get("real_trade")); uid=_position_uid(token_addr,pos)
-    ok=log_trade_to_db(token_addr,pos.get("symbol","TOKEN"),pos.get("entry_price",0),exit_price,pnl_pct,pnl_usd,reason,uid,"REAL" if is_real else "SIGNAL_ONLY",pos.get("buy_tx_signature",""),sell_tx_signature,is_real)
+    motor_group = _motor_group_from_position(pos)
+    motor_engines = _motor_engine_names_from_position(pos)
+    motor_mode = str(pos.get("mode") or "")
+    ok=log_trade_to_db(token_addr,pos.get("symbol","TOKEN"),pos.get("entry_price",0),exit_price,pnl_pct,pnl_usd,reason,uid,"REAL" if is_real else "SIGNAL_ONLY",pos.get("buy_tx_signature",""),sell_tx_signature,is_real,motor_group,motor_engines,motor_mode)
     if ok:
         pos["trade_recorded"]=True; pos["closed_at"]=time.time(); pos["final_pnl_percent"]=float(pnl_pct or 0); pos["final_exit_price"]=float(exit_price or 0)
     return ok
+
+def get_admin_motor_stats():
+    """Exact persistent admin report for Analysis / Advanced / Alliance / MAX.
+    Reporting only; never changes any trading decision.
+    """
+    keys = ("ANALYSIS", "ADVANCED", "ALLIANCE", "MAX")
+    out = {k: {"open": 0, "closed": 0, "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0.0, "pnl_pct": 0.0, "real_closed": 0, "signal_closed": 0} for k in keys}
+
+    def add_open(pos):
+        g = _motor_group_from_position(pos)
+        if g in out:
+            out[g]["open"] += 1
+
+    with state_lock:
+        seen = set()
+        for token, pos in list(active_positions.items()) + list(signal_positions.items()):
+            if token in seen:
+                continue
+            seen.add(token)
+            add_open(pos)
+
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cols = {r[1] for r in cur.execute("PRAGMA table_info(trades)").fetchall()}
+            has_group = "motor_group" in cols
+            if has_group:
+                rows = cur.execute("""SELECT motor_group, pnl_percent, is_real, execution_type
+                                     FROM trades
+                                     WHERE motor_group IS NOT NULL AND motor_group != ''""").fetchall()
+            else:
+                rows = []
+            conn.close()
+
+        for group, pnl, is_real, execution_type in rows:
+            group = str(group or "").upper()
+            if group not in out:
+                continue
+            pnl = float(pnl or 0)
+            out[group]["closed"] += 1
+            out[group]["wins"] += int(pnl > 0)
+            out[group]["losses"] += int(pnl < 0)
+            out[group]["breakeven"] += int(pnl == 0)
+            out[group]["pnl_pct"] += pnl
+            out[group]["real_closed"] += int(bool(is_real))
+            out[group]["signal_closed"] += int(str(execution_type or "").upper() == "SIGNAL_ONLY")
+
+        for g in keys:
+            decided = out[g]["wins"] + out[g]["losses"]
+            out[g]["win_rate"] = (out[g]["wins"] / decided * 100.0) if decided else 0.0
+    except Exception as exc:
+        logger.warning("Admin motor stats read failed: %s", exc)
+
+    return out
+
+def _admin_motor_stats_text():
+    s = get_admin_motor_stats()
+    labels = {
+        "ANALYSIS": "🔬 موتور تحلیل",
+        "ADVANCED": "🧠 موتور پیشرفته",
+        "ALLIANCE": "🤖 موتور اتحاد",
+        "MAX": "👑 موتور MAX",
+    }
+    lines = ["🤖 **آمار دقیق ۴ موتور**", ""]
+    for key in ("ANALYSIS", "ADVANCED", "ALLIANCE", "MAX"):
+        x = s[key]
+        lines.extend([
+            f"{labels[key]}",
+            f"🟡 باز: `{x['open']}`",
+            f"📦 بسته: `{x['closed']}`",
+            f"🟢 سودده: `{x['wins']}` | 🔴 ضررده: `{x['losses']}` | ⚪ سر‌به‌سر: `{x['breakeven']}`",
+            f"🏆 Win Rate: `{x['win_rate']:.2f}%`",
+            f"📈 P/L: `{x['pnl_pct']:+.2f}%`",
+            f"⛓️ واقعی بسته: `{x['real_closed']}` | 📡 سیگنال‌محور: `{x['signal_closed']}`",
+            "",
+        ])
+    lines.append("ℹ️ این پنل فقط گزارش persistent موتور‌هاست و آمار کلی معاملات را تغییر نمی‌دهد.")
+    return "\n".join(lines)
 
 def get_advanced_trade_analytics():
     try:
@@ -6001,85 +6124,6 @@ def start_telegram_bot():
             # Any non-panel text continues to the existing manual input handler.
             return
 
-        def _three_motor_position_stats():
-            """ادمین: آمار واقعی ۳ لاین اصلی + MAX؛ مستقل از آمار کلی معاملات."""
-            groups = {
-                "analysis": {"name": "🔬 موتور تحلیل", "open": 0, "closed": 0, "wins": 0, "losses": 0},
-                "advanced": {"name": "🧠 موتور پیشرفته", "open": 0, "closed": 0, "wins": 0, "losses": 0},
-                "alliance": {"name": "🤖 موتور اتحاد", "open": 0, "closed": 0, "wins": 0, "losses": 0},
-                "max": {"name": "👑 موتور MAX", "open": 0, "closed": 0, "wins": 0, "losses": 0},
-            }
-
-            def _keys_from_position(pos):
-                if not isinstance(pos, dict):
-                    return set()
-                out = set()
-                group = str(pos.get("hunter_group", "") or "").upper().strip()
-                engines = pos.get("engines") or pos.get("engine_names") or pos.get("votes") or []
-                if isinstance(engines, str):
-                    engines = [x.strip() for x in engines.replace("|", "+").replace(",", "+").split("+") if x.strip()]
-                names = {str(x).strip().upper() for x in engines}
-
-                if group == "ANALYSIS" or any(x in names for x in ("ANALYSIS", "FIRE", "ANALYSIS_ENGINE", "موتور تحلیل")):
-                    out.add("analysis")
-                if group == "ADVANCED" or any("ADVANCED" in x or x in ("ADV", "موتور پیشرفته") for x in names):
-                    out.add("advanced")
-                if group in ("HULK", "UNIFIED", "ALLIANCE") or any(
-                    x in names or "HULK" in x or "ALLIANCE" in x or "UNIFIED" in x or x == "موتور اتحاد"
-                    for x in names
-                ):
-                    out.add("alliance")
-                if group == "MAX" or any("MAX" in x for x in names):
-                    out.add("max")
-                return out
-
-            # Open positions: snapshot by token, so a recovered/dual state is counted once.
-            with state_lock:
-                open_map = {}
-                for token, pos in active_positions.items():
-                    open_map[str(token)] = dict(pos)
-                for token, pos in signal_positions.items():
-                    open_map.setdefault(str(token), dict(pos))
-            for pos in open_map.values():
-                for key in _keys_from_position(pos):
-                    groups[key]["open"] += 1
-
-            # Closed positions: use the persistent learning records because they retain
-            # the actual engine list at the moment of close. The previous implementation
-            # tried to reconstruct engines from trades.entry_reason, which is not reliable.
-            closed_records = []
-            try:
-                with state_lock:
-                    closed_records = [dict(x) for x in (learning_state.get("trades") or []) if isinstance(x, dict)]
-            except Exception:
-                closed_records = []
-
-            for item in closed_records:
-                try:
-                    pnl = float(item.get("pnl_pct", 0) or 0)
-                except (TypeError, ValueError):
-                    continue
-
-                keys = _keys_from_position({
-                    "engines": item.get("engines") or [],
-                    "hunter_group": item.get("top_level_mode", "")
-                })
-                if not keys:
-                    # Explicitly keep old/unknown records out of a motor's win-rate;
-                    # assigning them to a guessed motor would make the displayed stats false.
-                    continue
-                for key in keys:
-                    groups[key]["closed"] += 1
-                    if pnl > 0:
-                        groups[key]["wins"] += 1
-                    elif pnl < 0:
-                        groups[key]["losses"] += 1
-
-            for item in groups.values():
-                decided = item["wins"] + item["losses"]
-                item["win_rate"] = (item["wins"] / decided * 100.0) if decided else 0.0
-            return groups
-
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
@@ -6237,40 +6281,30 @@ def start_telegram_bot():
                 if not is_admin: await q.edit_message_text("⛔ فقط ادمین.",reply_markup=_main_keyboard(False))
                 else: await q.edit_message_text(f"🔐 **امنیت**\n\nPrivate Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\nRPCها: `{len(RPC_ENDPOINTS)}`\nAdmin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",reply_markup=_main_keyboard(True),parse_mode="Markdown")
             elif data=="admin":
-                if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.")
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.")
                 else:
                     await q.edit_message_text(
                         f"👑 **پنل مدیریت**\n\nکاربران: `{len(get_all_subscribers())}`\nمعاملات: `{get_advanced_trade_analytics()['total_trades']}`",
                         reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🤖 آمار دقیق ۴ موتور + MAX", callback_data="three_motor_stats")],
+                            [InlineKeyboardButton("🤖 آمار دقیق ۴ موتور + MAX", callback_data="admin_motor_stats")],
                             [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
                         ]),
                         parse_mode="Markdown"
                     )
-            elif data=="three_motor_stats":
+            elif data=="admin_motor_stats":
                 if not is_admin:
-                    await q.edit_message_text("⛔ دسترسی غیرمجاز.")
-                else:
-                    stats = _three_motor_position_stats()
-                    lines = ["🤖 **آمار دقیق ۳ موتور + MAX**\n"]
-                    for key in ("analysis", "advanced", "alliance", "max"):
-                        x = stats[key]
-                        lines.append(
-                            f"{x['name']}\n"
-                            f"🟡 باز: `{x['open']}`\n"
-                            f"📦 بسته: `{x['closed']}`\n"
-                            f"🟢 سودده: `{x['wins']}` | 🔴 ضررده: `{x['losses']}`\n"
-                            f"🏆 Win Rate: `{x['win_rate']:.2f}%`\n"
-                        )
-                    lines.append("ℹ️ این گزارش فقط تفکیک عملکرد سه موتور است و **آمار معاملات کلی را تغییر نمی‌دهد**.")
-                    await q.edit_message_text(
-                        "\n".join(lines),
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔄 بروزرسانی", callback_data="three_motor_stats")],
-                            [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]
-                        ]),
-                        parse_mode="Markdown"
-                    )
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                await q.edit_message_text(
+                    _admin_motor_stats_text(),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="admin_motor_stats")],
+                        [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]
+                    ]),
+                    parse_mode="Markdown"
+                )
+                return
             elif data=="free_users":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
