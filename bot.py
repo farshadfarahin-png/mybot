@@ -53,7 +53,28 @@ SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="SignalEx
 SIGNAL_EXECUTOR_MAX_INFLIGHT = 6
 SIGNAL_EXECUTOR_SLOTS = threading.BoundedSemaphore(SIGNAL_EXECUTOR_MAX_INFLIGHT)
 ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisExec")
+NOTIFY_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="NotifyExec")
 SIGNAL_EMIT_LOCK = Lock()
+POSITION_MONITOR_HEARTBEAT = 0.0
+POSITION_MONITOR_LAST_OK = 0.0
+POSITION_MONITOR_ERRORS = 0
+SIGNAL_ONLY_ALERT_LOCK = Lock()
+SIGNAL_ONLY_ALERT_COOLDOWN = 15.0
+
+# ================= PRODUCTION POSITION ENGINE =================
+# Signal generation, wallet execution and exit signaling are deliberately decoupled.
+POSITION_MONITOR_INTERVAL_SECONDS = 0.35
+BUY_RETRY_WINDOW_SECONDS = 900.0
+BUY_RETRY_INTERVAL_SECONDS = 10.0
+SELL_RETRY_INTERVAL_SECONDS = 3.0
+EXIT_ALERT_REPEAT_SECONDS = 30.0
+MAX_POSITION_MONITOR_BATCH = 60
+
+POSITION_STATE_SIGNAL_ONLY = "SIGNAL_ONLY"
+POSITION_STATE_BUY_PENDING = "BUY_PENDING"
+POSITION_STATE_REAL_OPEN = "REAL_OPEN"
+POSITION_STATE_EXIT_PENDING = "EXIT_PENDING"
+POSITION_STATE_CLOSED = "CLOSED"
 
 # تنظیمات کلیدی محیطی و کانال انتشار سیگنال
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -1724,74 +1745,100 @@ def _signal_links(token_addr, tx_signature=""):
     return solscan, dex
 
 def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx_signature="", extra_text=""):
-    # Master فقط ورود/تولید BUY جدید را کنترل می‌کند. خروج پوزیشن باز همیشه باید
-    # مستقل از وضعیت Master اعلام شود تا خاموش کردن کلید مادر، گزارش SELL را خفه نکند.
+    """Build and deliver a SELL event. Returns True when at least one public channel accepted it."""
     symbol = pos.get("symbol", "TOKEN")
     entry = float(pos.get("entry_price", 0) or 0)
     tp = float(pos.get("tp", 0) or 0)
     sl = float(pos.get("sl", 0) or 0)
-    locked = float(pos.get("locked_floor", sl) or sl)
+    locked = float(pos.get("effective_stop_pnl", pos.get("locked_floor", sl)) or sl)
     highest = float(pos.get("highest_pnl", pnl_percent) or pnl_percent)
     reason = pos.get("reason", "سیگنال متحد موتورها")
-    volume = float(pos.get("volume", 0.0) or 0.0)
-    liquidity = float(pos.get("liquidity", 0.0) or 0.0)
-    m5_change = float(pos.get("m5_change", pos.get("p_change", 0.0)) or 0.0)
-    buys_m5 = int(pos.get("buys_m5", 0) or 0)
-    sells_m5 = int(pos.get("sells_m5", 0) or 0)
-    solscan, dex = _signal_links(token_addr, tx_signature)
+    is_real_position = bool(pos.get("real_trade")) or str(pos.get("position_type", "SIGNAL")).upper() == "REAL"
 
-    is_real_position = str(pos.get("position_type", "REAL")).upper() == "REAL" or bool(pos.get("real_trade"))
     if outcome == "SELL_SUCCESS":
-        if float(pnl_percent or 0.0) < 0:
-            title = "🔴 فروش واقعی موفق — خروج با ضرر" if is_real_position else "🔴 سیگنال فروش — خروج با ضرر"
-            status = "🟢 فروش روی بلاکچین تأیید شد؛ معامله با ضرر بسته شد" if is_real_position else "📡 سیگنال فروش صادر شد؛ معامله واقعی وجود نداشت"
-        else:
-            title = "🔴 فروش واقعی موفق" if is_real_position else "🔴 سیگنال فروش"
-            status = "🟢 فروش روی بلاکچین تأیید شد" if is_real_position else "📡 سیگنال فروش صادر شد؛ خرید واقعی انجام نشده بود"
+        title = "🔴 فروش واقعی موفق" if is_real_position else "🔴 سیگنال فروش"
+        status = (
+            "🟢 فروش روی بلاکچین تأیید شد" if is_real_position
+            else "📡 سیگنال فروش صادر شد؛ خرید واقعی وجود نداشت"
+        )
     elif outcome == "SELL_FAILED":
-        title, status = "⚠️ سیگنال خروج / فروش ناموفق", "⚠️ سیگنال فروش صادر شد؛ فروش واقعی انجام نشد"
-    elif outcome == "SIGNAL_TP" and float(pnl_percent or 0.0) > 0:
-        title, status = "🎯 فروش سیگنال؛ خروج سودده با تریلینگ", "📡 سیگنال فروش صادر شد؛ این پوزیشن خرید واقعی نداشته است"
-    elif outcome == "SIGNAL_TP" and float(pnl_percent or 0.0) == 0:
-        title, status = "⚪ فروش سیگنال؛ خروج سر‌به‌سر", "📡 سیگنال فروش صادر شد؛ این پوزیشن خرید واقعی نداشته است"
+        title, status = "⚠️ سیگنال خروج", "📡 سیگنال فروش صادر شد؛ اجرای واقعی همچنان در انتظار موفقیت است"
+    elif pnl_percent > 0:
+        title, status = "🎯 فروش سیگنال؛ خروج سودده با تریلینگ", "📡 سیگنال SELL صادر شد"
+    elif pnl_percent == 0:
+        title, status = "⚪ فروش سیگنال؛ خروج سر‌به‌سر", "📡 سیگنال SELL صادر شد"
     else:
-        title, status = "🛑 فروش سیگنال؛ خروج ضررده", "📡 سیگنال فروش صادر شد؛ این پوزیشن خرید واقعی نداشته است"
+        title, status = "🛑 فروش سیگنال؛ خروج ضررده", "📡 سیگنال SELL صادر شد"
 
+    solscan, dex = _signal_links(token_addr, tx_signature)
     msg = (
         f"{title}\n\n"
         f"🪙 توکن: {symbol}\n"
         f"📍 آدرس قرارداد:\n{token_addr}\n\n"
         f"💵 نقطه ورود: ${entry:.8f}\n"
-        f"📉 قیمت فعلی/خروج: ${current_price:.8f}\n"
-        f"📊 سود/زیان: {pnl_percent:+.2f}%\n"
+        f"📉 قیمت خروج/فعلی: ${float(current_price):.8f}\n"
+        f"📊 سود/زیان: {float(pnl_percent):+.2f}%\n"
         f"📈 بیشترین سود ثبت‌شده: {highest:+.2f}%\n"
-        f"🔒 حدضرر متحرک فعلی: {locked:+.2f}%\n"
-        f"🧭 سقف سود ثبت‌شده: {highest:+.2f}%\n"
+        f"🔒 حد خروج مؤثر: {locked:+.2f}%\n"
         f"🎯 تارگت اولیه: +{tp:.2f}%\n"
         f"🛑 حدضرر اولیه: {sl:.2f}%\n"
         f"📌 وضعیت: {status}\n"
-        f"🤖 اتحاد موتورها: {reason}\n"
+        f"🤖 موتور/موتورهای مسئول: {reason}\n"
         f"{extra_text}\n\n"
         f"🔗 Solscan: {solscan}\n"
         f"📈 DexScreener: {dex}"
     )
-    send_telegram_msg(msg)
+    telegram_ok = False
+    try:
+        telegram_ok = bool(send_telegram_msg(msg))
+    except Exception:
+        logger.exception("SELL Telegram send failed token=%s", token_addr)
+    channel_ok = True
     _load_channel_config()
     if CHANNEL_ID:
-        send_graphic_signal_to_vip_channel(
-            token_addr=token_addr, symbol=symbol, price=current_price, tp=tp, sl=locked,
-            buy_amt=float(pos.get("buy_amt", 0.0) or 0.0), volume=float(pos.get("volume", 0.0) or 0.0),
-            liquidity=float(pos.get("liquidity", 0.0) or 0.0), p_change=float(pos.get("m5_change", 0.0) or 0.0),
-            solscan_link=solscan, signal_title=title, side="SELL",
-            execution_status="", execution_tx=tx_signature, pnl_percent=pnl_percent
-        )
+        try:
+            channel_ok = bool(send_graphic_signal_to_vip_channel(
+                token_addr=token_addr, symbol=symbol, price=current_price, tp=tp, sl=locked,
+                buy_amt=float(pos.get("buy_amt", 0.0) or 0.0),
+                volume=float(pos.get("volume", 0.0) or 0.0),
+                liquidity=float(pos.get("liquidity", 0.0) or 0.0),
+                p_change=float(pos.get("m5_change", pos.get("p_change", 0.0)) or 0.0),
+                solscan_link=solscan, signal_title=title, side="SELL",
+                execution_status=status, execution_tx=tx_signature, pnl_percent=pnl_percent
+            ))
+        except Exception:
+            channel_ok = False
+            logger.exception("SELL channel send failed token=%s", token_addr)
+    return bool(telegram_ok or channel_ok)
+
+def _notify_async(fn, *args, **kwargs):
+    """Non-blocking notification dispatch with bounded retries."""
+    def _job():
+        for attempt in range(3):
+            try:
+                result = fn(*args, **kwargs)
+                if result is not False:
+                    return True
+            except Exception:
+                logger.exception("Async notification attempt %s failed", attempt + 1)
+            time.sleep(0.8 * (attempt + 1))
+        return False
+    try:
+        NOTIFY_EXECUTOR.submit(_job)
+        return True
+    except Exception as exc:
+        logger.warning("Notification submit failed: %s", exc)
+        return False
 
 def _adaptive_locked_floor(highest_pnl, current_floor):
-    """Return the highest applicable profit-lock floor; never create an SL dead-zone."""
+    """Return the highest applicable profit-lock floor; below first trigger, preserve the hard SL."""
     h = float(highest_pnl or 0.0)
     floor = float(current_floor)
-    floor = max(floor, get_unlimited_trailing_floor(h))
-    return floor
+    # The first trailing step is +8%. Before that, the original hard SL must remain active.
+    first_trigger = float(TRAILING_LOCK_TABLE[-1][0]) if TRAILING_LOCK_TABLE else 8.0
+    if h < first_trigger:
+        return floor
+    return max(floor, get_unlimited_trailing_floor(h))
 
 def _update_trailing_state(pos, current_price, pnl_percent, pair):
     """به‌روزرسانی سقف قیمت، حدضرر متحرک و تشخیص ضعف بازار.
@@ -1804,7 +1851,11 @@ def _update_trailing_state(pos, current_price, pnl_percent, pair):
 
     initial_sl = float(pos.get("sl", -8.0) or -8.0)
     current_floor = float(pos.get("locked_floor", initial_sl) or initial_sl)
-    if DYNAMIC_TRAILING_TP_ENABLED:
+    # Legacy/corrupt state must never turn the hard SL into 0%.
+    first_trigger = float(TRAILING_LOCK_TABLE[-1][0]) if TRAILING_LOCK_TABLE else 8.0
+    if highest_pnl < first_trigger:
+        current_floor = initial_sl
+    elif DYNAMIC_TRAILING_TP_ENABLED:
         current_floor = _adaptive_locked_floor(highest_pnl, current_floor)
 
     txns = (pair.get("txns") or {}).get("m5") or {}
@@ -1832,81 +1883,242 @@ def _update_trailing_state(pos, current_price, pnl_percent, pair):
     return current_floor, weakness
 
 def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_change,
-                      reason, buy_amt, buy_status):
+                      reason, buy_amt, buy_status, fusion=None):
+    """Create the authoritative position record BEFORE any Telegram/network I/O."""
+    now = time.time()
     pos = {
-        "entry_price": price, "symbol": symbol, "tp": tp, "sl": sl,
-        "volume": volume, "liquidity": liquidity, "p_change": p_change,
-        "reason": reason, "buy_amt": buy_amt, "buy_status": buy_status,
-        "created_at": time.time(), "highest_pnl": 0.0, "highest_price": price,
-        "locked_floor": sl, "trailing_active": True, "side": "BUY",
-        "position_type": "SIGNAL", "real_trade": False
+        "entry_price": float(price or 0), "signal_price": float(price or 0),
+        "symbol": symbol, "tp": float(tp or 0), "sl": float(sl or -8.0),
+        "volume": float(volume or 0), "liquidity": float(liquidity or 0),
+        "p_change": float(p_change or 0), "reason": reason,
+        "buy_amt": float(buy_amt or 0), "buy_status": buy_status,
+        "created_at": now, "opened_at": now,
+        "highest_pnl": 0.0, "highest_price": float(price or 0),
+        "locked_floor": float(sl or -8.0), "effective_stop_pnl": float(sl or -8.0),
+        "trailing_active": True, "side": "BUY",
+        "position_type": "SIGNAL", "real_trade": False,
+        "position_state": POSITION_STATE_SIGNAL_ONLY,
+        "buy_pending": False, "buy_attempts": 0, "last_buy_attempt_at": 0.0,
+        "exit_triggered": False, "exit_signal_sent": False,
+        "sell_pending": False, "closed": False,
+        "engines": list((fusion or {}).get("engines") or (fusion or {}).get("votes") or []),
+        "hunter_group": (fusion or {}).get("hunter_group", ""),
     }
     with state_lock:
         signal_positions[token_addr] = pos
     _persist_open_position(token_addr, pos, "SIGNAL")
+    return pos
 
-def evaluate_signal_only_positions():
-    finished = []
+def _promote_signal_to_real(token_addr, buy_signature=""):
+    """Atomically promote a signal-only position to a real wallet position."""
     with state_lock:
-        items = list(signal_positions.items())
+        pos = signal_positions.get(token_addr)
+        if not pos or pos.get("closed"):
+            return False, pos
+        exit_triggered = bool(pos.get("exit_triggered"))
+        pos = dict(pos)
+        pos["position_type"] = "REAL"
+        pos["real_trade"] = True
+        pos["position_state"] = POSITION_STATE_REAL_OPEN
+        pos["buy_pending"] = False
+        pos["buy_confirmed_at"] = time.time()
+        pos["buy_tx_signature"] = buy_signature
+        meta = REAL_BUY_EXECUTION_META.get(token_addr, {})
+        pos["actual_received_token_raw"] = int(meta.get("received_token_raw", 0) or 0)
+        # Signal price remains the conservative cost basis until a chain-parser is available.
+        signal_positions.pop(token_addr, None)
+        active_positions[token_addr] = pos
+    _persist_open_position(token_addr, pos, "REAL")
+    return True, pos
 
-    for token_addr, pos in items:
+def _start_real_buy_attempt(token_addr):
+    """Fire a bounded asynchronous BUY attempt for an already-issued signal."""
+    with state_lock:
+        pos = signal_positions.get(token_addr)
+        if not pos or pos.get("exit_triggered") or pos.get("buy_pending") or pos.get("real_trade"):
+            return False
+        now = time.time()
+        if now - float(pos.get("created_at", now) or now) > BUY_RETRY_WINDOW_SECONDS:
+            return False
+        if now - float(pos.get("last_buy_attempt_at", 0) or 0) < BUY_RETRY_INTERVAL_SECONDS:
+            return False
+        pos["buy_pending"] = True
+        pos["position_state"] = POSITION_STATE_BUY_PENDING
+        pos["buy_attempts"] = int(pos.get("buy_attempts", 0) or 0) + 1
+        pos["last_buy_attempt_at"] = now
+        amount = float(pos.get("buy_amt", 0.01) or 0.01)
+        snapshot = dict(pos)
+    _persist_open_position(token_addr, snapshot, "SIGNAL")
+
+    def _worker():
         try:
-            res = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4)
-            if res.status_code != 200:
-                continue
-            pairs = (res.json() or {}).get("pairs") or []
-            pairs = [p for p in pairs if p.get("chainId") == "solana"]
-            if not pairs:
-                continue
-            pair = max(pairs, key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
-            current_price = float(pair.get("priceUsd", 0) or 0)
-            entry = float(pos.get("entry_price", 0) or 0)
-            if current_price <= 0 or entry <= 0:
-                continue
-            pnl = ((current_price - entry) / entry) * 100.0
-            locked_floor, weakness = _update_trailing_state(pos, current_price, pnl, pair)
-            _persist_open_position(token_addr, pos, "SIGNAL")
+            ok, result = execute_real_buy(token_addr, amount)
+            if ok:
+                promoted, promoted_pos = _promote_signal_to_real(token_addr, result)
+                if promoted:
+                    logger.info("REAL_BUY_PROMOTED token=%s tx=%s", token_addr, result)
+                    trigger_copy_trading_for_subscribers(token_addr, amount, side="BUY", tx_signature=result)
+                    _notify_async(
+                        send_telegram_msg,
+                        f"🟢 خرید واقعی تأیید شد\n🪙 {promoted_pos.get('symbol','TOKEN')}\n"
+                        f"🔗 https://solscan.io/tx/{result}"
+                    )
+                    if promoted_pos.get("exit_triggered"):
+                        _submit_real_sell_attempt(token_addr)
+                else:
+                    logger.warning("BUY confirmed after exit/close; token=%s tx=%s", token_addr, result)
+                    # The exit manager will reconcile this edge case on the next cycle.
+            else:
+                with state_lock:
+                    cur = signal_positions.get(token_addr)
+                    snapshot = None
+                    if cur:
+                        cur["buy_pending"] = False
+                        cur["position_state"] = POSITION_STATE_SIGNAL_ONLY
+                        cur["last_buy_error"] = str(result)
+                        cur["last_buy_error_at"] = time.time()
+                        snapshot = dict(cur)
+                if snapshot:
+                    _persist_open_position(token_addr, snapshot, "SIGNAL")
+                logger.info("REAL_BUY_NOT_EXECUTED token=%s reason=%s", token_addr, result)
+        except Exception as exc:
+            with state_lock:
+                cur = signal_positions.get(token_addr)
+                snapshot = None
+                if cur:
+                    cur["buy_pending"] = False
+                    cur["position_state"] = POSITION_STATE_SIGNAL_ONLY
+                    cur["last_buy_error"] = f"{type(exc).__name__}:{exc}"
+                    snapshot = dict(cur)
+            if snapshot:
+                _persist_open_position(token_addr, snapshot, "SIGNAL")
+            logger.exception("REAL_BUY_WORKER_ERROR token=%s", token_addr)
 
-            # Signal-only positions use exactly the same protection semantics as
-            # real positions: initial SL is never disabled and profit-lock can only
-            # move the effective stop upward.
-            should_close = False
-            outcome = "SIGNAL_TP"
-            tp_target = float(pos.get("tp", 0) or 0)
-            initial_sl = float(pos.get("sl", -8.0) or -8.0)
-            effective_floor = max(initial_sl, float(locked_floor))
-            pos["effective_stop_pnl"] = effective_floor
-            if pnl <= effective_floor:
-                should_close = True
-                outcome = "SIGNAL_TP" if effective_floor > initial_sl else "SIGNAL_SL"
-            elif weakness and pnl <= effective_floor:
-                should_close = True
-                outcome = "SIGNAL_TP" if pnl > 0 else "SIGNAL_SL"
-
-            if should_close:
-                extra = (
-                    f"📡 این خروج فقط سیگنال بازار است؛ خرید واقعی برای این پوزیشن ثبت نشده.\n"
-                    f"🧠 وضعیت بازار: {'ضعف/فشار فروش تأیید شد' if weakness else 'تریلینگ استاپ فعال شد'}\n"
-                    f"📉 افت از سقف: {pos.get('drawdown_from_high', 0):.2f}%\n"
-                    f"📊 معاملات ۵ دقیقه: خرید {pos.get('buys_m5', 0)} | فروش {pos.get('sells_m5', 0)}"
-                )
-                # نتیجه واقعی معامله همیشه بر اساس P/L نهایی تعیین می‌شود؛
-                # یک خروج trailing هرگز نباید معامله منفی را «سودده» اعلام کند.
-                final_outcome = "SIGNAL_TP" if pnl > 0 else "SIGNAL_SL"
-                send_signal_outcome(token_addr, pos, current_price, final_outcome, pnl, extra_text=extra)
-                finished.append(token_addr)
-        except Exception as e:
-            logger.debug(f"Signal-only monitor error {token_addr}: {e}")
-
-    if finished:
+    accepted = _submit_signal_job(token_addr, {"__position_buy_retry__": True, "worker": _worker})
+    if not accepted:
         with state_lock:
-            for finished_addr in finished:
-                signal_positions.pop(finished_addr, None)
-                # فقط بعد از خروج کامل، اجازه ورود مجدد به همان توکن آزاد می‌شود.
-                _mark_token_closed(finished_addr)
-# سیو سود پله‌ای برای معامله واقعی: ۳۰٪ در TP، ۳۰٪ در 2×TP و مابقی با تریلینگ/SL.
-PARTIAL_TP_LEVELS = ((1.0, 0.30), (2.0, 0.30))
+            cur = signal_positions.get(token_addr)
+            if cur:
+                cur["buy_pending"] = False
+                cur["position_state"] = POSITION_STATE_SIGNAL_ONLY
+        return False
+    return True
+
+def _maybe_retry_signal_buys():
+    """When the wallet becomes ready, retry outstanding BUYs without generating a duplicate signal."""
+    try:
+        if not WALLET_TRADE_PERMISSION or not WALLET_PUBKEY or sender_keypair is None:
+            return
+        with state_lock:
+            tokens = list(signal_positions.keys())[:MAX_POSITION_MONITOR_BATCH]
+        for token_addr in tokens:
+            _start_real_buy_attempt(token_addr)
+    except Exception as exc:
+        logger.debug("Signal BUY retry sweep failed: %s", exc)
+
+def _emit_sell_signal_once(token_addr, pos, current_price, pnl, reason, tx_signature=""):
+    """Emit one public SELL signal per exit event; retries do not spam the channel."""
+    with state_lock:
+        cur = active_positions.get(token_addr) or signal_positions.get(token_addr)
+        if not cur:
+            return False
+        now = time.time()
+        sent = bool(cur.get("exit_signal_sent"))
+        last = float(cur.get("last_exit_signal_at", 0) or 0)
+        if sent and now - last < EXIT_ALERT_REPEAT_SECONDS:
+            return False
+        cur["exit_signal_sent"] = True
+        cur["last_exit_signal_at"] = now
+        cur["exit_reason"] = reason
+        cur["position_state"] = POSITION_STATE_EXIT_PENDING
+        snapshot = dict(cur)
+    _persist_open_position(token_addr, snapshot, "REAL" if snapshot.get("real_trade") else "SIGNAL")
+    outcome = "SELL_SUCCESS" if tx_signature else ("SIGNAL_TP" if pnl > 0 else "SIGNAL_SL")
+    extra = f"📌 دلیل خروج: {reason}"
+    _notify_async(send_signal_outcome, token_addr, snapshot, current_price, outcome, pnl, tx_signature, extra)
+    return True
+
+def _submit_real_sell_attempt(token_addr):
+    """Retry a real SELL independently from signal delivery."""
+    with state_lock:
+        pos = active_positions.get(token_addr)
+        if not pos or not pos.get("real_trade") or pos.get("closed"):
+            return False
+        if pos.get("sell_pending"):
+            return False
+        pos["sell_pending"] = True
+        pos["position_state"] = POSITION_STATE_EXIT_PENDING
+        pos_copy = dict(pos)
+    _persist_open_position(token_addr, pos_copy, "REAL")
+
+    def _sell_worker():
+        try:
+            balance = get_token_balance(token_addr)
+            if balance <= 0:
+                # No remaining token balance strongly suggests the position was already sold externally.
+                with state_lock:
+                    cur = active_positions.get(token_addr)
+                    if cur:
+                        cur["sell_pending"] = False
+                        cur["external_reconcile"] = True
+                        cur["position_state"] = POSITION_STATE_CLOSED
+                        cur["closed"] = True
+                        active_positions.pop(token_addr, None)
+                _mark_token_closed(token_addr)
+                return
+            ok, result = execute_real_sell(token_addr, balance)
+            if ok:
+                with state_lock:
+                    cur = active_positions.get(token_addr)
+                    if cur:
+                        cur["sell_pending"] = False
+                        cur["position_state"] = POSITION_STATE_CLOSED
+                        cur["closed"] = True
+                _mark_token_closed(token_addr)
+                logger.info("REAL_SELL_CONFIRMED token=%s tx=%s", token_addr, result)
+                return
+            with state_lock:
+                cur = active_positions.get(token_addr)
+                snapshot = None
+                if cur:
+                    cur["sell_pending"] = False
+                    cur["last_sell_error"] = str(result)
+                    cur["last_sell_error_at"] = time.time()
+                    cur["position_state"] = POSITION_STATE_EXIT_PENDING
+                    snapshot = dict(cur)
+            if snapshot:
+                _persist_open_position(token_addr, snapshot, "REAL")
+            logger.warning("REAL_SELL_NOT_CONFIRMED token=%s reason=%s", token_addr, result)
+        except Exception as exc:
+            with state_lock:
+                cur = active_positions.get(token_addr)
+                snapshot = None
+                if cur:
+                    cur["sell_pending"] = False
+                    cur["last_sell_error"] = f"{type(exc).__name__}:{exc}"
+                    snapshot = dict(cur)
+            if snapshot:
+                _persist_open_position(token_addr, snapshot, "REAL")
+            logger.exception("REAL_SELL_WORKER_ERROR token=%s", token_addr)
+
+    threading.Thread(target=_sell_worker, name=f"RealSell-{token_addr[:8]}", daemon=True).start()
+    return True
+
+def _get_position_market_pairs(token_addrs):
+    """Batch-fetch all monitored prices so one slow token cannot starve every position."""
+    clean = list(dict.fromkeys(str(x) for x in token_addrs if x))[:MAX_POSITION_MONITOR_BATCH]
+    result = {}
+    if not clean:
+        return result
+    try:
+        batch = _fetch_best_solana_pairs_batch(clean)
+        for addr in clean:
+            pairs = batch.get(addr) or []
+            if pairs:
+                result[addr] = max(pairs, key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
+    except Exception as exc:
+        logger.debug("Position batch market fetch failed: %s", exc)
+    return result
 
 def _normalize_position_state(token_addr, pos, position_type="REAL"):
     """Migrate legacy/partial position dictionaries into one safe schema."""
@@ -1933,160 +2145,130 @@ def _normalize_position_state(token_addr, pos, position_type="REAL"):
     pos.setdefault("side", "BUY")
     pos.setdefault("buy_amt", 0.0)
     pos["sl"] = sl
+    try:
+        if float(pos.get("highest_pnl", 0.0) or 0.0) < (float(TRAILING_LOCK_TABLE[-1][0]) if TRAILING_LOCK_TABLE else 8.0):
+            pos["locked_floor"] = sl
+    except Exception:
+        pos["locked_floor"] = sl
     pos["position_type"] = position_type
     return pos
 
 def check_positions_loop():
-    """مدیریت پوزیشن واقعی با trailing پله‌ای، تشخیص ضعف بازار و خروج کامل."""
+    """Production position manager: hard SL is always live; trailing only raises protection."""
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
-
+    global POSITION_MONITOR_HEARTBEAT, POSITION_MONITOR_LAST_OK, POSITION_MONITOR_ERRORS
+    logger.info("🛡️ Production Position Manager started")
     while True:
+        cycle_started = time.time()
         try:
-            # اول سیگنال‌هایی که خرید واقعی نشده‌اند را رصد کن.
-            evaluate_signal_only_positions()
-            tokens_to_close = []
+            # 1) If wallet permission becomes available, promote pending signal buys.
+            _maybe_retry_signal_buys()
+
             with state_lock:
-                current_positions = list(active_positions.items())
+                signal_items = list(signal_positions.items())[:MAX_POSITION_MONITOR_BATCH]
+                real_items = list(active_positions.items())[:MAX_POSITION_MONITOR_BATCH]
+            prices = _get_position_market_pairs([a for a, _ in signal_items] + [a for a, _ in real_items])
 
-            for token_addr, pos in current_positions:
+            # 2) Manage signal-only positions.
+            for token_addr, pos in signal_items:
                 try:
-                    pos = _normalize_position_state(token_addr, pos, "REAL")
-                    if pos is None:
-                        logger.error("Invalid position state; refusing unmanaged position %s", token_addr)
+                    pair = prices.get(token_addr)
+                    if not pair:
                         continue
-                    res = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4)
-                    if res.status_code != 200:
-                        continue
-                    pairs = (res.json() or {}).get("pairs") or []
-                    pairs = [p for p in pairs if p.get("chainId") == "solana"]
-                    if not pairs:
-                        continue
-                    pair = max(pairs, key=lambda p: float(((p.get("liquidity") or {}).get("usd")) or 0))
                     current_price = float(pair.get("priceUsd", 0) or 0)
-                    entry_price = float(pos.get("entry_price", 0) or 0)
-                    symbol = pos.get("symbol", "TOKEN")
-                    sl = float(pos.get("sl", -8.0) or -8.0)
-                    if entry_price <= 0 or current_price <= 0:
+                    entry = float(pos.get("entry_price", 0) or 0)
+                    if current_price <= 0 or entry <= 0:
+                        continue
+                    pnl = (current_price - entry) / entry * 100.0
+                    locked_floor, weakness = _update_trailing_state(pos, current_price, pnl, pair)
+                    effective_floor = max(float(pos.get("sl", -8.0) or -8.0), float(locked_floor))
+                    pos["effective_stop_pnl"] = effective_floor
+                    pos["last_market_price"] = current_price
+                    pos["last_market_check"] = time.time()
+                    _persist_open_position(token_addr, pos, "SIGNAL")
+
+                    # HARD RULE: initial SL always remains active. Profit lock can only move it upward.
+                    if pnl > effective_floor:
                         continue
 
-                    pnl_percent = ((current_price - entry_price) / entry_price) * 100.0
-                    locked_floor, weakness = _update_trailing_state(pos, current_price, pnl_percent, pair)
-                    pos["volume"] = float((pair.get("volume") or {}).get("m5") or 0.0)
-                    pos["liquidity"] = float((pair.get("liquidity") or {}).get("usd") or 0.0)
-                    pos["p_change"] = float(pair.get("priceChange", {}).get("m5") or 0.0)
-                    highest_pnl = float(pos.get("highest_pnl", pnl_percent))
-                    # Persist the live trailing state so a restart does not forget a captured profit peak.
-                    pos["last_persisted_at"] = time.time()
+                    with state_lock:
+                        cur = signal_positions.get(token_addr)
+                        if not cur:
+                            continue
+                        cur["exit_triggered"] = True
+                        cur["exit_triggered_at"] = time.time()
+                        cur["exit_trigger_price"] = current_price
+                        cur["exit_trigger_pnl"] = pnl
+                        cur["position_state"] = POSITION_STATE_EXIT_PENDING
+                        snapshot = dict(cur)
+                    _persist_open_position(token_addr, snapshot, "SIGNAL")
+
+                    reason = (
+                        f"قفل سود/تریلینگ؛ سقف {pos.get('highest_pnl', pnl):+.2f}% و کف {effective_floor:+.2f}%"
+                        if effective_floor > float(pos.get("sl", -8.0) or -8.0)
+                        else "حد ضرر اولیه فعال شد"
+                    )
+                    _emit_sell_signal_once(token_addr, pos, current_price, pnl, reason)
+                    with state_lock:
+                        signal_positions.pop(token_addr, None)
+                    _mark_token_closed(token_addr)
+                    logger.warning("SIGNAL_SELL_EMITTED token=%s pnl=%.2f stop=%.2f", token_addr, pnl, effective_floor)
+                except Exception as exc:
+                    logger.exception("Signal-only position error %s: %s", token_addr, exc)
+
+            # 3) Manage real positions. Signal is emitted first, SELL transaction is separate.
+            for token_addr, pos in real_items:
+                try:
+                    pair = prices.get(token_addr)
+                    if not pair:
+                        continue
+                    current_price = float(pair.get("priceUsd", 0) or 0)
+                    entry = float(pos.get("entry_price", 0) or 0)
+                    if current_price <= 0 or entry <= 0:
+                        continue
+                    pnl = (current_price - entry) / entry * 100.0
+                    locked_floor, weakness = _update_trailing_state(pos, current_price, pnl, pair)
+                    effective_floor = max(float(pos.get("sl", -8.0) or -8.0), float(locked_floor))
+                    pos["effective_stop_pnl"] = effective_floor
+                    pos["last_market_price"] = current_price
+                    pos["last_market_check"] = time.time()
                     _persist_open_position(token_addr, pos, "REAL")
 
-                    # اگر به سقف‌های بسیار بزرگ رسید، حدضرر نیز همراه آن بالا می‌رود.
-                    # نمونه: +1000% => حدود +950%؛ +500% => حدود +430%.
-                    # Unified exit rule: the initial SL is ALWAYS active.
-                    # Once a profit-lock floor is earned, the effective stop is
-                    # the higher of the initial SL and the locked floor.
-                    should_exit = False
-                    tp_target = float(pos.get("tp", 0) or 0)
-                    effective_floor = max(sl, locked_floor)
-                    pos["effective_stop_pnl"] = effective_floor
-                    if pnl_percent <= effective_floor:
-                        should_exit = True
-                        if effective_floor > sl:
-                            exit_reason_text = (
-                                f"قفل سود/تریلینگ فعال شد؛ سقف سود {highest_pnl:+.2f}% و "
-                                f"کف محافظت‌شده {effective_floor:+.2f}%؛ خروج انجام می‌شود 🎯"
-                            )
-                        else:
-                            exit_reason_text = "حد ضرر اولیه (SL) فعال شد 🛑"
-                    else:
-                        exit_reason_text = ""
-
-                    if not should_exit:
+                    if not pos.get("exit_triggered") and pnl > effective_floor:
                         continue
 
-                    success = False
-                    sell_res_info = "موجودی توکن برای فروش پیدا نشد"
-                    for _ in range(3):
-                        token_balance = get_token_balance(token_addr)
-                        if token_balance > 0:
-                            success, sell_res_info = execute_real_sell(token_addr, token_balance)
-                            if success:
-                                break
-                        time.sleep(0.5)
+                    if not pos.get("exit_triggered"):
+                        snapshot = None
+                        with state_lock:
+                            cur = active_positions.get(token_addr)
+                            if cur:
+                                cur["exit_triggered"] = True
+                                cur["exit_triggered_at"] = time.time()
+                                cur["exit_trigger_price"] = current_price
+                                cur["exit_trigger_pnl"] = pnl
+                                cur["position_state"] = POSITION_STATE_EXIT_PENDING
+                                snapshot = dict(cur)
+                        if snapshot:
+                            _persist_open_position(token_addr, snapshot, "REAL")
+                    reason = (
+                        f"قفل سود/تریلینگ؛ سقف {pos.get('highest_pnl', pnl):+.2f}% و کف {effective_floor:+.2f}%"
+                        if effective_floor > float(pos.get("sl", -8.0) or -8.0)
+                        else "حد ضرر اولیه فعال شد"
+                    )
+                    _emit_sell_signal_once(token_addr, pos, current_price, pnl, reason)
+                    _submit_real_sell_attempt(token_addr)
+                except Exception as exc:
+                    logger.exception("Real position error %s: %s", token_addr, exc)
 
-                    is_profit = pnl_percent >= 0
-                    sticker = "🤑" if is_profit else "🧐"
-                    # علت خروج و نتیجه معامله را جدا نگه می‌داریم؛ نتیجه منفی همیشه ضررده است.
-                    if pnl_percent < 0:
-                        reason = "خروج نهایی با ضرر؛ تریلینگ/حد ضرر فعال شد 🛑"
-                    elif pnl_percent == 0:
-                        reason = "خروج نهایی سر‌به‌سر ⚪"
-                    else:
-                        reason = exit_reason_text or "خروج سودده با تریلینگ/قفل سود 🎯"
-                    sell_status = "🟢 فروش موفق روی بلاکچین" if success else f"⚠️ فروش انجام نشد: {sell_res_info}"
-
-                    # مقدار P/L برای داشبورد تقریبی و بر اساس سرمایه نمونه موجود در پوزیشن.
-                    invested_sol = float(pos.get("buy_amt", 0.01) or 0.01)
-                    pnl_usd_val = invested_sol * pnl_percent / 100.0
-
-                    if success:
-                        closed_trades_history.append({"symbol": symbol, "percent": pnl_percent, "usd": pnl_usd_val})
-                        total_realized_pnl_percent += pnl_percent
-                        total_realized_pnl_usd += pnl_usd_val
-                        log_trade_to_db(token_addr, symbol, entry_price, current_price, pnl_percent, pnl_usd_val, reason)
-
-                    tx_link = f"https://solscan.io/tx/{sell_res_info}" if success else f"https://solscan.io/token/{token_addr}"
-                    # خروج نهایی از یک مسیر واحد ارسال می‌شود:
-                    # داخل ربات = جزئیات کامل؛ کانال = کارت تمیز + دکمه‌ها.
-                    if success:
-                        send_signal_outcome(
-                            token_addr, pos, current_price, "SELL_SUCCESS", pnl_percent,
-                            tx_signature=sell_res_info,
-                            extra_text=(
-                                f"🧠 ضعف بازار: {'تأیید شد' if weakness else 'خیر'}\n"
-                                f"📌 دلیل خروج: {reason}"
-                            )
-                        )
-                    else:
-                        # حتی اگر خرید واقعی قبلاً انجام نشده باشد یا در زمان خروج
-                        # موجودی توکن در ولت صفر باشد، «سیگنال فروش» باید منتشر شود.
-                        # این پیام یک SELL SIGNAL است، نه ادعای فروش موفق روی بلاکچین.
-                        send_telegram_msg(
-                            f"⚠️ سیگنال فروش صادر شد؛ فروش واقعی انجام نشد\n"
-                            f"🪙 {symbol}\n"
-                            f"📍 آدرس: {token_addr}\n"
-                            f"📊 وضعیت فعلی: {pnl_percent:+.2f}%\n"
-                            f"📌 علت اجرای واقعی: {sell_res_info}\n"
-                            f"🔄 پوزیشن برای تلاش مجدد تحت مدیریت است."
-                        )
-                        send_signal_outcome(
-                            token_addr, pos, current_price, "SELL_FAILED", pnl_percent,
-                            tx_signature="",
-                            extra_text=(
-                                f"🧠 این خروج مستقل از خرید واقعی است؛ سیگنال فروش بر اساس "
-                                f"قیمت/TP/SL صادر شد.\n"
-                                f"📌 وضعیت اجرای واقعی: {sell_res_info}\n"
-                                f"🔄 فروش واقعی در صورت وجود موجودی توکن دوباره تلاش می‌شود."
-                            )
-                        )
-
-                    # اگر فروش ناموفق بود پوزیشن را حذف نکن؛ در دور بعد دوباره تلاش می‌شود.
-                    if success:
-                        tokens_to_close.append((token_addr, current_price))
-
-                except Exception as inner_e:
-                    logger.error(f"⚠️ خطا در پوزیشن {token_addr}: {inner_e}")
-
-            if tokens_to_close:
-                with state_lock:
-                    for t_addr, exit_price in tokens_to_close:
-                        pos_snapshot = active_positions.get(t_addr)
-                        learning_record_exit(t_addr, pos_snapshot, exit_price, "POSITION_CLOSED")
-                        active_positions.pop(t_addr, None)
-                        # قفل همان توکن فقط پس از فروش کامل آزاد می‌شود.
-                        _mark_token_closed(t_addr)
-        except Exception as e:
-            logger.error(f"⚠️ خطای حلقه پوزیشن‌ها: {e}")
-        time.sleep(1)
+            POSITION_MONITOR_HEARTBEAT = time.time()
+            POSITION_MONITOR_LAST_OK = POSITION_MONITOR_HEARTBEAT
+        except Exception as exc:
+            POSITION_MONITOR_ERRORS += 1
+            POSITION_MONITOR_HEARTBEAT = time.time()
+            logger.exception("Position manager cycle failed: %s", exc)
+        # Never block the next safety cycle behind Telegram or network work.
+        elapsed = time.time() - cycle_started
+        time.sleep(max(0.05, POSITION_MONITOR_INTERVAL_SECONDS - elapsed))
 
 def technical_analysis_scanner_loop(app):
     global TECHNICAL_RUNNING, TECH_BUY_AMOUNT_SOL, TECH_TAKE_PROFIT, TECH_STOP_LOSS, TECH_MIN_LIQUIDITY
@@ -2194,13 +2376,13 @@ def advanced_filter_enabled():
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
 CONSENSUS_MIN_SCORE = 4.0
 CONSENSUS_MIN_RATIO = 0.55
-CONSENSUS_COOLDOWN_SECONDS = 20
+CONSENSUS_COOLDOWN_SECONDS = 8
 
 # Daily signal cap: OFF by default. Set manually from the management panel (1..50) to enable.
 # 0 means unlimited / disabled.
 DAILY_SIGNAL_LIMIT = 0
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 15
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 3
 # Signal budget is capacity only; quality thresholds never depend on this value.
 SIGNAL_BUDGET_MIN = 0
 SIGNAL_BUDGET_MAX = 50
@@ -3465,81 +3647,112 @@ def send_fused_signal(token_addr, fusion):
         return False, f"SIGNAL_WORKER_EXCEPTION:{type(exc).__name__}"
 
 
+def _send_buy_notifications(token_addr, symbol, price, tp, sl, amount, mode_name, engine_display,
+                            execution_display, chg, vol, liq, buys, sells):
+    """Publish the BUY event without exposing private wallet diagnostics in the channel."""
+    solscan_link = f"https://solscan.io/token/{token_addr}"
+    dex_link = f"https://dexscreener.com/solana/{token_addr}"
+    msg = (
+        f"⚡🤖 **{mode_name}**\n"
+        f"📡 **سیگنال BUY صادر شد**\n"
+        f"🤖 موتورهای مؤثر: {engine_display}\n\n"
+        f"🪙 توکن: {symbol}\n"
+        f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
+        f"💵 نقطه ورود دقیق: ${float(price):.8f}\n"
+        f"💰 مقدار برنامه‌ریزی‌شده: SOL {float(amount):g}\n"
+        f"🎯 تارگت اولیه: +{float(tp):.1f}%\n"
+        f"🛑 حد ضرر اولیه: {float(sl):.1f}%\n\n"
+        f"📌 وضعیت اجرای معامله: {execution_display}\n\n"
+        f"📊 تغییر ۵ دقیقه: {float(chg):+.2f}% | حجم: ${float(vol):,.0f} | نقدینگی: ${float(liq):,.0f}\n"
+        f"🔹 خرید/فروش ۵ دقیقه: {int(buys)}/{int(sells)}\n\n"
+        f"📈 مدیریت سود: تریلینگ پله‌ای + حدضرر سخت\n\n"
+        f"🔗 Solscan: {solscan_link}\n"
+        f"📈 DexScreener: {dex_link}"
+    )
+    telegram_ok = False
+    try:
+        telegram_ok = bool(send_telegram_msg(msg))
+    except Exception:
+        logger.exception("BUY Telegram notification failed token=%s", token_addr)
+    _load_channel_config()
+    channel_ok = True
+    if CHANNEL_ID:
+        try:
+            channel_ok = bool(send_graphic_signal_to_vip_channel(
+                token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
+                buy_amt=amount, volume=vol, liquidity=liq, p_change=chg,
+                solscan_link=solscan_link, signal_title=mode_name, side="BUY",
+                execution_status=execution_display, execution_tx=""
+            ))
+        except Exception:
+            channel_ok = False
+            logger.exception("BUY channel notification failed token=%s", token_addr)
+    if telegram_ok or channel_ok:
+        V12_REAL_AUDIT["channel_sent"] += 1
+    else:
+        V12_REAL_AUDIT["channel_failed"] += 1
+        _diag_reject("CHANNEL", "BUY_NOTIFICATION_FAILED", token_addr)
+    return bool(telegram_ok or channel_ok)
+
 def _send_fused_signal_impl(token_addr, fusion):
+    """Accept a quality BUY signal, persist it first, publish immediately, then trade asynchronously."""
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
-    # V17 FIX: non-MAX engines emit independently. MAX keeps one global lane.
     is_analysis_signal = bool(fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS")
     emit_lane = "ANALYSIS" if is_analysis_signal else ("MAX" if MAX_FUSION_ENABLED else str(fusion.get("hunter_group", "ENGINE")))
     emit_engine = (fusion.get("engines") or fusion.get("votes") or [emit_lane])[0]
     emit_key = f"{emit_lane}:{emit_engine}"
-    # فقط تصمیم ورود/سهمیه را قفل می‌کنیم؛ خرید شبکه و Telegram خارج از قفل انجام می‌شوند.
+
     with SIGNAL_EMIT_LOCK:
         if not MASTER_SIGNAL_ENABLED:
             _audit_signal_decision("MASTER_SIGNAL_OFF")
             return False, "MASTER_SIGNAL_OFF"
         if _token_lock_is_open(token_addr):
+            _audit_signal_decision("DUPLICATE_OPEN_POSITION")
             if is_analysis_signal:
                 _analysis_diag("blocked_duplicate", token_addr=token_addr)
-            logger.info(f"Duplicate BUY blocked for open token: {token_addr}")
-            _audit_signal_decision("DUPLICATE_OPEN_POSITION")
             return False, "DUPLICATE_OPEN_POSITION"
         if daily_signal_cap_reached():
+            _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
             if is_analysis_signal:
                 _analysis_diag("blocked_daily_cap", token_addr=token_addr)
-            _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
             return False, "DAILY_SIGNAL_CAP_REACHED"
         if learning_is_in_circuit_breaker():
-            if is_analysis_signal:
-                _analysis_diag("blocked_circuit", token_addr=token_addr)
-            logger.warning("Circuit breaker: new entries paused; open positions continue to be managed.")
             _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
             return False, "LEARNING_CIRCUIT_BREAKER"
         if not fusion_quality_gate(fusion):
-            logger.info(f"Fusion quality gate rejected {token_addr}; daily budget unchanged.")
             _audit_signal_decision("QUALITY_GATE_REJECTED")
             return False, "QUALITY_GATE_REJECTED"
-        # Final execution safety only: do not enter a token whose live 5m move
-        # is merely a 1-2% sideways fluctuation. Candidate generation/scoring
-        # remains untouched; this guard only prevents the actual BUY entry.
+
+        # Entry filter only. Exit management is completely independent.
         live_change_5m = float(fusion.get("chg", fusion.get("change_5m", 0.0)) or 0.0)
         if live_change_5m < MIN_ENTRY_MOMENTUM_5M:
-            logger.info(f"Entry blocked for low momentum {token_addr}: 5m change={live_change_5m:.2f}% < {MIN_ENTRY_MOMENTUM_5M:.2f}%")
             _audit_signal_decision("LOW_ENTRY_MOMENTUM")
             return False, "LOW_ENTRY_MOMENTUM"
-        now_global = time.time()
-        # MAX is a single attack and therefore uses the global cooldown.
-        # Outside MAX, Advanced/Hulk/individual engines have their own lane
-        # cooldown so one engine cannot suppress another engine's valid signal.
+
+        now = time.time()
         if MAX_FUSION_ENABLED and not is_analysis_signal:
-            if now_global - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
+            if now - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
                 _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
                 return False, "GLOBAL_SIGNAL_COOLDOWN"
-        elif is_analysis_signal:
-            if now_global - consensus_last_signal.get(emit_key, 0) < CONSENSUS_COOLDOWN_SECONDS:
-                _analysis_diag("blocked_cooldown", token_addr=token_addr)
-                _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
-                return False, "ANALYSIS_COOLDOWN"
         else:
-            lane_last = consensus_last_signal.get(emit_key, 0)
-            if now_global - lane_last < CONSENSUS_COOLDOWN_SECONDS:
+            if now - consensus_last_signal.get(emit_key, 0) < CONSENSUS_COOLDOWN_SECONDS:
                 _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
                 return False, "ENGINE_COOLDOWN"
         if EMERGENCY_STOP:
-            logger.info("Emergency stop active: new signal execution skipped.")
             _audit_signal_decision("EMERGENCY_STOP")
             return False, "EMERGENCY_STOP"
 
-        # سهمیه در لحظه صدور سیگنال واقعی رزرو می‌شود؛ شکست خرید/کانال سهمیه را دور نمی‌زند.
         if MAX_FUSION_ENABLED and not is_analysis_signal:
-            last_global_signal_time = now_global
-            UNIFIED_LAST_EMIT_TIME = now_global
-        consensus_last_signal[emit_key] = now_global
-        V12_REAL_AUDIT["last_signal"] = now_global
+            last_global_signal_time = now
+            UNIFIED_LAST_EMIT_TIME = now
+        consensus_last_signal[emit_key] = now
+        V12_REAL_AUDIT["last_signal"] = now
         _increment_daily_signal_count()
         _lock_token_entry(token_addr, "OPEN_PENDING")
         if is_analysis_signal:
             V12_REAL_AUDIT["analysis_signals_submitted"] += 1
             _analysis_diag("submitted", token_addr=token_addr)
+
     amount = get_dynamic_buy_amount(0.01)
     reason = " + ".join(fusion.get("votes") or [])
     group = str(fusion.get("hunter_group", "ENGINE") or "ENGINE").upper()
@@ -3553,132 +3766,40 @@ def _send_fused_signal_impl(token_addr, fusion):
         mode_name = "🧠 موتور پیشرفته"
     else:
         mode_name = "🤖 موتور اتحاد" if fusion.get("hulk_votes") else "🧠 موتور پیشرفته"
+
     engine_names = list(fusion.get("engines") or fusion.get("votes") or [])
-    symbol = fusion["symbol"]
-    price = fusion["price"]
-    tp = fusion["tp"]
-    sl = fusion["sl"]
-    dex_link = f"https://dexscreener.com/solana/{token_addr}"
-    token_link = f"https://solscan.io/token/{token_addr}"
-
-    # اجرای خرید واقعی مستقل از انتشار سیگنال است:
-    # حتی اگر ولت موجودی نداشته باشد یا اجرای معامله خطا بدهد،
-    # خود سیگنال BUY باید برای کانال منتشر شود.
-    try:
-        success, result = execute_real_buy(token_addr, amount)
-    except Exception as exc:
-        success, result = False, f"خطای اجرای خرید واقعی: {type(exc).__name__}: {exc}"
-        logger.exception("Real BUY execution crashed for %s", token_addr)
-
-    if success:
-        V12_REAL_AUDIT["real_buy_success"] += 1
-        if is_analysis_signal:
-            _analysis_diag("real_buy_success", token_addr=token_addr)
-    else:
-        V12_REAL_AUDIT["real_buy_failed"] += 1
-        if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS":
-            _analysis_diag("real_buy_failed", f"REAL_BUY_FAILED:{result}", token_addr)
-        _diag_reject("EXECUTION", f"REAL_BUY_FAILED:{result}", token_addr)
-    execution_status = (
-        "🟢 خرید واقعی موفق روی بلاکچین"
-        if success
-        else f"⚠️ سیگنال صادر شد؛ خرید واقعی انجام نشد: {result}"
-    )
-    solscan_link = f"https://solscan.io/tx/{result}" if success else token_link
-
-    engine_display = ", ".join(str(x) for x in engine_names if x) or str(mode_name)
+    symbol = fusion.get("symbol", "TOKEN")
+    price = float(fusion.get("price", 0) or 0)
+    tp = float(fusion.get("tp", 0) or 0)
+    sl = float(fusion.get("sl", -8.0) or -8.0)
     wallet_state_code, wallet_state_text = _wallet_execution_state()
-    if success:
-        execution_display = f"🟢 خرید واقعی موفق شد\n🤖 موتور/موتورهای مسئول: {engine_display}\n📌 تراکنش: {result}"
-    else:
-        execution_display = (
-            f"📡 سیگنال BUY صادر شد؛ خرید واقعی انجام نشد\n"
-            f"🤖 موتور/موتورهای مسئول: {engine_display}\n"
-            f"🔐 وضعیت اجرای خصوصی ولت: {wallet_state_text}\n"
-            f"📌 دلیل: {result}"
-        )
-
-    msg = (
-        f"⚡🤖 **{mode_name}**\n"
-        f"🎯 قدرت سیگنال: **{fusion['score']:.2f}**\n"
-        f"🤖 موتورهای مؤثر: {engine_display}\n"
-        f"🧠 مسیر اجرا: {'مستقل — موتور تحلیل' if is_analysis_signal else mode_name}\n\n"
-        f"🪙 توکن: {symbol}\n"
-        f"📍 آدرس قرارداد:\n`{token_addr}`\n\n"
-        f"💵 نقطه ورود دقیق: ${price:.8f}\n"
-        f"💰 مقدار خرید: SOL {amount:g}\n"
-        f"🎯 تارگت اولیه: +{tp:.1f}%\n"
-        f"🛑 حد ضرر اولیه: {sl:.1f}%\n"
-        f"\n📦 نتیجه خرید واقعی:\n{execution_display}\n\n"
-        f"📊 آمار لحظه‌ای بازار:\n"
-        f"🔹 تغییر ۵ دقیقه: {fusion['chg']:+.2f}%\n"
-        f"🔹 حجم ۵ دقیقه: ${fusion['vol']:,.0f}\n"
-        f"🔹 نقدینگی: ${fusion['liq']:,.0f}\n"
-        f"🔹 خرید/فروش ۵ دقیقه: {fusion.get('buys', 0)}/{fusion.get('sells', 0)}\n\n"
-        f"📈 مدیریت سود: تریلینگ پله‌ای هوشمند\n\n"
-        f"🔗 Solscan: {solscan_link}\n"
-        f"📈 DexScreener: {dex_link}"
+    public_execution_status = (
+        "📡 سیگنال BUY صادر شد؛ اجرای واقعی در پس‌زمینه انجام می‌شود."
+        if wallet_state_code == "READY" else
+        "📡 سیگنال BUY صادر شد؛ اجرای واقعی فعلاً انجام نمی‌شود."
     )
-    send_telegram_msg(msg)
 
-    channel_ok = send_graphic_signal_to_vip_channel(
-        token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
-        buy_amt=amount, volume=fusion['vol'], liquidity=fusion['liq'],
-        p_change=fusion['chg'], solscan_link=solscan_link,
-        signal_title=mode_name, side="BUY",
-        execution_status=execution_status, execution_tx=result if success else ""
+    # Persist the signal BEFORE any notification or wallet work.
+    track_signal_only(
+        token_addr, symbol, price, tp, sl, fusion.get("vol", 0), fusion.get("liq", 0),
+        fusion.get("chg", 0), reason, amount, public_execution_status, fusion=fusion
     )
-    if channel_ok:
-        V12_REAL_AUDIT["channel_sent"] += 1
-        if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS":
-            _analysis_diag("channel_sent", token_addr=token_addr)
-    else:
-        V12_REAL_AUDIT["channel_failed"] += 1
-        if fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS":
-            _analysis_diag("channel_failed", "CHANNEL_SEND_FAILED", token_addr)
-        _diag_reject("CHANNEL", "CHANNEL_SEND_FAILED", token_addr)
 
-    if success:
-        txlink = f"https://solscan.io/tx/{result}"
-        exec_meta = REAL_BUY_EXECUTION_META.pop(token_addr, {})
-        actual_received = int(exec_meta.get("received_token_raw", 0) or 0)
-        quoted_received = int(exec_meta.get("quote_out_amount_raw", 0) or 0)
-        effective_entry_price = float(price)
-        if actual_received > 0 and quoted_received > 0:
-            effective_entry_price = float(price) * (quoted_received / actual_received)
-        pos = {
-            "entry_price": effective_entry_price, "signal_price": float(price),
-            "actual_token_received_raw": actual_received,
-            "quoted_token_amount_raw": quoted_received,
-            "symbol": symbol,
-            "tp": tp, "sl": sl, "highest_price": price,
-            "highest_pnl": 0.0, "locked_floor": sl,
-            "trailing_active": DYNAMIC_TRAILING_TP_ENABLED,
-            "side": "BUY", "reason": f"{mode_name} | {reason}", "engines": engine_names, "engine_names": engine_names, "mode": mode_name, "opened_at": time.time(), "buy_amt": amount,
-            "entry_lock": True, "position_type": "REAL", "real_trade": True,
-            "volume": float(fusion.get("vol", 0.0) or 0.0),
-            "liquidity": float(fusion.get("liq", 0.0) or 0.0),
-            "p_change": float(fusion.get("chg", 0.0) or 0.0),
-            "buys_m5": int(fusion.get("buys", 0) or 0),
-            "sells_m5": int(fusion.get("sells", 0) or 0)
-        }
-        with state_lock:
-            processed_tokens.add(token_addr)
-            active_positions[token_addr] = pos
-        _persist_open_position(token_addr, pos, "REAL")
-        # کپی‌ترید فقط بعد از خرید واقعی مرجع فعال می‌شود.
-        trigger_copy_trading_for_subscribers(token_addr, amount, side="BUY", tx_signature=result)
-        send_telegram_msg(
-            f"🟢 خرید خودکار انجام شد\n🪙 {symbol}\n💰 {amount:g} SOL\n🔗 {txlink}"
-        )
-    else:
-        # خرید واقعی انجام نشد؛ فقط یک پوزیشن سیگنال-مجازی داخلی ساخته می‌شود.
-        # هیچ پیام «ثبت/رصد شد» یا «SOL ناکافی» برای کاربر ارسال نمی‌شود.
-        track_signal_only(
-            token_addr, symbol, price, tp, sl, fusion['vol'], fusion['liq'],
-            fusion['chg'], reason, amount, execution_status
-        )
-    return success, result
+    # The public event is never blocked by wallet state.
+    _notify_async(
+        _send_buy_notifications,
+        token_addr, symbol, price, tp, sl, amount, mode_name,
+        ", ".join(str(x) for x in engine_names if x) or mode_name,
+        public_execution_status, fusion.get("chg", 0), fusion.get("vol", 0),
+        fusion.get("liq", 0), fusion.get("buys", 0), fusion.get("sells", 0)
+    )
+
+    # Real BUY is an independent worker. It may fail, retry later, or succeed and promote the same position.
+    _start_real_buy_attempt(token_addr)
+
+    if is_analysis_signal:
+        _analysis_diag("channel_sent", token_addr=token_addr)
+    return True, "SIGNAL_ISSUED"
 
 
 # ==========================================================
@@ -4425,14 +4546,18 @@ def _submit_analysis_selected(selected):
 
 
 def _submit_signal_job(token_addr, candidate):
-    """Bounded signal submission; rejected admission is retried by the next sweep."""
+    """Bounded background job runner. Supports internal BUY tasks as well as signal workers."""
     if not token_addr or not isinstance(candidate, dict):
         return False
     if not SIGNAL_EXECUTOR_SLOTS.acquire(blocking=False):
         _diag_reject("EXECUTION", "SIGNAL_EXECUTOR_BUSY", token_addr)
         return False
+    job = candidate.get("worker") if callable(candidate.get("worker")) else None
     try:
-        future = SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, candidate)
+        if job is not None:
+            future = SIGNAL_EXECUTOR.submit(job)
+        else:
+            future = SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, candidate)
     except Exception as exc:
         SIGNAL_EXECUTOR_SLOTS.release()
         _diag_reject("EXECUTION", f"SIGNAL_SUBMIT_EXCEPTION:{type(exc).__name__}:{exc}", token_addr)
@@ -6473,31 +6598,6 @@ def pro_trader_cache_maintenance_loop():
         time.sleep(3600)
 
 
-def learning_record_exit(token_addr, position, exit_price, reason=""):
-    """Best-effort bridge from an existing position object to the learning DB."""
-    try:
-        if not position:
-            return
-        entry = float(position.get("entry_price") or position.get("price") or 0)
-        if entry <= 0 or float(exit_price or 0) <= 0:
-            return
-        pnl = (float(exit_price) - entry) / entry * 100.0
-        record_closed_trade(
-            token_addr=token_addr,
-            symbol=position.get("symbol", ""),
-            side=position.get("side", "BUY"),
-            entry=entry,
-            exit_price=exit_price,
-            pnl_pct=pnl,
-            reason=reason,
-            engine_names=position.get("engines") or position.get("engine_names") or [],
-            hold_seconds=max(0, int(time.time() - float(position.get("opened_at", time.time())))),
-            regime=position.get("regime", "UNKNOWN")
-        )
-        _pro_learn_closed_trade(position, exit_price, reason)
-    except Exception as e:
-        logger.warning(f"Learning exit bridge failed: {e}")
-
 
 # ================= PROFESSIONAL TRADER ADAPTIVE LAYER =================
 PRO_TRADER_LEARNING_ENABLED = True
@@ -6605,6 +6705,33 @@ def unified_scanner_watchdog_loop():
         except Exception:
             pass
         time.sleep(10)
+
+
+
+def learning_record_exit(token_addr, position, exit_price, reason=""):
+    """Best-effort bridge from an existing position object to the learning DB."""
+    try:
+        if not position:
+            return
+        entry = float(position.get("entry_price") or position.get("price") or 0)
+        if entry <= 0 or float(exit_price or 0) <= 0:
+            return
+        pnl = (float(exit_price) - entry) / entry * 100.0
+        record_closed_trade(
+            token_addr=token_addr,
+            symbol=position.get("symbol", ""),
+            side=position.get("side", "BUY"),
+            entry=entry,
+            exit_price=exit_price,
+            pnl_pct=pnl,
+            reason=reason,
+            engine_names=position.get("engines") or position.get("engine_names") or [],
+            hold_seconds=max(0, int(time.time() - float(position.get("opened_at", time.time())))),
+            regime=position.get("regime", "UNKNOWN")
+        )
+        _pro_learn_closed_trade(position, exit_price, reason)
+    except Exception as e:
+        logger.warning(f"Learning exit bridge failed: {e}")
 
 
 if __name__ == "__main__":
