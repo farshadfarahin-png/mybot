@@ -47,7 +47,11 @@ http_session.mount("https://", adapter)
 http_session.mount("http://", adapter)
 
 # کارهای سنگین بازار از اسکنر جدا می‌شوند تا Telegram سریع بماند.
-SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="SignalExec")
+SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="SignalExec")
+# Hard bound the number of queued/running signal jobs. This prevents a fast radar
+# from filling the executor queue and starving all later signals.
+SIGNAL_EXECUTOR_MAX_INFLIGHT = 6
+SIGNAL_EXECUTOR_SLOTS = threading.BoundedSemaphore(SIGNAL_EXECUTOR_MAX_INFLIGHT)
 ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisExec")
 SIGNAL_EMIT_LOCK = Lock()
 
@@ -136,7 +140,7 @@ MAX_FUSION_ENABLED = False
 EMERGENCY_STOP = False
 # کلید مادر سیگنال: ON = مسیر تولید سیگنال BUY/SELL فعال، OFF = هیچ سیگنال جدیدی تولید/منتشر نمی‌شود.
 # Master فقط کلید اصلی فعال/غیرفعال‌سازی کل سیستم سیگنال است؛ موتور محسوب نمی‌شود.
-MASTER_SIGNAL_ENABLED = False
+MASTER_SIGNAL_ENABLED = True
 # مجوز مستقل خرج‌کردن از ولت برای BUY/SELL واقعی؛ پیش‌فرض خاموش
 WALLET_TRADE_PERMISSION = False
 MASTER_SIGNAL_FIRE_NOW = False  # legacy UI pulse; never used as a signal source
@@ -1423,7 +1427,52 @@ def set_wallet_trade_permission(enabled: bool):
     )
     return WALLET_TRADE_PERMISSION
 
+def _wallet_execution_state():
+    """Return the private wallet execution state without affecting signal generation."""
+    if not WALLET_TRADE_PERMISSION:
+        return "LOCKED", "مجوز معامله واقعی خاموش است 🔒"
+    if not WALLET_PUBKEY or sender_keypair is None:
+        return "UNAVAILABLE", "ولتی برای امضای معامله واقعی در دسترس نیست 🔐"
+    try:
+        sol = float(get_sol_balance())
+    except Exception:
+        sol = 0.0
+    if sol <= 0:
+        return "NO_BALANCE", "موجودی SOL کافی نیست 💰"
+    return "READY", f"آماده اجرای واقعی؛ موجودی {sol:.6f} SOL"
+
+REAL_BUY_EXECUTION_META = {}
+REAL_SELL_CONFIRM_TIMEOUT = 25
+REAL_SELL_CONFIRM_POLL = 1.0
+
+def _confirm_transaction(signature, timeout=REAL_SELL_CONFIRM_TIMEOUT):
+    """Confirm a Solana transaction; a submitted signature is not a successful fill."""
+    if not signature:
+        return False, "NO_SIGNATURE"
+    deadline = time.time() + max(3, float(timeout))
+    last_status = "PENDING"
+    while time.time() < deadline:
+        try:
+            res = send_rpc_request({
+                "jsonrpc": "2.0", "id": 1, "method": "getSignatureStatuses",
+                "params": [[signature], {"searchTransactionHistory": True}]
+            }, timeout=8)
+            value = ((res.get("result") or {}).get("value") or [None])[0]
+            if value:
+                last_status = str(value.get("confirmationStatus") or "processed")
+                if value.get("err") is not None:
+                    return False, f"CHAIN_ERROR:{value.get('err')}"
+                if last_status in ("confirmed", "finalized"):
+                    return True, last_status
+        except Exception as exc:
+            last_status = f"RPC_ERROR:{type(exc).__name__}"
+        time.sleep(REAL_SELL_CONFIRM_POLL)
+    return False, last_status
+
 def execute_real_buy(token_mint, amount_sol):
+    """Attempt a real BUY only when wallet execution is explicitly enabled.
+    Failure here NEVER suppresses the public BUY signal; caller records it as signal-only.
+    """
     if not WALLET_TRADE_PERMISSION:
         return False, "مجوز معامله از ولت خاموش است 🔒 — خرید واقعی انجام نشد"
     if not WALLET_PUBKEY or sender_keypair is None:
@@ -1441,6 +1490,7 @@ def execute_real_buy(token_mint, amount_sol):
         )
 
     lamports = int(dynamic_amount * 1_000_000_000)
+    pre_token_balance = get_token_balance(token_mint)
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
@@ -1512,15 +1562,31 @@ def execute_real_buy(token_mint, amount_sol):
 
         if "result" in tx_res:
             sig = tx_res["result"]
-            for _ in range(10):
-                time.sleep(1)
-                if get_token_balance(token_mint) > 0:
-                    trigger_copy_trading_for_subscribers(token_mint, dynamic_amount)
-                    return True, sig
-            if get_token_balance(token_mint) > 0:
-                trigger_copy_trading_for_subscribers(token_mint, dynamic_amount)
-                return True, sig
-            return False, "تراکنش ارسال شد اما توکن در ولت ننشست ❌"
+            confirmed, status = _confirm_transaction(sig)
+            if not confirmed:
+                return False, f"BUY_TX_NOT_CONFIRMED:{status}"
+            deadline = time.time() + 15
+            received_balance = pre_token_balance
+            while time.time() < deadline:
+                time.sleep(0.8)
+                received_balance = get_token_balance(token_mint)
+                if received_balance > pre_token_balance:
+                    break
+            received_delta = max(0, int(received_balance) - int(pre_token_balance))
+            REAL_BUY_EXECUTION_META[token_mint] = {
+                "tx_signature": sig,
+                "requested_sol": float(dynamic_amount),
+                "pre_token_balance": int(pre_token_balance),
+                "post_token_balance": int(received_balance),
+                "received_token_raw": int(received_delta),
+                "quote_out_amount_raw": int(quote_res.get("outAmount", 0) or 0),
+                "confirmation_status": status,
+                "executed_at": time.time(),
+            }
+            # A confirmed swap is a real BUY even if the token-account RPC is
+            # temporarily stale. The position manager will keep polling balance.
+            trigger_copy_trading_for_subscribers(token_mint, dynamic_amount)
+            return True, sig
         else:
             return False, "خطای ارسال تراکنش ❌"
     except Exception as e:
@@ -1569,6 +1635,9 @@ def close_wsol_account():
         logger.warning(f"⚠️ هشدار در بستن اکانت WSOL: {e}")
 
 def execute_real_sell(token_mint, token_amount):
+    """Attempt a real SELL only for a real position with wallet permission.
+    Signal generation remains independent of this function.
+    """
     if not WALLET_TRADE_PERMISSION:
         return False, "مجوز معامله از ولت خاموش است 🔒 — فروش واقعی انجام نشد"
     if not WALLET_PUBKEY or sender_keypair is None:
@@ -1637,13 +1706,14 @@ def execute_real_sell(token_mint, token_amount):
         }
         
         tx_res = send_rpc_request(rpc_payload, timeout=10)
-        if "result" in tx_res:
-            sig = tx_res["result"]
-            time.sleep(1)
-            close_wsol_account()
-            return True, sig
-        else:
+        if "result" not in tx_res:
             return False, "خطای شبکه فروش ❌"
+        sig = tx_res["result"]
+        confirmed, status = _confirm_transaction(sig)
+        if not confirmed:
+            return False, f"SELL_TX_NOT_CONFIRMED:{status}"
+        close_wsol_account()
+        return True, sig
     except Exception as e:
         return False, f"خطا: {e}"
 
@@ -1670,19 +1740,22 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
     sells_m5 = int(pos.get("sells_m5", 0) or 0)
     solscan, dex = _signal_links(token_addr, tx_signature)
 
+    is_real_position = str(pos.get("position_type", "REAL")).upper() == "REAL" or bool(pos.get("real_trade"))
     if outcome == "SELL_SUCCESS":
         if float(pnl_percent or 0.0) < 0:
-            title, status = "🔴 فروش خودکار موفق — خروج با ضرر", "🟢 فروش انجام شد؛ معامله با ضرر بسته شد"
+            title = "🔴 فروش واقعی موفق — خروج با ضرر" if is_real_position else "🔴 سیگنال فروش — خروج با ضرر"
+            status = "🟢 فروش روی بلاکچین تأیید شد؛ معامله با ضرر بسته شد" if is_real_position else "📡 سیگنال فروش صادر شد؛ معامله واقعی وجود نداشت"
         else:
-            title, status = "🔴 فروش خودکار موفق", "🟢 فروش موفق روی بلاکچین"
+            title = "🔴 فروش واقعی موفق" if is_real_position else "🔴 سیگنال فروش"
+            status = "🟢 فروش روی بلاکچین تأیید شد" if is_real_position else "📡 سیگنال فروش صادر شد؛ خرید واقعی انجام نشده بود"
     elif outcome == "SELL_FAILED":
-        title, status = "⚠️ سیگنال خروج / فروش ناموفق", "⚠️ فروش انجام نشد"
+        title, status = "⚠️ سیگنال خروج / فروش ناموفق", "⚠️ سیگنال فروش صادر شد؛ فروش واقعی انجام نشد"
     elif outcome == "SIGNAL_TP" and float(pnl_percent or 0.0) > 0:
-        title, status = "🎯 فروش سیگنال؛ خروج سودده با تریلینگ", "🟢 معامله واقعاً با سود بسته شد"
+        title, status = "🎯 فروش سیگنال؛ خروج سودده با تریلینگ", "📡 سیگنال فروش صادر شد؛ این پوزیشن خرید واقعی نداشته است"
     elif outcome == "SIGNAL_TP" and float(pnl_percent or 0.0) == 0:
-        title, status = "⚪ فروش سیگنال؛ خروج سر‌به‌سر", "⚪ معامله بدون سود و ضرر بسته شد"
+        title, status = "⚪ فروش سیگنال؛ خروج سر‌به‌سر", "📡 سیگنال فروش صادر شد؛ این پوزیشن خرید واقعی نداشته است"
     else:
-        title, status = "🛑 فروش سیگنال؛ خروج ضررده", "🔴 نتیجه واقعی معامله منفی بود"
+        title, status = "🛑 فروش سیگنال؛ خروج ضررده", "📡 سیگنال فروش صادر شد؛ این پوزیشن خرید واقعی نداشته است"
 
     msg = (
         f"{title}\n\n"
@@ -1714,18 +1787,10 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
         )
 
 def _adaptive_locked_floor(highest_pnl, current_floor):
-    """قفل سود پله‌ای؛ فقط رو به بالا حرکت می‌کند و بعد از آخرین پله هم ادامه دارد."""
+    """Return the highest applicable profit-lock floor; never create an SL dead-zone."""
     h = float(highest_pnl or 0.0)
     floor = float(current_floor)
-
-    for high, lock in TRAILING_LOCK_TABLE:
-        if h >= float(high):
-            floor = max(floor, float(lock))
-            break
-
-    if h > 1000.0:
-        floor = max(floor, h - 50.0)
-
+    floor = max(floor, get_unlimited_trailing_floor(h))
     return floor
 
 def _update_trailing_state(pos, current_price, pnl_percent, pair):
@@ -1773,7 +1838,8 @@ def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_ch
         "volume": volume, "liquidity": liquidity, "p_change": p_change,
         "reason": reason, "buy_amt": buy_amt, "buy_status": buy_status,
         "created_at": time.time(), "highest_pnl": 0.0, "highest_price": price,
-        "locked_floor": sl, "trailing_active": True, "side": "BUY"
+        "locked_floor": sl, "trailing_active": True, "side": "BUY",
+        "position_type": "SIGNAL", "real_trade": False
     }
     with state_lock:
         signal_positions[token_addr] = pos
@@ -1802,25 +1868,25 @@ def evaluate_signal_only_positions():
             locked_floor, weakness = _update_trailing_state(pos, current_price, pnl, pair)
             _persist_open_position(token_addr, pos, "SIGNAL")
 
-            # TP یک خروج واقعی است؛ trailing فقط نقش مدیریت پوزیشن قبل از رسیدن به TP
-            # و محافظت از سودهای بالاتر را دارد. این تغییر مسیر تولید BUY را دست نمی‌زند.
+            # Signal-only positions use exactly the same protection semantics as
+            # real positions: initial SL is never disabled and profit-lock can only
+            # move the effective stop upward.
             should_close = False
             outcome = "SIGNAL_TP"
             tp_target = float(pos.get("tp", 0) or 0)
-            # TP is a milestone, not an automatic sale. Profit-lock/trailing owns the exit.
-            if pnl <= float(pos.get("sl", -8.0)) and pos.get("highest_pnl", 0) < 8:
-
+            initial_sl = float(pos.get("sl", -8.0) or -8.0)
+            effective_floor = max(initial_sl, float(locked_floor))
+            pos["effective_stop_pnl"] = effective_floor
+            if pnl <= effective_floor:
                 should_close = True
-                outcome = "SIGNAL_SL"
-            elif pnl <= locked_floor and pos.get("highest_pnl", 0) >= 10:
+                outcome = "SIGNAL_TP" if effective_floor > initial_sl else "SIGNAL_SL"
+            elif weakness and pnl <= effective_floor:
                 should_close = True
-                outcome = "SIGNAL_TP"
-            elif weakness and pnl <= locked_floor:
-                should_close = True
-                outcome = "SIGNAL_TP"
+                outcome = "SIGNAL_TP" if pnl > 0 else "SIGNAL_SL"
 
             if should_close:
                 extra = (
+                    f"📡 این خروج فقط سیگنال بازار است؛ خرید واقعی برای این پوزیشن ثبت نشده.\n"
                     f"🧠 وضعیت بازار: {'ضعف/فشار فروش تأیید شد' if weakness else 'تریلینگ استاپ فعال شد'}\n"
                     f"📉 افت از سقف: {pos.get('drawdown_from_high', 0):.2f}%\n"
                     f"📊 معاملات ۵ دقیقه: خرید {pos.get('buys_m5', 0)} | فروش {pos.get('sells_m5', 0)}"
@@ -1842,6 +1908,34 @@ def evaluate_signal_only_positions():
 # سیو سود پله‌ای برای معامله واقعی: ۳۰٪ در TP، ۳۰٪ در 2×TP و مابقی با تریلینگ/SL.
 PARTIAL_TP_LEVELS = ((1.0, 0.30), (2.0, 0.30))
 
+def _normalize_position_state(token_addr, pos, position_type="REAL"):
+    """Migrate legacy/partial position dictionaries into one safe schema."""
+    if not isinstance(pos, dict):
+        return None
+    try:
+        entry = float(pos.get("entry_price", pos.get("price", 0)) or 0)
+    except Exception:
+        entry = 0.0
+    if entry <= 0:
+        return None
+    try:
+        sl = float(pos.get("sl", -8.0) or -8.0)
+    except Exception:
+        sl = -8.0
+    if sl >= 0:
+        sl = -abs(sl) if sl else -8.0
+    pos.setdefault("entry_price", entry)
+    pos.setdefault("highest_price", entry)
+    pos.setdefault("highest_pnl", 0.0)
+    pos.setdefault("locked_floor", sl)
+    pos.setdefault("trailing_active", True)
+    pos.setdefault("opened_at", time.time())
+    pos.setdefault("side", "BUY")
+    pos.setdefault("buy_amt", 0.0)
+    pos["sl"] = sl
+    pos["position_type"] = position_type
+    return pos
+
 def check_positions_loop():
     """مدیریت پوزیشن واقعی با trailing پله‌ای، تشخیص ضعف بازار و خروج کامل."""
     global closed_trades_history, total_realized_pnl_usd, total_realized_pnl_percent
@@ -1856,6 +1950,10 @@ def check_positions_loop():
 
             for token_addr, pos in current_positions:
                 try:
+                    pos = _normalize_position_state(token_addr, pos, "REAL")
+                    if pos is None:
+                        logger.error("Invalid position state; refusing unmanaged position %s", token_addr)
+                        continue
                     res = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=4)
                     if res.status_code != 200:
                         continue
@@ -1883,19 +1981,22 @@ def check_positions_loop():
 
                     # اگر به سقف‌های بسیار بزرگ رسید، حدضرر نیز همراه آن بالا می‌رود.
                     # نمونه: +1000% => حدود +950%؛ +500% => حدود +430%.
+                    # Unified exit rule: the initial SL is ALWAYS active.
+                    # Once a profit-lock floor is earned, the effective stop is
+                    # the higher of the initial SL and the locked floor.
                     should_exit = False
                     tp_target = float(pos.get("tp", 0) or 0)
-                    # TP is only a milestone. Do not sell at the first target.
-                    # The +8% profit-lock ladder/trailing manager decides the exit.
-                    if pnl_percent <= sl and highest_pnl < 8.0:
+                    effective_floor = max(sl, locked_floor)
+                    pos["effective_stop_pnl"] = effective_floor
+                    if pnl_percent <= effective_floor:
                         should_exit = True
-                        exit_reason_text = "فروش خودکار حد ضرر اولیه (SL) فعال شد 🛑"
-                    elif pnl_percent <= locked_floor and highest_pnl >= 10.0:
-                        should_exit = True
-                        exit_reason_text = (
-                            f"قفل سود فعال شد؛ سقف سود {highest_pnl:+.2f}% "
-                            f"و کف سود قفل‌شده {locked_floor:+.2f}%؛ برگشت قیمت به کف قفل‌شده باعث فروش شد 🎯"
-                        )
+                        if effective_floor > sl:
+                            exit_reason_text = (
+                                f"قفل سود/تریلینگ فعال شد؛ سقف سود {highest_pnl:+.2f}% و "
+                                f"کف محافظت‌شده {effective_floor:+.2f}%؛ خروج انجام می‌شود 🎯"
+                            )
+                        else:
+                            exit_reason_text = "حد ضرر اولیه (SL) فعال شد 🛑"
                     else:
                         exit_reason_text = ""
 
@@ -2236,6 +2337,7 @@ _SENTINEL_PAIR_CHOICES = 3
 TRUE_HUNTER_BATCH_SIZE = 30
 _TRUE_HUNTER_CURSOR = 0
 _TRUE_HUNTER_CURSOR_LOCK = Lock()
+UNIFIED_SCANNER_HEARTBEAT = 0.0
 _sentinel_memory = {}
 _sentinel_lock = Lock()
 
@@ -3346,6 +3448,24 @@ v7_compact_learning_memory(force=False)
 
 
 def send_fused_signal(token_addr, fusion):
+    """Fault-contained signal execution. A worker crash must never leave a permanent token lock."""
+    try:
+        return _send_fused_signal_impl(token_addr, fusion)
+    except Exception as exc:
+        logger.exception("Signal worker crashed for %s", token_addr)
+        _diag_reject("EXECUTION", f"SIGNAL_WORKER_EXCEPTION:{type(exc).__name__}:{exc}", token_addr)
+        # Release only if the failed worker did not actually register a position.
+        try:
+            with state_lock:
+                registered = token_addr in active_positions or token_addr in signal_positions
+            if not registered:
+                _unlock_token_entry(token_addr)
+        except Exception:
+            pass
+        return False, f"SIGNAL_WORKER_EXCEPTION:{type(exc).__name__}"
+
+
+def _send_fused_signal_impl(token_addr, fusion):
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
     # V17 FIX: non-MAX engines emit independently. MAX keeps one global lane.
     is_analysis_signal = bool(fusion.get("force_independent") or fusion.get("hunter_group") == "ANALYSIS")
@@ -3467,10 +3587,16 @@ def send_fused_signal(token_addr, fusion):
     solscan_link = f"https://solscan.io/tx/{result}" if success else token_link
 
     engine_display = ", ".join(str(x) for x in engine_names if x) or str(mode_name)
+    wallet_state_code, wallet_state_text = _wallet_execution_state()
     if success:
         execution_display = f"🟢 خرید واقعی موفق شد\n🤖 موتور/موتورهای مسئول: {engine_display}\n📌 تراکنش: {result}"
     else:
-        execution_display = f"🔴 خرید واقعی ناموفق شد\n🤖 موتور/موتورهای مسئول: {engine_display}\n📌 دلیل: {result}"
+        execution_display = (
+            f"📡 سیگنال BUY صادر شد؛ خرید واقعی انجام نشد\n"
+            f"🤖 موتور/موتورهای مسئول: {engine_display}\n"
+            f"🔐 وضعیت اجرای خصوصی ولت: {wallet_state_text}\n"
+            f"📌 دلیل: {result}"
+        )
 
     msg = (
         f"⚡🤖 **{mode_name}**\n"
@@ -3514,13 +3640,22 @@ def send_fused_signal(token_addr, fusion):
 
     if success:
         txlink = f"https://solscan.io/tx/{result}"
+        exec_meta = REAL_BUY_EXECUTION_META.pop(token_addr, {})
+        actual_received = int(exec_meta.get("received_token_raw", 0) or 0)
+        quoted_received = int(exec_meta.get("quote_out_amount_raw", 0) or 0)
+        effective_entry_price = float(price)
+        if actual_received > 0 and quoted_received > 0:
+            effective_entry_price = float(price) * (quoted_received / actual_received)
         pos = {
-            "entry_price": price, "symbol": symbol,
+            "entry_price": effective_entry_price, "signal_price": float(price),
+            "actual_token_received_raw": actual_received,
+            "quoted_token_amount_raw": quoted_received,
+            "symbol": symbol,
             "tp": tp, "sl": sl, "highest_price": price,
             "highest_pnl": 0.0, "locked_floor": sl,
             "trailing_active": DYNAMIC_TRAILING_TP_ENABLED,
             "side": "BUY", "reason": f"{mode_name} | {reason}", "engines": engine_names, "engine_names": engine_names, "mode": mode_name, "opened_at": time.time(), "buy_amt": amount,
-            "entry_lock": True,
+            "entry_lock": True, "position_type": "REAL", "real_trade": True,
             "volume": float(fusion.get("vol", 0.0) or 0.0),
             "liquidity": float(fusion.get("liq", 0.0) or 0.0),
             "p_change": float(fusion.get("chg", 0.0) or 0.0),
@@ -4289,6 +4424,34 @@ def _submit_analysis_selected(selected):
 
 
 
+def _submit_signal_job(token_addr, candidate):
+    """Bounded signal submission; rejected admission is retried by the next sweep."""
+    if not token_addr or not isinstance(candidate, dict):
+        return False
+    if not SIGNAL_EXECUTOR_SLOTS.acquire(blocking=False):
+        _diag_reject("EXECUTION", "SIGNAL_EXECUTOR_BUSY", token_addr)
+        return False
+    try:
+        future = SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, candidate)
+    except Exception as exc:
+        SIGNAL_EXECUTOR_SLOTS.release()
+        _diag_reject("EXECUTION", f"SIGNAL_SUBMIT_EXCEPTION:{type(exc).__name__}:{exc}", token_addr)
+        logger.exception("Signal submit failed for %s", token_addr)
+        return False
+
+    def _release(done_future, addr=token_addr):
+        try:
+            exc = done_future.exception()
+            if exc:
+                _diag_reject("EXECUTION", f"SIGNAL_WORKER_EXCEPTION:{type(exc).__name__}:{exc}", addr)
+        except Exception:
+            pass
+        finally:
+            SIGNAL_EXECUTOR_SLOTS.release()
+    future.add_done_callback(_release)
+    return True
+
+
 def unified_market_scanner_loop(app):
     """Authoritative live scanner with explicit, non-overlapping pipeline stages.
 
@@ -4314,6 +4477,7 @@ def unified_market_scanner_loop(app):
         try:
             V12_REAL_AUDIT["scans"] = int(V12_REAL_AUDIT.get("scans", 0) or 0) + 1
             V12_REAL_AUDIT["last_scan"] = time.time()
+            UNIFIED_SCANNER_HEARTBEAT = time.time()
 
             if daily_signal_cap_reached():
                 _diag_reject("EXECUTION", "DAILY_SIGNAL_CAP_REACHED")
@@ -4423,7 +4587,7 @@ def unified_market_scanner_loop(app):
             if selected_fusion:
                 for token_addr, candidate in selected_fusion:
                     try:
-                        SIGNAL_EXECUTOR.submit(send_fused_signal, token_addr, candidate)
+                        _submit_signal_job(token_addr, candidate)
                     except Exception as exc:
                         _diag_reject("EXECUTION", f"FUSION_SUBMIT_EXCEPTION:{type(exc).__name__}:{exc}", token_addr)
                         logger.exception("Fusion submit failed for %s", token_addr)
@@ -6309,47 +6473,6 @@ def pro_trader_cache_maintenance_loop():
         time.sleep(3600)
 
 
-if __name__ == "__main__":
-    logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
-    _load_channel_config()
-    _load_trade_limit()
-    # تنظیمات یادگیری/عیب‌یابی از DB حفظ می‌شوند؛ پیش‌فرض Diagnostic خاموش است.
-    try:
-        MASTER_DIAGNOSTIC_ENABLED = str(_get_bot_setting("master_diagnostic_enabled", "0")).strip() not in ("0", "false", "off")
-        AUTO_LEARNING_ENABLED = str(_get_bot_setting("auto_learning_enabled", "1")).strip() not in ("0", "false", "off")
-        AUTO_IMPROVEMENT_ENABLED = str(_get_bot_setting("auto_improvement_enabled", "1")).strip() not in ("0", "false", "off")
-    except Exception:
-        MASTER_DIAGNOSTIC_ENABLED = False
-        AUTO_LEARNING_ENABLED = True
-        AUTO_IMPROVEMENT_ENABLED = True
-    # وضعیت Master از آخرین تنظیم پنل برمی‌گردد؛ اگر قبلاً ذخیره نشده بود خاموش می‌ماند.
-    try:
-        MASTER_SIGNAL_ENABLED = str(_get_bot_setting("master_signal_enabled", "0")).strip() not in ("0", "false", "off")
-        MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
-    except Exception:
-        MASTER_SIGNAL_ENABLED = False
-        MASTER_SIGNAL_FIRE_NOW = False
-    ensure_channel_invite_link()
-    # Recover open positions before any scanner starts. Signal switches do not control this manager.
-    _restore_open_positions()
-
-    threads = [
-        Thread(target=pro_trader_cache_maintenance_loop, daemon=True, name="ProTraderCache"),
-        Thread(target=self_learning_ai_optimizer_loop, daemon=True, name="AILearning"),
-        # رادار واحد فقط یک Thread اجرایی دارد؛ رفتار آن بر اساس سه حالت اصلی تغییر می‌کند و خرید فقط از بهترین کاندیدای هر sweep انجام می‌شود.
-        Thread(target=subscription_monitor_loop, daemon=True, name="SubMonitor"),
-        Thread(target=check_positions_loop, daemon=True, name="PositionsCheck"),
-        Thread(target=master_signal_diagnostic_loop, daemon=True, name="MasterSignalDiagnostics"),
-        Thread(target=unified_market_scanner_loop, args=(None,), daemon=True, name="UnifiedHulkAI"),
-    ]
-    for t in threads:
-        t.start()
-
-    port = int(os.environ.get("PORT", 5000))
-    flask_thread = Thread(target=lambda: web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False), daemon=True)
-    flask_thread.start()
-
-    start_telegram_bot()
 def learning_record_exit(token_addr, position, exit_price, reason=""):
     """Best-effort bridge from an existing position object to the learning DB."""
     try:
@@ -6374,8 +6497,6 @@ def learning_record_exit(token_addr, position, exit_price, reason=""):
         _pro_learn_closed_trade(position, exit_price, reason)
     except Exception as e:
         logger.warning(f"Learning exit bridge failed: {e}")
-
-
 
 
 # ================= PROFESSIONAL TRADER ADAPTIVE LAYER =================
@@ -6471,6 +6592,63 @@ PRO_TRADER_PANEL_CONTROLS = {
 }
 # =====================================================================
 
+
+
+def unified_scanner_watchdog_loop():
+    """Detect a stalled scanner instead of allowing silent signal starvation."""
+    while True:
+        try:
+            hb = float(UNIFIED_SCANNER_HEARTBEAT or 0.0)
+            if hb > 0 and time.time() - hb > 30.0:
+                logger.error("🚨 Unified scanner heartbeat stalled for %.1fs", time.time() - hb)
+                _diag_reject("SYSTEM", "UNIFIED_SCANNER_HEARTBEAT_STALLED")
+        except Exception:
+            pass
+        time.sleep(10)
+
+
+if __name__ == "__main__":
+    logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
+    _load_channel_config()
+    _load_trade_limit()
+    # تنظیمات یادگیری/عیب‌یابی از DB حفظ می‌شوند؛ پیش‌فرض Diagnostic خاموش است.
+    try:
+        MASTER_DIAGNOSTIC_ENABLED = str(_get_bot_setting("master_diagnostic_enabled", "0")).strip() not in ("0", "false", "off")
+        AUTO_LEARNING_ENABLED = str(_get_bot_setting("auto_learning_enabled", "1")).strip() not in ("0", "false", "off")
+        AUTO_IMPROVEMENT_ENABLED = str(_get_bot_setting("auto_improvement_enabled", "1")).strip() not in ("0", "false", "off")
+    except Exception:
+        MASTER_DIAGNOSTIC_ENABLED = False
+        AUTO_LEARNING_ENABLED = True
+        AUTO_IMPROVEMENT_ENABLED = True
+    # وضعیت Master از آخرین تنظیم پنل برمی‌گردد؛ اگر قبلاً ذخیره نشده بود خاموش می‌ماند.
+    try:
+        MASTER_SIGNAL_ENABLED = str(_get_bot_setting("master_signal_enabled", "1")).strip() not in ("0", "false", "off")
+        MASTER_SIGNAL_FIRE_NOW = bool(MASTER_SIGNAL_ENABLED)
+    except Exception:
+        MASTER_SIGNAL_ENABLED = False
+        MASTER_SIGNAL_FIRE_NOW = False
+    ensure_channel_invite_link()
+    # Recover open positions before any scanner starts. Signal switches do not control this manager.
+    _restore_open_positions()
+
+    threads = [
+        Thread(target=pro_trader_cache_maintenance_loop, daemon=True, name="ProTraderCache"),
+        Thread(target=self_learning_ai_optimizer_loop, daemon=True, name="AILearning"),
+        # رادار واحد فقط یک Thread اجرایی دارد؛ رفتار آن بر اساس سه حالت اصلی تغییر می‌کند و خرید فقط از بهترین کاندیدای هر sweep انجام می‌شود.
+        Thread(target=subscription_monitor_loop, daemon=True, name="SubMonitor"),
+        Thread(target=check_positions_loop, daemon=True, name="PositionsCheck"),
+        Thread(target=master_signal_diagnostic_loop, daemon=True, name="MasterSignalDiagnostics"),
+        Thread(target=unified_market_scanner_loop, args=(None,), daemon=True, name="UnifiedHulkAI"),
+        Thread(target=unified_scanner_watchdog_loop, daemon=True, name="UnifiedScannerWatchdog"),
+    ]
+    for t in threads:
+        t.start()
+
+    port = int(os.environ.get("PORT", 5000))
+    flask_thread = Thread(target=lambda: web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False), daemon=True)
+    flask_thread.start()
+
+    start_telegram_bot()
 
 
 # ================= SAFE BOTTOM CONTROL MIRROR =================
