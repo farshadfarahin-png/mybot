@@ -5131,6 +5131,92 @@ def api_subscribe():
     else:
         return jsonify({"status": "error", "message": "خطا در ثبت اشتراک."}), 500
 
+def get_engine_position_analytics():
+    """Additive per-engine position statistics for the admin management panel.
+    This does not modify get_advanced_trade_analytics() or the global trade stats.
+    A position attributed to multiple engines is counted once for each contributing engine.
+    """
+    names = [
+        "Fire", "Trend", "Combo", "Golden", "Technical", "UltimateAI/21",
+        "Mempool/SmartMoney", "Whale", "Social/Hype", "Anti-Wash", "SmartFilter", "Analysis"
+    ]
+    stats = {n: {"open": 0, "closed": 0, "wins": 0, "losses": 0, "breakeven": 0} for n in names}
+
+    def normalize_engine_names(pos):
+        raw = (pos or {}).get("engines") or (pos or {}).get("engine_names") or []
+        if isinstance(raw, str):
+            raw = [x.strip() for x in raw.split(",") if x.strip()]
+        out = []
+        for item in raw:
+            n = str(item).strip()
+            if n and n not in out:
+                out.append(n)
+        return out
+
+    # Current open positions: real + signal-only.
+    with state_lock:
+        open_positions = [dict(x) for x in list(active_positions.values()) + list(signal_positions.values())]
+    for pos in open_positions:
+        for engine in normalize_engine_names(pos):
+            stats.setdefault(engine, {"open": 0, "closed": 0, "wins": 0, "losses": 0, "breakeven": 0})
+            stats[engine]["open"] += 1
+
+    # Closed engine-attributed outcomes are already persisted by the learning bridge.
+    # Use the persisted records so this panel survives process restarts.
+    for item in list(learning_state.get("trades", []) or []):
+        try:
+            pnl = float(item.get("pnl_pct", 0) or 0)
+        except Exception:
+            pnl = 0.0
+        for engine in normalize_engine_names(item):
+            stats.setdefault(engine, {"open": 0, "closed": 0, "wins": 0, "losses": 0, "breakeven": 0})
+            stats[engine]["closed"] += 1
+            if pnl > 0:
+                stats[engine]["wins"] += 1
+            elif pnl < 0:
+                stats[engine]["losses"] += 1
+            else:
+                stats[engine]["breakeven"] += 1
+
+    # Keep only engines that have activity, while preserving the canonical order.
+    ordered = []
+    seen = set()
+    for n in names + sorted(stats):
+        if n in seen:
+            continue
+        seen.add(n)
+        st = stats.get(n)
+        if st and (st["open"] or st["closed"]):
+            decided = st["wins"] + st["losses"]
+            st["win_rate"] = (st["wins"] / decided * 100.0) if decided else 0.0
+            ordered.append((n, st))
+    return ordered
+
+
+def _engine_position_stats_text():
+    rows = get_engine_position_analytics()
+    lines = [
+        "🤖 **آمار پوزیشن به تفکیک موتور**",
+        "",
+        "`موتور | باز | بسته | سود | ضرر | Win Rate`",
+        "────────────────────────────",
+    ]
+    if not rows:
+        lines.append("هنوز پوزیشن قابل‌انتساب به موتور ثبت نشده است.")
+        return "\n".join(lines)
+    for name, st in rows:
+        lines.append(
+            f"• **{name}** | `{st['open']}` | `{st['closed']}` | "
+            f"`{st['wins']}` | `{st['losses']}` | `{st['win_rate']:.1f}%`"
+        )
+    lines += [
+        "",
+        "ℹ️ اگر یک پوزیشن توسط چند موتور تأیید شده باشد، همان پوزیشن در آمار هر موتورِ دخیل شمرده می‌شود.",
+        "📊 آمار معاملات کلی دست‌نخورده است و این صفحه فقط گزارش تفکیکی موتور‌هاست."
+    ]
+    return "\n".join(lines)
+
+
 def _engine_status_lines():
     components = [
         ("Fire", IS_RUNNING), ("Trend", TREND_ALERT_RUNNING), ("Combo", COMBO_RUNNING),
@@ -6159,7 +6245,16 @@ def start_telegram_bot():
                 else: await q.edit_message_text(f"🔐 **امنیت**\n\nPrivate Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\nRPCها: `{len(RPC_ENDPOINTS)}`\nAdmin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",reply_markup=_main_keyboard(True),parse_mode="Markdown")
             elif data=="admin":
                 if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.")
-                else: await q.edit_message_text(f"👑 **پنل مدیریت**\n\nکاربران: `{len(get_all_subscribers())}`\nمعاملات: `{get_advanced_trade_analytics()['total_trades']}`",reply_markup=_main_keyboard(True),parse_mode="Markdown")
+                else: await q.edit_message_text(f"👑 **پنل مدیریت**\n\nکاربران: `{len(get_all_subscribers())}`\nمعاملات: `{get_advanced_trade_analytics()['total_trades']}`",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🤖 آمار پوزیشن موتورها", callback_data="engine_position_stats")],[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),parse_mode="Markdown")
+            elif data=="engine_position_stats":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                await q.edit_message_text(
+                    _engine_position_stats_text(),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 بروزرسانی", callback_data="engine_position_stats")],[InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]]),
+                    parse_mode="Markdown"
+                )
             elif data=="free_users":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
