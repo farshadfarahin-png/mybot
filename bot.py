@@ -6001,6 +6001,69 @@ def start_telegram_bot():
             # Any non-panel text continues to the existing manual input handler.
             return
 
+        def _three_motor_position_stats():
+            """ادمین: آمار مستقل سه لاین اصلی + MAX بدون تغییر در آمار کلی معاملات."""
+            groups = {
+                "analysis": {"name": "🔬 موتور تحلیل", "open": 0, "closed": 0, "wins": 0, "losses": 0},
+                "advanced": {"name": "🧠 موتور پیشرفته", "open": 0, "closed": 0, "wins": 0, "losses": 0},
+                "alliance": {"name": "🤖 موتور اتحاد", "open": 0, "closed": 0, "wins": 0, "losses": 0},
+                "max": {"name": "👑 موتور MAX", "open": 0, "closed": 0, "wins": 0, "losses": 0},
+            }
+
+            def classify_position(pos):
+                if not isinstance(pos, dict):
+                    return set()
+                out = set()
+                group = str(pos.get("hunter_group", "") or "").upper()
+                engines = pos.get("engines") or pos.get("votes") or []
+                if isinstance(engines, str):
+                    engines = [x.strip() for x in engines.replace("+", ",").split(",") if x.strip()]
+                names = {str(x).strip().upper() for x in engines}
+                if group == "ANALYSIS" or "ANALYSIS" in names or "موتور تحلیل" in names:
+                    out.add("analysis")
+                if group == "ADVANCED" or "ADVANCED" in names or "موتور پیشرفته" in names:
+                    out.add("advanced")
+                if group in ("HULK", "UNIFIED", "ALLIANCE") or "HULK" in names or "ALLIANCE" in names or "UNIFIED" in names or "موتور اتحاد" in names:
+                    out.add("alliance")
+                # MAX is reported as its own management statistic.
+                if group == "MAX" or any("MAX" in n for n in names):
+                    out.add("max")
+                return out
+
+            with state_lock:
+                open_snapshot = [dict(v) for v in active_positions.values()] + [dict(v) for v in signal_positions.values()]
+            for pos in open_snapshot:
+                for key in classify_position(pos):
+                    groups[key]["open"] += 1
+
+            try:
+                with db_lock:
+                    conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                    cur = conn.cursor()
+                    rows = cur.execute("SELECT pnl_percent, entry_reason FROM trades").fetchall()
+                    conn.close()
+                for pnl, reason in rows:
+                    text = str(reason or "")
+                    pseudo = {"hunter_group": "", "engines": [x.strip() for x in text.replace("|", "+").split("+") if x.strip()]}
+                    # Closed records historically stored engine names in entry_reason.
+                    for key in classify_position(pseudo):
+                        groups[key]["closed"] += 1
+                        try:
+                            value = float(pnl or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if value > 0:
+                            groups[key]["wins"] += 1
+                        elif value < 0:
+                            groups[key]["losses"] += 1
+            except Exception as exc:
+                logger.exception("Three-motor stats failed: %s", exc)
+
+            for item in groups.values():
+                decided = item["wins"] + item["losses"]
+                item["win_rate"] = (item["wins"] / decided * 100.0) if decided else 0.0
+            return groups
+
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
@@ -6159,7 +6222,39 @@ def start_telegram_bot():
                 else: await q.edit_message_text(f"🔐 **امنیت**\n\nPrivate Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\nRPCها: `{len(RPC_ENDPOINTS)}`\nAdmin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",reply_markup=_main_keyboard(True),parse_mode="Markdown")
             elif data=="admin":
                 if not is_admin: await q.edit_message_text("⛔ دسترسی غیرمجاز.")
-                else: await q.edit_message_text(f"👑 **پنل مدیریت**\n\nکاربران: `{len(get_all_subscribers())}`\nمعاملات: `{get_advanced_trade_analytics()['total_trades']}`",reply_markup=_main_keyboard(True),parse_mode="Markdown")
+                else:
+                    await q.edit_message_text(
+                        f"👑 **پنل مدیریت**\n\nکاربران: `{len(get_all_subscribers())}`\nمعاملات: `{get_advanced_trade_analytics()['total_trades']}`",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🤖 آمار دقیق ۴ موتور + MAX", callback_data="three_motor_stats")],
+                            [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
+                        ]),
+                        parse_mode="Markdown"
+                    )
+            elif data=="three_motor_stats":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.")
+                else:
+                    stats = _three_motor_position_stats()
+                    lines = ["🤖 **آمار دقیق ۳ موتور + MAX**\n"]
+                    for key in ("analysis", "advanced", "alliance", "max"):
+                        x = stats[key]
+                        lines.append(
+                            f"{x['name']}\n"
+                            f"🟡 باز: `{x['open']}`\n"
+                            f"📦 بسته: `{x['closed']}`\n"
+                            f"🟢 سودده: `{x['wins']}` | 🔴 ضررده: `{x['losses']}`\n"
+                            f"🏆 Win Rate: `{x['win_rate']:.2f}%`\n"
+                        )
+                    lines.append("ℹ️ این گزارش فقط تفکیک عملکرد سه موتور است و **آمار معاملات کلی را تغییر نمی‌دهد**.")
+                    await q.edit_message_text(
+                        "\n".join(lines),
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 بروزرسانی", callback_data="three_motor_stats")],
+                            [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]
+                        ]),
+                        parse_mode="Markdown"
+                    )
             elif data=="free_users":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
