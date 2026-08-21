@@ -2390,19 +2390,19 @@ def new_trade_system_enabled():
 def advanced_filter_enabled():
     return ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED
 
-# حالت شکار سخت‌گیر: سیگنال کمتر، کیفیت فیلتر بالاتر.
+# حالت کیفیت‌محور: جریان سیگنال حفظ می‌شود؛ فقط کیفیت و کنترل‌های صریح ورود تصمیم‌گیر هستند.
 # این اعداد «تلاش برای win-rate بالا» هستند و تضمین ۹۰٪ سود نیستند.
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
-CONSENSUS_MIN_SCORE = 5.5
-CONSENSUS_MIN_RATIO = 0.60
-CONSENSUS_COOLDOWN_SECONDS = 20
+CONSENSUS_MIN_SCORE = 4.0
+CONSENSUS_MIN_RATIO = 0.55
+CONSENSUS_COOLDOWN_SECONDS = 8
 
 # Daily signal cap: OFF by default. Set manually from the management panel (1..50) to enable.
 # 0 means unlimited / disabled.
 DAILY_SIGNAL_LIMIT = 0
-# فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 45
-MAX_OPEN_POSITIONS = 12
+# فاصله محافظتی بسیار کوتاه بین BUYها؛ کیفیت سیگنال را محدود نمی‌کند و جلوی جریان موتورهای مستقل را نمی‌گیرد.
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 3
+MAX_OPEN_POSITIONS = 0  # 0 = unlimited; daily cap is the explicit user-controlled entry budget
 TOKEN_REENTRY_COOLDOWN_SECONDS = 30 * 60
 TOKEN_LAST_CLOSED_AT = {}
 # Signal budget is capacity only; quality thresholds never depend on this value.
@@ -2411,11 +2411,11 @@ SIGNAL_BUDGET_MAX = 50
 # Final entry-safety guard: a BUY cannot execute when the 5m move is only
 # a 1-2% sideways fluctuation. This is applied after candidate generation
 # and quality scoring, so engine scoring/signal rules remain untouched.
-MIN_ENTRY_MOMENTUM_5M = 5.0
+MIN_ENTRY_MOMENTUM_5M = 3.0
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
-CONSENSUS_MIN_LIQUIDITY = 40000.0
-CONSENSUS_MIN_VOLUME_5M = 8000.0
+CONSENSUS_MIN_LIQUIDITY = 25000.0
+CONSENSUS_MIN_VOLUME_5M = 3000.0
 CONSENSUS_MIN_CHANGE_5M = 0.5
 CONSENSUS_MAX_CHANGE_5M = 40.0
 CONSENSUS_MIN_BUY_RATIO = 1.15
@@ -3748,7 +3748,11 @@ def _send_fused_signal_impl(token_addr, fusion):
             return False, "DUPLICATE_OPEN_POSITION"
         if _token_reentry_blocked(token_addr):
             _audit_signal_decision("TOKEN_REENTRY_COOLDOWN"); return False, "TOKEN_REENTRY_COOLDOWN"
-        if _open_position_count() >= int(MAX_OPEN_POSITIONS):
+        # No hidden global position throttle. 0 means unlimited; when the admin
+        # explicitly sets a positive limit, it is enforced.  Signal quality and
+        # the explicit daily cap remain the real entry controls.
+        max_open = int(MAX_OPEN_POSITIONS or 0)
+        if max_open > 0 and _open_position_count() >= max_open:
             _audit_signal_decision("MAX_OPEN_POSITIONS"); return False, "MAX_OPEN_POSITIONS"
         if daily_signal_cap_reached():
             _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
@@ -5671,7 +5675,7 @@ def start_telegram_bot():
                     )
                 except Exception as e:
                     await update.message.reply_text(
-                        f"❌ {e}\n\nیک عدد بین `1` تا `50` بفرست.",
+                        f"❌ {e}\n\nیک عدد بین `0` تا `50` بفرست. `0` یعنی بدون سقف روزانه.",
                         parse_mode="Markdown"
                     )
                 return
@@ -5909,7 +5913,7 @@ def start_telegram_bot():
                 await msg.reply_text(
                     f"🎯 **سقف روزانه سیگنال**\n\n"
                     f"مقدار فعلی: `{daily_signal_status_text()}`\n"
-                    "یک عدد بین `1` تا `50` بفرست.",
+                    "یک عدد بین `0` تا `50` بفرست. `0` یعنی بدون سقف روزانه.",
                     parse_mode="Markdown"
                 )
                 return
