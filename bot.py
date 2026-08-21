@@ -63,12 +63,12 @@ SIGNAL_ONLY_ALERT_COOLDOWN = 15.0
 
 # ================= PRODUCTION POSITION ENGINE =================
 # Signal generation, wallet execution and exit signaling are deliberately decoupled.
-POSITION_MONITOR_INTERVAL_SECONDS = 0.35
+POSITION_MONITOR_INTERVAL_SECONDS = 0.25
 BUY_RETRY_WINDOW_SECONDS = 900.0
 BUY_RETRY_INTERVAL_SECONDS = 10.0
 SELL_RETRY_INTERVAL_SECONDS = 3.0
 EXIT_ALERT_REPEAT_SECONDS = 30.0
-MAX_POSITION_MONITOR_BATCH = 60
+MAX_POSITION_MONITOR_BATCH = 100
 
 POSITION_STATE_SIGNAL_ONLY = "SIGNAL_ONLY"
 POSITION_STATE_BUY_PENDING = "BUY_PENDING"
@@ -367,6 +367,26 @@ def init_db():
 
 init_db()
 
+def _ensure_production_trade_schema():
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cols = {r[1] for r in cur.execute("PRAGMA table_info(trades)").fetchall()}
+            for name, definition in {
+                "position_uid":"TEXT", "execution_type":"TEXT DEFAULT 'LEGACY'",
+                "buy_tx_signature":"TEXT DEFAULT ''", "sell_tx_signature":"TEXT DEFAULT ''",
+                "exit_reason":"TEXT DEFAULT ''", "closed_at":"TEXT DEFAULT ''", "is_real":"INTEGER DEFAULT 0"
+            }.items():
+                if name not in cols:
+                    cur.execute(f"ALTER TABLE trades ADD COLUMN {name} {definition}")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_position_uid ON trades(position_uid) WHERE position_uid IS NOT NULL AND position_uid != ''")
+            conn.commit(); conn.close()
+    except Exception as exc:
+        logger.exception("Production trades schema migration failed: %s", exc)
+
+_ensure_production_trade_schema()
+
 def _record_learning_event(event_type, title, details="", sample_count=0, win_rate=0.0):
     """Persistent, human-readable learning/improvement audit trail."""
     try:
@@ -470,58 +490,52 @@ def get_adaptive_consensus_settings(enabled_count):
         logger.debug(f"Adaptive learning read error: {e}")
         return CONSENSUS_MIN_SCORE, CONSENSUS_MIN_RATIO, {}, {"sample":0,"win_rate":0.0}
 
-def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason):
-    with db_lock:
-        try:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO trades (token_address, symbol, entry_price, exit_price, pnl_percent, pnl_usd, entry_reason, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            conn.commit()
-            _update_adaptive_learning(conn)
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.error(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}")
+def log_trade_to_db(token_addr, symbol, entry_p, exit_p, pnl_pct, pnl_u, reason, position_uid="", execution_type="LEGACY", buy_tx_signature="", sell_tx_signature="", is_real=False):
+    try:
+        with db_lock:
+            conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
+            closed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute("""INSERT OR IGNORE INTO trades(token_address,symbol,entry_price,exit_price,pnl_percent,pnl_usd,entry_reason,timestamp,position_uid,execution_type,buy_tx_signature,sell_tx_signature,exit_reason,closed_at,is_real) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(token_addr,symbol,float(entry_p or 0),float(exit_p or 0),float(pnl_pct or 0),float(pnl_u or 0),str(reason or ""),closed_at,str(position_uid or ""),str(execution_type or "LEGACY"),str(buy_tx_signature or ""),str(sell_tx_signature or ""),str(reason or ""),closed_at,1 if is_real else 0))
+            inserted=cur.rowcount>0; conn.commit()
+            if inserted: _update_adaptive_learning(conn); conn.commit()
+            conn.close(); return inserted
+    except Exception as e:
+        logger.error(f"⚠️ خطا در ثبت معامله در دیتابیس: {e}"); return False
+
+def _position_uid(token_addr,pos):
+    opened=float((pos or {}).get("opened_at",(pos or {}).get("created_at",0)) or 0)
+    return f"{token_addr}:{opened:.6f}" if opened else f"{token_addr}:legacy"
+
+def _record_closed_position(token_addr,pos,exit_price,pnl_pct,reason,sell_tx_signature=""):
+    if not isinstance(pos,dict): return False
+    if pos.get("trade_recorded"): return True
+    invested=float(pos.get("buy_amt",0) or 0); pnl_usd=invested*float(pnl_pct or 0)/100.0
+    is_real=bool(pos.get("real_trade")); uid=_position_uid(token_addr,pos)
+    ok=log_trade_to_db(token_addr,pos.get("symbol","TOKEN"),pos.get("entry_price",0),exit_price,pnl_pct,pnl_usd,reason,uid,"REAL" if is_real else "SIGNAL_ONLY",pos.get("buy_tx_signature",""),sell_tx_signature,is_real)
+    if ok:
+        pos["trade_recorded"]=True; pos["closed_at"]=time.time(); pos["final_pnl_percent"]=float(pnl_pct or 0); pos["final_exit_price"]=float(exit_price or 0)
+    return ok
 
 def get_advanced_trade_analytics():
-    with db_lock:
-        try:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*), SUM(pnl_percent), SUM(pnl_usd), AVG(pnl_percent) FROM trades")
-            res = cursor.fetchone()
-            total_trades = res[0] or 0
-            total_pct = res[1] or 0.0
-            total_usd = res[2] or 0.0
-            avg_pct = res[3] or 0.0
-
-            cursor.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent > 0")
-            win_count = cursor.fetchone()[0] or 0
-            win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
-
-            cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 1")
-            best_trade = cursor.fetchone()
-
-            cursor.execute("SELECT symbol, pnl_percent, timestamp FROM trades ORDER BY pnl_percent ASC LIMIT 1")
-            worst_trade = cursor.fetchone()
-            conn.close()
-
-            return {
-                "total_trades": total_trades,
-                "total_pct": round(total_pct, 2),
-                "total_usd": round(total_usd, 2),
-                "avg_pct": round(avg_pct, 2),
-                "win_rate": round(win_rate, 2),
-                "win_count": win_count,
-                "best_trade": best_trade,
-                "worst_trade": worst_trade
-            }
-        except Exception as e:
-            logger.error(f"⚠️ خطا در گزارش‌گیری پیشرفته: {e}")
-            return {"total_trades": 0, "total_pct": 0.0, "total_usd": 0.0, "avg_pct": 0.0, "win_rate": 0.0, "win_count": 0, "best_trade": None, "worst_trade": None}
+    try:
+        with db_lock:
+            conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
+            r=cur.execute("SELECT COUNT(*),COALESCE(SUM(pnl_percent),0),COALESCE(SUM(pnl_usd),0),COALESCE(AVG(pnl_percent),0) FROM trades").fetchone()
+            total=int(r[0] or 0); total_pct=float(r[1] or 0); total_usd=float(r[2] or 0); avg=float(r[3] or 0)
+            wins=int(cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent>0").fetchone()[0] or 0)
+            losses=int(cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent<0").fetchone()[0] or 0)
+            breakeven=int(cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent=0").fetchone()[0] or 0)
+            real_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE is_real=1").fetchone()[0] or 0)
+            signal_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE execution_type='SIGNAL_ONLY'").fetchone()[0] or 0)
+            best=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 1").fetchone()
+            worst=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades ORDER BY pnl_percent ASC LIMIT 1").fetchone(); conn.close()
+        with state_lock:
+            open_real=len(active_positions); open_signal=len(signal_positions); open_total=len(set(active_positions)|set(signal_positions))
+        decided=wins+losses; wr=wins/decided*100.0 if decided else 0.0
+        return {"total_trades":total,"total_pct":round(total_pct,2),"total_usd":round(total_usd,2),"avg_pct":round(avg,2),"win_rate":round(wr,2),"win_count":wins,"loss_count":losses,"breakeven_count":breakeven,"open_positions":open_total,"open_real":open_real,"open_signal":open_signal,"real_closed":real_closed,"signal_closed":signal_closed,"best_trade":best,"worst_trade":worst}
+    except Exception as e:
+        logger.error(f"⚠️ خطا در گزارش‌گیری پیشرفته: {e}")
+        return {"total_trades":0,"total_pct":0.0,"total_usd":0.0,"avg_pct":0.0,"win_rate":0.0,"win_count":0,"loss_count":0,"breakeven_count":0,"open_positions":0,"open_real":0,"open_signal":0,"real_closed":0,"signal_closed":0,"best_trade":None,"worst_trade":None}
 
 def self_learning_ai_optimizer_loop():
     """Continuous closed-trade learning. It never invents results and never changes security secrets."""
@@ -2055,28 +2069,24 @@ def _submit_real_sell_attempt(token_addr):
         try:
             balance = get_token_balance(token_addr)
             if balance <= 0:
-                # No remaining token balance strongly suggests the position was already sold externally.
                 with state_lock:
-                    cur = active_positions.get(token_addr)
+                    cur=active_positions.get(token_addr); snapshot=dict(cur) if cur else None
                     if cur:
-                        cur["sell_pending"] = False
-                        cur["external_reconcile"] = True
-                        cur["position_state"] = POSITION_STATE_CLOSED
-                        cur["closed"] = True
-                        active_positions.pop(token_addr, None)
-                _mark_token_closed(token_addr)
-                return
-            ok, result = execute_real_sell(token_addr, balance)
+                        cur["sell_pending"]=False; cur["external_reconcile"]=True; cur["position_state"]=POSITION_STATE_CLOSED; cur["closed"]=True; active_positions.pop(token_addr,None)
+                if snapshot:
+                    exit_price=float(snapshot.get("last_market_price",snapshot.get("entry_price",0)) or 0); entry=float(snapshot.get("entry_price",0) or 0); pnl=(exit_price-entry)/max(1e-12,entry)*100.0
+                    _record_closed_position(token_addr,snapshot,exit_price,pnl,"EXTERNAL_RECONCILE")
+                _mark_token_closed(token_addr); return
+            ok,result=execute_real_sell(token_addr,balance)
             if ok:
                 with state_lock:
-                    cur = active_positions.get(token_addr)
+                    cur=active_positions.get(token_addr); snapshot=dict(cur) if cur else None
                     if cur:
-                        cur["sell_pending"] = False
-                        cur["position_state"] = POSITION_STATE_CLOSED
-                        cur["closed"] = True
-                _mark_token_closed(token_addr)
-                logger.info("REAL_SELL_CONFIRMED token=%s tx=%s", token_addr, result)
-                return
+                        cur["sell_pending"]=False; cur["position_state"]=POSITION_STATE_CLOSED; cur["closed"]=True; active_positions.pop(token_addr,None)
+                if snapshot:
+                    exit_price=float(snapshot.get("last_market_price",snapshot.get("entry_price",0)) or 0); entry=float(snapshot.get("entry_price",0) or 0); pnl=(exit_price-entry)/max(1e-12,entry)*100.0
+                    _record_closed_position(token_addr,snapshot,exit_price,pnl,snapshot.get("exit_reason","REAL_SELL_CONFIRMED"),result)
+                _mark_token_closed(token_addr); logger.info("REAL_SELL_CONFIRMED token=%s tx=%s",token_addr,result); return
             with state_lock:
                 cur = active_positions.get(token_addr)
                 snapshot = None
@@ -2208,9 +2218,12 @@ def check_positions_loop():
                         if effective_floor > float(pos.get("sl", -8.0) or -8.0)
                         else "حد ضرر اولیه فعال شد"
                     )
-                    _emit_sell_signal_once(token_addr, pos, current_price, pnl, reason)
+                    _emit_sell_signal_once(token_addr,pos,current_price,pnl,reason)
+                    _record_closed_position(token_addr,pos,current_price,pnl,reason)
                     with state_lock:
-                        signal_positions.pop(token_addr, None)
+                        cur=signal_positions.get(token_addr)
+                        if cur: cur["closed"]=True; cur["position_state"]=POSITION_STATE_CLOSED
+                        signal_positions.pop(token_addr,None)
                     _mark_token_closed(token_addr)
                     logger.warning("SIGNAL_SELL_EMITTED token=%s pnl=%.2f stop=%.2f", token_addr, pnl, effective_floor)
                 except Exception as exc:
@@ -2255,7 +2268,13 @@ def check_positions_loop():
                         if effective_floor > float(pos.get("sl", -8.0) or -8.0)
                         else "حد ضرر اولیه فعال شد"
                     )
-                    _emit_sell_signal_once(token_addr, pos, current_price, pnl, reason)
+                    with state_lock:
+                        cur=active_positions.get(token_addr)
+                        snapshot=dict(cur) if cur else None
+                        if cur:
+                            cur["exit_reason"]=reason; cur["exit_trigger_price"]=current_price; cur["exit_trigger_pnl"]=pnl; cur["last_market_price"]=current_price
+                    if snapshot: _persist_open_position(token_addr,snapshot,"REAL")
+                    _emit_sell_signal_once(token_addr,snapshot or pos,current_price,pnl,reason)
                     _submit_real_sell_attempt(token_addr)
                 except Exception as exc:
                     logger.exception("Real position error %s: %s", token_addr, exc)
@@ -2374,26 +2393,29 @@ def advanced_filter_enabled():
 # حالت شکار سخت‌گیر: سیگنال کمتر، کیفیت فیلتر بالاتر.
 # این اعداد «تلاش برای win-rate بالا» هستند و تضمین ۹۰٪ سود نیستند.
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
-CONSENSUS_MIN_SCORE = 4.0
-CONSENSUS_MIN_RATIO = 0.55
-CONSENSUS_COOLDOWN_SECONDS = 8
+CONSENSUS_MIN_SCORE = 5.5
+CONSENSUS_MIN_RATIO = 0.60
+CONSENSUS_COOLDOWN_SECONDS = 20
 
 # Daily signal cap: OFF by default. Set manually from the management panel (1..50) to enable.
 # 0 means unlimited / disabled.
 DAILY_SIGNAL_LIMIT = 0
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
-GLOBAL_SIGNAL_COOLDOWN_SECONDS = 3
+GLOBAL_SIGNAL_COOLDOWN_SECONDS = 45
+MAX_OPEN_POSITIONS = 12
+TOKEN_REENTRY_COOLDOWN_SECONDS = 30 * 60
+TOKEN_LAST_CLOSED_AT = {}
 # Signal budget is capacity only; quality thresholds never depend on this value.
 SIGNAL_BUDGET_MIN = 0
 SIGNAL_BUDGET_MAX = 50
 # Final entry-safety guard: a BUY cannot execute when the 5m move is only
 # a 1-2% sideways fluctuation. This is applied after candidate generation
 # and quality scoring, so engine scoring/signal rules remain untouched.
-MIN_ENTRY_MOMENTUM_5M = 3.0
+MIN_ENTRY_MOMENTUM_5M = 5.0
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
-CONSENSUS_MIN_LIQUIDITY = 25000.0
-CONSENSUS_MIN_VOLUME_5M = 3000.0
+CONSENSUS_MIN_LIQUIDITY = 40000.0
+CONSENSUS_MIN_VOLUME_5M = 8000.0
 CONSENSUS_MIN_CHANGE_5M = 0.5
 CONSENSUS_MAX_CHANGE_5M = 40.0
 CONSENSUS_MIN_BUY_RATIO = 1.15
@@ -3694,6 +3716,20 @@ def _send_buy_notifications(token_addr, symbol, price, tp, sl, amount, mode_name
         _diag_reject("CHANNEL", "BUY_NOTIFICATION_FAILED", token_addr)
     return bool(telegram_ok or channel_ok)
 
+def _open_position_count():
+    with state_lock: return len(set(active_positions)|set(signal_positions))
+
+def _global_signal_cooldown_remaining(now=None):
+    now=float(now or time.time())
+    try: persisted=float(_get_bot_setting("last_global_buy_signal_at","0") or 0)
+    except Exception: persisted=0.0
+    last=max(float(last_global_signal_time or 0),float(UNIFIED_LAST_EMIT_TIME or 0),persisted)
+    return max(0.0,float(GLOBAL_SIGNAL_COOLDOWN_SECONDS)-(now-last))
+
+def _token_reentry_blocked(token_addr,now=None):
+    now=float(now or time.time()); last=float(TOKEN_LAST_CLOSED_AT.get(token_addr,0) or 0)
+    return last>0 and now-last<float(TOKEN_REENTRY_COOLDOWN_SECONDS)
+
 def _send_fused_signal_impl(token_addr, fusion):
     """Accept a quality BUY signal, persist it first, publish immediately, then trade asynchronously."""
     global last_global_signal_time, UNIFIED_LAST_EMIT_TIME
@@ -3708,9 +3744,12 @@ def _send_fused_signal_impl(token_addr, fusion):
             return False, "MASTER_SIGNAL_OFF"
         if _token_lock_is_open(token_addr):
             _audit_signal_decision("DUPLICATE_OPEN_POSITION")
-            if is_analysis_signal:
-                _analysis_diag("blocked_duplicate", token_addr=token_addr)
+            if is_analysis_signal: _analysis_diag("blocked_duplicate", token_addr=token_addr)
             return False, "DUPLICATE_OPEN_POSITION"
+        if _token_reentry_blocked(token_addr):
+            _audit_signal_decision("TOKEN_REENTRY_COOLDOWN"); return False, "TOKEN_REENTRY_COOLDOWN"
+        if _open_position_count() >= int(MAX_OPEN_POSITIONS):
+            _audit_signal_decision("MAX_OPEN_POSITIONS"); return False, "MAX_OPEN_POSITIONS"
         if daily_signal_cap_reached():
             _audit_signal_decision("DAILY_SIGNAL_CAP_REACHED")
             if is_analysis_signal:
@@ -3729,23 +3768,18 @@ def _send_fused_signal_impl(token_addr, fusion):
             _audit_signal_decision("LOW_ENTRY_MOMENTUM")
             return False, "LOW_ENTRY_MOMENTUM"
 
-        now = time.time()
-        if MAX_FUSION_ENABLED and not is_analysis_signal:
-            if now - max(last_global_signal_time, UNIFIED_LAST_EMIT_TIME) < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
-                _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
-                return False, "GLOBAL_SIGNAL_COOLDOWN"
-        else:
-            if now - consensus_last_signal.get(emit_key, 0) < CONSENSUS_COOLDOWN_SECONDS:
-                _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
-                return False, "ENGINE_COOLDOWN"
+        now=time.time()
+        if _global_signal_cooldown_remaining(now)>0:
+            _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN"); return False, "GLOBAL_SIGNAL_COOLDOWN"
+        if now-consensus_last_signal.get(emit_key,0)<CONSENSUS_COOLDOWN_SECONDS:
+            _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN"); return False, "ENGINE_COOLDOWN"
         if EMERGENCY_STOP:
             _audit_signal_decision("EMERGENCY_STOP")
             return False, "EMERGENCY_STOP"
 
-        if MAX_FUSION_ENABLED and not is_analysis_signal:
-            last_global_signal_time = now
-            UNIFIED_LAST_EMIT_TIME = now
-        consensus_last_signal[emit_key] = now
+        last_global_signal_time=now; UNIFIED_LAST_EMIT_TIME=now
+        _set_bot_setting("last_global_buy_signal_at",now)
+        consensus_last_signal[emit_key]=now
         V12_REAL_AUDIT["last_signal"] = now
         _increment_daily_signal_count()
         _lock_token_entry(token_addr, "OPEN_PENDING")
@@ -3901,7 +3935,7 @@ def _restore_open_positions():
 
 
 def _mark_token_closed(token_addr):
-    # Release only after a complete exit. Persisted state is removed at the same moment.
+    TOKEN_LAST_CLOSED_AT[token_addr]=time.time()
     _delete_persisted_position(token_addr)
     _unlock_token_entry(token_addr)
 
@@ -4941,7 +4975,7 @@ def admin_panel():
     best_str = f"{best[0]} ({best[1]:+.2f}%)" if best else "ثبت نشده"
     worst_str = f"{worst[0]} ({worst[1]:+.2f}%)" if worst else "ثبت نشده"
     rows_html = "".join(f"<div class='row'>🆔 {r[0]}<br>💳 ولت: <span class='mono'>{r[1] or '-'}</span><br>⏳ انقضا: {r[2]}<br>📌 وضعیت: {r[4]} | 🤖 کپی: {'فعال' if len(r)>5 and r[5] else 'خاموش'} | 💰 حجم: {r[6] if len(r)>6 else 0.01} SOL</div>" for r in subs) or "<div class='row'>هنوز کاربری ثبت نشده است.</div>"
-    return f"""<!doctype html><html lang='fa' dir='rtl'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>پنل مدیریت هالکی</title><style>body{{background:#07111f;color:#fff;font-family:Tahoma;padding:14px}}.wrap{{max-width:720px;margin:auto}}.card{{background:#101c2d;border:1px solid #24364f;border-radius:18px;padding:16px;margin:10px 0;box-shadow:0 8px 30px #0008}}h1,h2{{text-align:center}}h1{{font-size:20px;color:#38bdf8}}h2{{font-size:14px;color:#c084fc}}.grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}}.stat{{background:#0b1524;border-radius:14px;padding:12px;text-align:center}}.value{{font-size:19px;font-weight:bold;color:#22c55e}}.row{{background:#0b1524;border-radius:12px;padding:10px;margin:7px 0;font-size:11px;line-height:1.8}}.mono{{word-break:break-all;color:#94a3b8}}</style></head><body><div class='wrap'><div class='card'><h1>👑 پنل مدیریت هوشمند هالکی</h1><p style='text-align:center;color:#94a3b8'>کنترل و گزارش خصوصی ادمین</p></div><div class='card'><h2>📊 آمار معاملات</h2><div class='grid'><div class='stat'>کل معاملات<br><span class='value'>{analytics['total_trades']}</span></div><div class='stat'>Win Rate<br><span class='value'>{analytics['win_rate']:.2f}%</span></div><div class='stat'>سود/زیان<br><span class='value'>{analytics['total_pct']:+.2f}%</span></div><div class='stat'>P/L دلاری<br><span class='value'>${analytics['total_usd']:+.2f}</span></div></div><p>🏆 بهترین: {best_str}</p><p>📉 بدترین: {worst_str}</p></div><div class='card'><h2>💼 ولت اصلی</h2><p>موجودی لحظه‌ای: <b>{wallet['sol']:.6f} SOL</b></p><p class='mono'>{wallet['pubkey']}</p><p style='color:#64748b;font-size:10px'>این اطلاعات فقط در پنل مدیریت نمایش داده می‌شود و به کانال VIP ارسال نمی‌شود.</p></div><div class='card'><h2>👥 کاربران و اشتراک‌ها</h2><p>تعداد رکوردها: <b>{len(subs)}</b></p>{rows_html}</div></div></body></html>"""
+    return f"""<!doctype html><html lang='fa' dir='rtl'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>پنل مدیریت هالکی</title><style>body{{background:#07111f;color:#fff;font-family:Tahoma;padding:14px}}.wrap{{max-width:720px;margin:auto}}.card{{background:#101c2d;border:1px solid #24364f;border-radius:18px;padding:16px;margin:10px 0;box-shadow:0 8px 30px #0008}}h1,h2{{text-align:center}}h1{{font-size:20px;color:#38bdf8}}h2{{font-size:14px;color:#c084fc}}.grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}}.stat{{background:#0b1524;border-radius:14px;padding:12px;text-align:center}}.value{{font-size:19px;font-weight:bold;color:#22c55e}}.row{{background:#0b1524;border-radius:12px;padding:10px;margin:7px 0;font-size:11px;line-height:1.8}}.mono{{word-break:break-all;color:#94a3b8}}</style></head><body><div class='wrap'><div class='card'><h1>👑 پنل مدیریت هوشمند هالکی</h1><p style='text-align:center;color:#94a3b8'>کنترل و گزارش خصوصی ادمین</p></div><div class='card'><h2>📊 آمار معاملات</h2><div class='grid'><div class='stat'>پوزیشن باز<br><span class='value'>{analytics['open_positions']}</span></div><div class='stat'>بسته‌شده<br><span class='value'>{analytics['total_trades']}</span></div><div class='stat'>سودده<br><span class='value'>{analytics['win_count']}</span></div><div class='stat'>ضررده<br><span class='value'>{analytics['loss_count']}</span></div><div class='stat'>Win Rate<br><span class='value'>{analytics['win_rate']:.2f}%</span></div><div class='stat'>P/L<br><span class='value'>${analytics['total_usd']:+.2f}</span></div></div><p>🏆 بهترین: {best_str}</p><p>📉 بدترین: {worst_str}</p></div><div class='card'><h2>💼 ولت اصلی</h2><p>موجودی لحظه‌ای: <b>{wallet['sol']:.6f} SOL</b></p><p class='mono'>{wallet['pubkey']}</p><p style='color:#64748b;font-size:10px'>این اطلاعات فقط در پنل مدیریت نمایش داده می‌شود و به کانال VIP ارسال نمی‌شود.</p></div><div class='card'><h2>👥 کاربران و اشتراک‌ها</h2><p>تعداد رکوردها: <b>{len(subs)}</b></p>{rows_html}</div></div></body></html>"""
 
 @web_app.route('/api/admin/free-sub', methods=['POST'])
 def api_admin_free_sub():
@@ -5266,6 +5300,10 @@ SIGNAL_GLASS_CATEGORIES = {
         ("ELITE_MAX_UNIQUE_TOKENS", "حداکثر Tokenهای یکتا", "num"),
         ("DEX_MIN_REQUEST_INTERVAL_SECONDS", "فاصله درخواست Dex", "num"),
         ("_SENTINEL_MAX_TOKENS", "حداکثر Sentinel Memory", "num"),
+        ("GLOBAL_SIGNAL_COOLDOWN_SECONDS", "فاصله حداقلی بین BUYها", "num"),
+        ("CONSENSUS_COOLDOWN_SECONDS", "Cooldown هر موتور", "num"),
+        ("MAX_OPEN_POSITIONS", "حداکثر پوزیشن باز", "num"),
+        ("TOKEN_REENTRY_COOLDOWN_SECONDS", "فاصله ورود مجدد همان توکن", "num"),
     ]),
 }
 
@@ -5309,6 +5347,8 @@ SIGNAL_GLASS_NUMERIC_TYPES = {
     "TRAILING_WEAKNESS_MIN_DRAWDOWN_PCT": float, "MAX_TRADE_SOL": float,
     "ELITE_DISCOVERY_MAX_AGE_SECONDS": float, "ELITE_MAX_UNIQUE_TOKENS": int,
     "DEX_MIN_REQUEST_INTERVAL_SECONDS": float, "_SENTINEL_MAX_TOKENS": int,
+    "GLOBAL_SIGNAL_COOLDOWN_SECONDS": float, "CONSENSUS_COOLDOWN_SECONDS": float,
+    "MAX_OPEN_POSITIONS": int, "TOKEN_REENTRY_COOLDOWN_SECONDS": float,
 }
 
 SIGNAL_GLASS_BOOL_VARS = {
@@ -5637,7 +5677,7 @@ def start_telegram_bot():
                 return
 
             if not context.user_data.get("awaiting_trade_limit_sol"):
-                return
+                return await persistent_bottom_panel_handler(update, context)
             raw = (update.message.text or "").strip().replace(",", ".")
             try:
                 value = float(raw)
@@ -5711,11 +5751,13 @@ def start_telegram_bot():
             if label == "📈 آمار معاملات":
                 a = await _tg_bg(get_advanced_trade_analytics)
                 await msg.reply_text(
-                    f"📊 **آمار واقعی ثبت‌شده**\n\n"
-                    f"معاملات: `{a['total_trades']}`\n"
-                    f"Win Rate: `{a['win_rate']:.2f}%`\n"
-                    f"سود/زیان: `{a['total_pct']:+.2f}%`\n"
-                    f"P/L: `${a['total_usd']:+.2f}`",
+                    f"📊 **آمار معاملات — زنده**\n\n"
+                    f"🟡 پوزیشن باز: `{a['open_positions']}` (واقعی `{a['open_real']}` / سیگنال `{a['open_signal']}`)\n"
+                    f"📦 بسته‌شده: `{a['total_trades']}`\n"
+                    f"🟢 سودده: `{a['win_count']}` | 🔴 ضررده: `{a['loss_count']}` | ⚪ سر‌به‌سر: `{a['breakeven_count']}`\n"
+                    f"🏆 Win Rate: `{a['win_rate']:.2f}%`\n"
+                    f"📈 P/L: `{a['total_pct']:+.2f}%` | `${a['total_usd']:+.2f}`\n"
+                    f"🤖 واقعی بسته‌شده: `{a['real_closed']}` | 📡 سیگنال‌محور: `{a['signal_closed']}`",
                     parse_mode="Markdown"
                 )
                 return
@@ -6097,7 +6139,17 @@ def start_telegram_bot():
                         parse_mode="Markdown"
                     )
             elif data=="stats":
-                a=await _tg_bg(get_advanced_trade_analytics); await q.edit_message_text(f"📊 **آمار واقعی ثبت‌شده**\n\nمعاملات: `{a['total_trades']}`\nWin Rate: `{a['win_rate']:.2f}%`\nسود/زیان: `{a['total_pct']:+.2f}%`\nP/L: `${a['total_usd']:+.2f}`",reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+                a=await _tg_bg(get_advanced_trade_analytics)
+                await q.edit_message_text(
+                    f"📊 **آمار معاملات — زنده**\n\n"
+                    f"🟡 پوزیشن باز: `{a['open_positions']}` (واقعی `{a['open_real']}` / سیگنال `{a['open_signal']}`)\n"
+                    f"📦 بسته‌شده: `{a['total_trades']}`\n"
+                    f"🟢 سودده: `{a['win_count']}` | 🔴 ضررده: `{a['loss_count']}` | ⚪ سر‌به‌سر: `{a['breakeven_count']}`\n"
+                    f"🏆 Win Rate: `{a['win_rate']:.2f}%`\n"
+                    f"📈 P/L: `{a['total_pct']:+.2f}%` | `${a['total_usd']:+.2f}`\n"
+                    f"🤖 واقعی بسته‌شده: `{a['real_closed']}` | 📡 سیگنال‌محور: `{a['signal_closed']}`",
+                    reply_markup=_main_keyboard(is_admin),parse_mode="Markdown"
+                )
             elif data=="security":
                 if not is_admin: await q.edit_message_text("⛔ فقط ادمین.",reply_markup=_main_keyboard(False))
                 else: await q.edit_message_text(f"🔐 **امنیت**\n\nPrivate Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\nRPCها: `{len(RPC_ENDPOINTS)}`\nAdmin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",reply_markup=_main_keyboard(True),parse_mode="Markdown")
@@ -6576,8 +6628,8 @@ def start_telegram_bot():
         app.add_handler(CommandHandler("settradesol",settradesol_cmd))
         app.add_handler(CommandHandler("cancel",cancel_trade_limit_cmd))
         # Persistent bottom panel must run before the existing manual-input handler.
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persistent_bottom_panel_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persistent_bottom_panel_handler))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
         app.run_polling(drop_pending_updates=False)
