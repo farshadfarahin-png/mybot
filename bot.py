@@ -1677,10 +1677,12 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
             title, status = "🔴 فروش خودکار موفق", "🟢 فروش موفق روی بلاکچین"
     elif outcome == "SELL_FAILED":
         title, status = "⚠️ سیگنال خروج / فروش ناموفق", "⚠️ فروش انجام نشد"
-    elif outcome == "SIGNAL_TP":
-        title, status = "🎯 فروش سیگنال؛ حد سود متحرک فعال شد", "🟢 سیگنال سودده بسته شد"
+    elif outcome == "SIGNAL_TP" and float(pnl_percent or 0.0) > 0:
+        title, status = "🎯 فروش سیگنال؛ خروج سودده با تریلینگ", "🟢 معامله واقعاً با سود بسته شد"
+    elif outcome == "SIGNAL_TP" and float(pnl_percent or 0.0) == 0:
+        title, status = "⚪ فروش سیگنال؛ خروج سر‌به‌سر", "⚪ معامله بدون سود و ضرر بسته شد"
     else:
-        title, status = "🛑 فروش سیگنال؛ حد ضرر فعال شد", "🔴 سیگنال به حد ضرر رسید"
+        title, status = "🛑 فروش سیگنال؛ خروج ضررده", "🔴 نتیجه واقعی معامله منفی بود"
 
     msg = (
         f"{title}\n\n"
@@ -1823,7 +1825,10 @@ def evaluate_signal_only_positions():
                     f"📉 افت از سقف: {pos.get('drawdown_from_high', 0):.2f}%\n"
                     f"📊 معاملات ۵ دقیقه: خرید {pos.get('buys_m5', 0)} | فروش {pos.get('sells_m5', 0)}"
                 )
-                send_signal_outcome(token_addr, pos, current_price, outcome, pnl, extra_text=extra)
+                # نتیجه واقعی معامله همیشه بر اساس P/L نهایی تعیین می‌شود؛
+                # یک خروج trailing هرگز نباید معامله منفی را «سودده» اعلام کند.
+                final_outcome = "SIGNAL_TP" if pnl > 0 else "SIGNAL_SL"
+                send_signal_outcome(token_addr, pos, current_price, final_outcome, pnl, extra_text=extra)
                 finished.append(token_addr)
         except Exception as e:
             logger.debug(f"Signal-only monitor error {token_addr}: {e}")
@@ -1909,7 +1914,13 @@ def check_positions_loop():
 
                     is_profit = pnl_percent >= 0
                     sticker = "🤑" if is_profit else "🧐"
-                    reason = exit_reason_text or ("حد سود/قفل سود فعال شد 🎯" if is_profit else "خروج با ضرر / حد ضرر 🛑")
+                    # علت خروج و نتیجه معامله را جدا نگه می‌داریم؛ نتیجه منفی همیشه ضررده است.
+                    if pnl_percent < 0:
+                        reason = "خروج نهایی با ضرر؛ تریلینگ/حد ضرر فعال شد 🛑"
+                    elif pnl_percent == 0:
+                        reason = "خروج نهایی سر‌به‌سر ⚪"
+                    else:
+                        reason = exit_reason_text or "خروج سودده با تریلینگ/قفل سود 🎯"
                     sell_status = "🟢 فروش موفق روی بلاکچین" if success else f"⚠️ فروش انجام نشد: {sell_res_info}"
 
                     # مقدار P/L برای داشبورد تقریبی و بر اساس سرمایه نمونه موجود در پوزیشن.
@@ -2084,12 +2095,13 @@ CONSENSUS_MIN_SCORE = 4.0
 CONSENSUS_MIN_RATIO = 0.55
 CONSENSUS_COOLDOWN_SECONDS = 20
 
-# Daily signal cap: editable from the management panel, 1..50. Default: 15.
-DAILY_SIGNAL_LIMIT = 25
+# Daily signal cap: OFF by default. Set manually from the management panel (1..50) to enable.
+# 0 means unlimited / disabled.
+DAILY_SIGNAL_LIMIT = 0
 # فاصله حداقلی بین دو سیگنال جدید؛ برای جلوگیری از بمباران سیگنال‌ها.
 GLOBAL_SIGNAL_COOLDOWN_SECONDS = 15
 # Signal budget is capacity only; quality thresholds never depend on this value.
-SIGNAL_BUDGET_MIN = 1
+SIGNAL_BUDGET_MIN = 0
 SIGNAL_BUDGET_MAX = 50
 # Final entry-safety guard: a BUY cannot execute when the 5m move is only
 # a 1-2% sideways fluctuation. This is applied after candidate generation
@@ -2551,23 +2563,13 @@ def fusion_quality_gate(fusion):
 # ==========================================================
 LEARNING_FILE = "fusion_learning.json"
 MAX_HISTORY = 5000
-LEARNING_CYCLE_SIZE = 50
-LEARNING_SCHEMA_VERSION = 2
-MAX_LEARNED_PATTERNS = 200
-MAX_LEARNING_EVENTS = 500
 MAX_CONSECUTIVE_LOSSES = 4
 RISK_MIN_MULTIPLIER = 0.25
 RISK_MAX_MULTIPLIER = 1.25
 LEARNING_ALPHA = 0.12
 
 learning_state = {
-    "schema_version": LEARNING_SCHEMA_VERSION,
     "trades": [],
-    "closed_trade_counter": 0,
-    "last_learning_cycle": 0,
-    "learning_cycles": [],
-    "learned_patterns": {},
-    "improvements": [],
     "engines": {},
     "equity_peak": 0.0,
     "equity_now": 0.0,
@@ -2582,12 +2584,7 @@ def _load_learning_state():
         if p.exists():
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                # Backward-compatible merge: preserve old learning files and add new fields.
-                for key, default in learning_state.items():
-                    if key not in data:
-                        data[key] = default
                 learning_state.update(data)
-                learning_state["schema_version"] = LEARNING_SCHEMA_VERSION
     except Exception as e:
         logger.warning(f"Learning state load failed: {e}")
 
@@ -2628,7 +2625,6 @@ def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
         }
         learning_state["trades"].append(item)
         learning_state["trades"] = learning_state["trades"][-MAX_HISTORY:]
-        learning_state["closed_trade_counter"] = int(learning_state.get("closed_trade_counter", 0) or 0) + 1
 
         if pnl < 0:
             learning_state["consecutive_losses"] = int(
@@ -2654,120 +2650,8 @@ def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
                 + LEARNING_ALPHA * target
             )
         _save_learning_state()
-        if learning_state["closed_trade_counter"] % LEARNING_CYCLE_SIZE == 0:
-            _run_learning_cycle()
     except Exception as e:
         logger.warning(f"Closed-trade learning update failed: {e}")
-
-
-def _safe_pattern_key(value):
-    text = str(value or "UNKNOWN").strip()
-    return text[:120] if text else "UNKNOWN"
-
-def _cycle_metrics(rows):
-    pnl = [float(r.get("pnl_pct", 0) or 0) for r in rows]
-    wins = [x for x in pnl if x > 0]
-    losses = [x for x in pnl if x <= 0]
-    gross_profit = sum(wins)
-    gross_loss = abs(sum(losses))
-    return {
-        "trades": len(rows),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": (len(wins) / len(rows) * 100.0) if rows else 0.0,
-        "profit_factor": (gross_profit / gross_loss) if gross_loss else (999.0 if gross_profit else 0.0),
-        "avg_pnl": (sum(pnl) / len(pnl)) if pnl else 0.0,
-        "avg_win": (sum(wins) / len(wins)) if wins else 0.0,
-        "avg_loss": (sum(losses) / len(losses)) if losses else 0.0,
-        "net_pnl": sum(pnl),
-    }
-
-def _run_learning_cycle():
-    """Run evidence-based learning after every 50 closed signals/trades.
-    This is an overlay only: it never rewrites the original signal engines."""
-    if not AUTO_LEARNING_ENABLED:
-        return None
-    try:
-        rows = list(learning_state.get("trades", []))
-        cycle_no = int(learning_state.get("closed_trade_counter", len(rows)) // LEARNING_CYCLE_SIZE)
-        if cycle_no <= int(learning_state.get("last_learning_cycle", 0) or 0):
-            return None
-        # Always evaluate the latest completed 50, so learning continues even
-        # after the rolling trade memory reaches MAX_HISTORY.
-        cycle_rows = rows[-LEARNING_CYCLE_SIZE:]
-        if len(cycle_rows) < LEARNING_CYCLE_SIZE:
-            return None
-        overall = _cycle_metrics(cycle_rows)
-        engines = {}
-        patterns = {}
-        for r in cycle_rows:
-            names = r.get("engines") or []
-            if isinstance(names, str):
-                names = [x.strip() for x in names.split(",") if x.strip()]
-            for name in names:
-                engines.setdefault(name, []).append(r)
-            for key in ("top_level_mode", "regime"):
-                pv = _safe_pattern_key(r.get(key))
-                patterns.setdefault(key + ":" + pv, []).append(r)
-
-        engine_report = {}
-        changes = []
-        for name, erows in engines.items():
-            m = _cycle_metrics(erows)
-            old = float(learning_state.get("engines", {}).get(name, {}).get("weight", 1.0))
-            # Require enough observations in this 50-signal cycle before adapting.
-            delta = 0.0
-            if len(erows) >= 5:
-                if m["win_rate"] >= 60.0 and m["avg_pnl"] > 0 and m["profit_factor"] > 1.0:
-                    delta = 0.05
-                elif m["win_rate"] < 45.0 or m["avg_pnl"] < 0 or m["profit_factor"] < 0.85:
-                    delta = -0.05
-            new = max(V11_MIN_WEIGHT, min(V11_MAX_WEIGHT, old + delta))
-            st = learning_state.setdefault("engines", {}).setdefault(name, {"trades":0,"wins":0,"losses":0,"avg_pnl":0.0,"weight":1.0})
-            if AUTO_IMPROVEMENT_ENABLED and delta:
-                st["weight"] = new
-                changes.append({"engine": name, "old": old, "new": new, "reason": "50-signal cycle evidence", "metrics": m})
-            engine_report[name] = {**m, "weight_before": old, "weight_after": new if (AUTO_IMPROVEMENT_ENABLED and delta) else old}
-
-        learned = []
-        for key, prows in patterns.items():
-            m = _cycle_metrics(prows)
-            rec = learning_state.setdefault("learned_patterns", {}).setdefault(key, {"trades":0,"wins":0,"losses":0,"avg_pnl":0.0,"win_rate":0.0})
-            n0 = int(rec.get("trades", 0) or 0); n = len(prows)
-            rec["trades"] = n0 + n
-            rec["wins"] = int(rec.get("wins", 0) or 0) + m["wins"]
-            rec["losses"] = int(rec.get("losses", 0) or 0) + m["losses"]
-            rec["avg_pnl"] = ((float(rec.get("avg_pnl", 0.0)) * n0) + m["avg_pnl"] * n) / max(1, n0 + n)
-            rec["win_rate"] = rec["wins"] / rec["trades"] * 100.0 if rec["trades"] else 0.0
-            if n >= 3:
-                learned.append((key, m))
-        if len(learning_state.get("learned_patterns", {})) > MAX_LEARNED_PATTERNS:
-            items = sorted(learning_state["learned_patterns"].items(), key=lambda kv: kv[1].get("trades",0), reverse=True)[:MAX_LEARNED_PATTERNS]
-            learning_state["learned_patterns"] = dict(items)
-
-        event = {
-            "cycle": cycle_no,
-            "ts": time.time(),
-            "sample": len(cycle_rows),
-            "metrics": overall,
-            "engines": engine_report,
-            "learned": [{"pattern": k, "metrics": m} for k,m in learned],
-            "changes": changes,
-            "reason": "Automatic learning checkpoint reached 50 closed signals/trades."
-        }
-        learning_state.setdefault("learning_cycles", []).append(event)
-        learning_state["learning_cycles"] = learning_state["learning_cycles"][-MAX_LEARNING_EVENTS:]
-        learning_state.setdefault("improvements", []).extend(changes)
-        learning_state["improvements"] = learning_state["improvements"][-MAX_LEARNING_EVENTS:]
-        learning_state["last_learning_cycle"] = cycle_no
-        _save_learning_state()
-        _record_learning_event("LEARN", f"چرخه یادگیری #{cycle_no} تکمیل شد", f"۵۰ معامله بررسی شد | Win Rate={overall['win_rate']:.1f}% | Profit Factor={overall['profit_factor']:.2f} | میانگین سود={overall['avg_win']:.2f}% | میانگین ضرر={overall['avg_loss']:.2f}%", cycle_no * LEARNING_CYCLE_SIZE, overall["win_rate"])
-        for ch in changes:
-            _record_learning_event("IMPROVE", f"بهبود موتور {ch['engine']}", f"وزن {ch['old']:.3f} → {ch['new']:.3f} بر اساس ۵۰ سیگنال؛ Win Rate={ch['metrics']['win_rate']:.1f}%، PF={ch['metrics']['profit_factor']:.2f}", cycle_no * LEARNING_CYCLE_SIZE, ch["metrics"]["win_rate"])
-        return event
-    except Exception as e:
-        logger.warning(f"50-signal learning cycle failed: {e}")
-        return None
 
 def learning_is_in_circuit_breaker():
     # Circuit breaker must be temporary. A permanent 4-loss lock can silently
@@ -2898,46 +2782,6 @@ def v11_data_report():
     v11_rebuild_statistics()
     return v11_state
 
-
-
-def export_learning_bundle(path=None):
-    path = Path(path or f"learning_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-    payload = {
-        "format": "HULK_LEARNING_EXPORT",
-        "schema_version": LEARNING_SCHEMA_VERSION,
-        "exported_at": datetime.now().isoformat(),
-        "learning_state": learning_state,
-        "v11_state": v11_state,
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return str(path)
-
-def import_learning_bundle(path):
-    p = Path(path)
-    data = json.loads(p.read_text(encoding="utf-8"))
-    incoming = data.get("learning_state", data)
-    if not isinstance(incoming, dict):
-        raise ValueError("Invalid learning bundle")
-    # Merge, never blindly delete current learning.
-    for key in ("trades", "learning_cycles", "improvements"):
-        vals = incoming.get(key) or []
-        if isinstance(vals, list):
-            existing = learning_state.get(key) or []
-            merged = existing + vals
-            limit = MAX_HISTORY if key == "trades" else MAX_LEARNING_EVENTS
-            learning_state[key] = merged[-limit:]
-    for key in ("learned_patterns", "engines"):
-        if isinstance(incoming.get(key), dict):
-            learning_state.setdefault(key, {}).update(incoming[key])
-    for key in ("closed_trade_counter", "last_learning_cycle"):
-        try: learning_state[key] = max(int(learning_state.get(key, 0) or 0), int(incoming.get(key, 0) or 0))
-        except Exception: pass
-    learning_state["schema_version"] = LEARNING_SCHEMA_VERSION
-    _save_learning_state()
-    if isinstance(data.get("v11_state"), dict):
-        v11_state.update(data["v11_state"])
-        _v11_save()
-    return learning_state
 
 # اجرای محاسبات سنگین خارج از event loop تلگرام
 async def _tg_bg(fn, *args, **kwargs):
@@ -3807,15 +3651,15 @@ def _mark_token_closed(token_addr):
 
 
 def _load_daily_signal_state():
-    """Load today's signal count and cap from persistent bot settings."""
+    """Load daily signal cap state. The cap is OFF unless explicitly enabled by the admin."""
     global DAILY_SIGNAL_LIMIT
     today = time.strftime("%Y-%m-%d")
     try:
-        saved_limit = _get_bot_setting("daily_signal_limit", "")
-        if saved_limit:
-            DAILY_SIGNAL_LIMIT = max(1, min(50, int(saved_limit)))
+        enabled = str(_get_bot_setting("daily_signal_cap_enabled", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+        saved_limit = int(_get_bot_setting("daily_signal_limit", "0") or 0)
+        DAILY_SIGNAL_LIMIT = max(1, min(50, saved_limit)) if enabled and saved_limit > 0 else 0
     except Exception:
-        DAILY_SIGNAL_LIMIT = max(1, min(50, int(DAILY_SIGNAL_LIMIT or 15)))
+        DAILY_SIGNAL_LIMIT = 0
 
     try:
         saved_date = _get_bot_setting("daily_signal_date", "")
@@ -3830,13 +3674,23 @@ def _load_daily_signal_state():
 
 
 def _set_daily_signal_limit(value):
+    """Set and ENABLE the manual daily signal cap. Use 0 to disable it."""
     global DAILY_SIGNAL_LIMIT
     value = int(value)
-    if value < 1 or value > 50:
-        raise ValueError("سقف روزانه باید بین 1 تا 50 سیگنال باشد.")
+    if value < 0 or value > 50:
+        raise ValueError("سقف روزانه باید 0 تا 50 باشد؛ 0 یعنی خاموش.")
     DAILY_SIGNAL_LIMIT = value
     _set_bot_setting("daily_signal_limit", value)
+    _set_bot_setting("daily_signal_cap_enabled", 1 if value > 0 else 0)
     return value
+
+
+def _disable_daily_signal_cap():
+    global DAILY_SIGNAL_LIMIT
+    DAILY_SIGNAL_LIMIT = 0
+    _set_bot_setting("daily_signal_cap_enabled", 0)
+    _set_bot_setting("daily_signal_limit", 0)
+    return 0
 
 
 def _increment_daily_signal_count():
@@ -3856,10 +3710,13 @@ def _increment_daily_signal_count():
 
 
 def daily_signal_cap_reached():
-    """Stop NEW entries after the admin-selected daily cap."""
+    """Return True only when the admin explicitly enabled a daily cap."""
     try:
-        count = _load_daily_signal_state()
-        return count >= max(1, min(50, int(DAILY_SIGNAL_LIMIT)))
+        _load_daily_signal_state()
+        if int(DAILY_SIGNAL_LIMIT or 0) <= 0:
+            return False
+        count = int(_get_bot_setting("daily_signal_count", "0") or 0)
+        return count >= int(DAILY_SIGNAL_LIMIT)
     except Exception:
         return False
 
@@ -3867,9 +3724,11 @@ def daily_signal_cap_reached():
 def daily_signal_status_text():
     try:
         count = _load_daily_signal_state()
+        if int(DAILY_SIGNAL_LIMIT or 0) <= 0:
+            return f"{count}/∞ (خاموش)"
         return f"{count}/{DAILY_SIGNAL_LIMIT}"
     except Exception:
-        return f"0/{DAILY_SIGNAL_LIMIT}"
+        return "0/∞ (خاموش)"
 
 
 def _elite_refresh_market_cache(force=False):
@@ -5253,8 +5112,7 @@ def _persistent_bottom_keyboard(is_admin=False):
             ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"],
             [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"],
             [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
-            ["🧠 مرکز یادگیری", "📤 خروجی یادگیری"],
-            ["📥 ورود یادگیری"],
+            ["🧠 مرکز یادگیری"],
             [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"],
             [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
             ["🎁 عضویت رایگان کاربر"],
@@ -5462,7 +5320,7 @@ def start_telegram_bot():
                     if name == "MAX_TRADE_SOL":
                         _set_bot_setting("max_trade_sol", value)
                     if name == "DAILY_SIGNAL_LIMIT":
-                        _save_daily_signal_state()
+                        _set_daily_signal_limit(int(value))
                     context.user_data.pop("awaiting_signal_glass_setting", None)
                     category = next((k for k, (_, items) in SIGNAL_GLASS_CATEGORIES.items() if any(n == name for n, _, _ in items)), "gates")
                     await update.message.reply_text(f"✅ **تنظیم شد**\n\n`{name}` = `{_signal_glass_value(name)}`", parse_mode="Markdown", reply_markup=_signal_glass_category_keyboard(category))
@@ -5764,26 +5622,6 @@ def start_telegram_bot():
                 await msg.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=_persistent_bottom_keyboard(True))
                 return
 
-            if label == "📤 خروجی یادگیری":
-                if not is_admin:
-                    await msg.reply_text("⛔ فقط ادمین.")
-                    return
-                try:
-                    out = await _tg_bg(export_learning_bundle)
-                    with open(out, "rb") as fh:
-                        await msg.reply_document(fh, filename=Path(out).name, caption="📤 خروجی کامل یادگیری و بهبود — قابل انتقال به دستگاه دیگر")
-                except Exception as e:
-                    await msg.reply_text(f"❌ Export ناموفق: {e}")
-                return
-
-            if label == "📥 ورود یادگیری":
-                if not is_admin:
-                    await msg.reply_text("⛔ فقط ادمین.")
-                    return
-                context.user_data["awaiting_learning_import"] = True
-                await msg.reply_text("📥 فایل JSON یادگیری را به‌صورت Document ارسال کن. یادگیری فعلی حذف نمی‌شود و داده سازگار با آن ادغام خواهد شد.")
-                return
-
             # Automatic learning: records/uses experience only.
             if label.startswith("🧠 یادگیری خودکار:"):
                 if not is_admin:
@@ -5996,8 +5834,20 @@ def start_telegram_bot():
                     "پوزیشن‌های باز همچنان مدیریت و فروخته می‌شوند.",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("✏️ تغییر دستی سقف روزانه", callback_data="daily_signal_limit_manual")],
+                        [InlineKeyboardButton("⛔ خاموش‌کردن سقف روزانه", callback_data="daily_signal_limit_disable")],
                         [InlineKeyboardButton("🔙 بازگشت به کنترل موتورها", callback_data="controls")]
                     ]),
+                    parse_mode="Markdown"
+                )
+                return
+            elif data == "daily_signal_limit_disable":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                _disable_daily_signal_cap()
+                await q.edit_message_text(
+                    "✅ **سقف روزانه خاموش شد**\n\nسیگنال‌ها دیگر به سقف روزانه محدود نیستند.\nیادگیری و مدیریت پوزیشن‌ها بدون تغییر ادامه دارد.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="daily_signal_limit")]]),
                     parse_mode="Markdown"
                 )
                 return
@@ -6431,35 +6281,11 @@ def start_telegram_bot():
                     globals()[name] = not bool(globals()[name])
 
                 await q.edit_message_text("⚙️ **موتورهای مستقل**\n\n"+_engine_status_lines(),reply_markup=_engine_control_keyboard(),parse_mode="Markdown")
-        async def learning_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            if not context.user_data.get("awaiting_learning_import"):
-                return
-            cid = str(update.effective_user.id)
-            if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
-                return
-            doc = update.message.document
-            if not doc or not str(doc.file_name or "").lower().endswith(".json"):
-                await update.message.reply_text("❌ فقط فایل JSON یادگیری پذیرفته می‌شود.")
-                return
-            tmp = Path(f"learning_import_{cid}_{int(time.time())}.json")
-            try:
-                tgfile = await doc.get_file()
-                await tgfile.download_to_drive(custom_path=str(tmp))
-                await _tg_bg(import_learning_bundle, str(tmp))
-                context.user_data.pop("awaiting_learning_import", None)
-                await update.message.reply_text("✅ یادگیری با موفقیت Import شد. داده‌های قبلی حفظ شدند و داده‌های سازگار ادغام شدند.", reply_markup=_persistent_bottom_keyboard(True))
-            except Exception as e:
-                await update.message.reply_text(f"❌ Import ناموفق: {e}")
-            finally:
-                try: tmp.unlink(missing_ok=True)
-                except Exception: pass
-
         app.add_handler(CommandHandler("start",start_cmd))
         app.add_handler(CommandHandler("free",free_cmd))
         app.add_handler(CommandHandler("setvipchannel",setvipchannel_cmd))
         app.add_handler(CommandHandler("settradesol",settradesol_cmd))
         app.add_handler(CommandHandler("cancel",cancel_trade_limit_cmd))
-        app.add_handler(MessageHandler(filters.Document.ALL, learning_document_handler))
         # Persistent bottom panel must run before the existing manual-input handler.
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persistent_bottom_panel_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
