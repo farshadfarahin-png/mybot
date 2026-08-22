@@ -408,14 +408,6 @@ def _upload_sqlite_snapshot_to_neon():
 
 
 def _restore_sqlite_snapshot_from_neon_if_needed():
-    """Restore only a valid historical Neon snapshot when local SQLite is unusable/empty.
-
-    Safety rules:
-      * Never overwrite a usable local database.
-      * Never restore a snapshot that is itself empty.
-      * Prefer the newest valid snapshot, then fall back to the previous generation.
-      * Validate SQLite integrity before replacing the live file.
-    """
     db_path = Path("bot_analytics.db")
     try:
         needs = not db_path.exists() or db_path.stat().st_size <= 100
@@ -431,50 +423,32 @@ def _restore_sqlite_snapshot_from_neon_if_needed():
                 needs = True
         if not needs or not _ensure_neon_snapshot_table():
             return False
-
         conn = _neon_connect()
         with conn:
             with conn.cursor() as cur:
-                cur.execute(f"""
-                    SELECT db_blob FROM {NEON_SNAPSHOT_TABLE}
-                    WHERE db_blob IS NOT NULL
-                    ORDER BY updated_at DESC
-                    LIMIT 2
-                """)
+                cur.execute(f"SELECT db_blob FROM {NEON_SNAPSHOT_TABLE} WHERE db_blob IS NOT NULL ORDER BY updated_at DESC LIMIT 2")
                 rows = cur.fetchall()
         conn.close()
-
         for row in rows:
             if not row or not row[0]:
                 continue
             import tempfile
-            fd, name = tempfile.mkstemp(prefix="bot_restore_", suffix=".db")
-            os.close(fd)
-            tmp = Path(name)
+            fd, name = tempfile.mkstemp(prefix="bot_restore_", suffix=".db"); os.close(fd); tmp = Path(name)
             try:
                 tmp.write_bytes(bytes(row[0]))
                 with sqlite3.connect(str(tmp), timeout=30.0, check_same_thread=False) as c:
-                    if str(c.execute("PRAGMA quick_check").fetchone()[0]).lower() != "ok":
-                        continue
+                    if str(c.execute("PRAGMA quick_check").fetchone()[0]).lower() != "ok": continue
                     tabs = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                     t = int(c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]) if "trades" in tabs else 0
                     l = int(c.execute("SELECT COUNT(*) FROM ai_learning_state").fetchone()[0]) if "ai_learning_state" in tabs else 0
-                    # An empty snapshot is never allowed to replace local history.
-                    if t == 0 and l == 0:
-                        continue
-                os.replace(tmp, db_path)
-                logger.info("♻️ Neon: historical snapshot restored safely.")
-                return True
+                    if t == 0 and l == 0: continue
+                os.replace(tmp, db_path); logger.info("♻️ Neon: historical snapshot restored safely."); return True
             finally:
-                try:
-                    tmp.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                try: tmp.unlink(missing_ok=True)
+                except Exception: pass
         return False
     except Exception as e:
-        logger.warning(f"⚠️ Neon restore failed safely; local SQLite unchanged: {e}")
-        return False
-
+        logger.warning(f"⚠️ Neon restore failed safely; local SQLite unchanged: {e}"); return False
 def neon_sqlite_snapshot_loop():
     """Background durability loop; failures never stop the trading bot."""
     global NEON_SNAPSHOT_RUNNING
