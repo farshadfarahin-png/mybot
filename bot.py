@@ -292,6 +292,178 @@ closed_trades_history = []
 total_realized_pnl_usd = 0.0
 total_realized_pnl_percent = 0.0
 
+# ================= SAFE NEON SQLITE MIRROR (ADDITIVE ONLY) =================
+# This layer is intentionally separate from the trading engine.
+# It keeps the existing SQLite database as the live source of truth while
+# periodically storing a complete SQLite backup in Neon PostgreSQL.
+# Nothing in the existing trading/Telegram/position logic is replaced.
+NEON_DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+NEON_SNAPSHOT_INTERVAL_SECONDS = 30
+NEON_SNAPSHOT_TABLE = "bot_sqlite_snapshots"
+NEON_SNAPSHOT_LOCK = Lock()
+NEON_SNAPSHOT_RUNNING = False
+
+try:
+    import psycopg2
+except Exception:
+    psycopg2 = None
+
+
+def _neon_snapshot_enabled():
+    return bool(NEON_DATABASE_URL and psycopg2 is not None)
+
+
+def _neon_connect():
+    if not _neon_snapshot_enabled():
+        return None
+    return psycopg2.connect(NEON_DATABASE_URL, connect_timeout=8)
+
+
+def _ensure_neon_snapshot_table():
+    """Create the single durable snapshot table if Neon is configured."""
+    if not _neon_snapshot_enabled():
+        return False
+    try:
+        conn = _neon_connect()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {NEON_SNAPSHOT_TABLE} (
+                        snapshot_id SMALLINT PRIMARY KEY,
+                        db_blob BYTEA NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ Neon mirror unavailable (bot continues on SQLite): {e}")
+        return False
+
+
+def _make_consistent_sqlite_backup():
+    """Create a consistent SQLite backup without changing the live database."""
+    import tempfile
+    source = Path("bot_analytics.db")
+    if not source.exists() or source.stat().st_size == 0:
+        return None
+
+    fd, tmp_name = tempfile.mkstemp(prefix="bot_neon_", suffix=".db")
+    os.close(fd)
+    try:
+        with sqlite3.connect(str(source), timeout=30.0, check_same_thread=False) as src:
+            with sqlite3.connect(tmp_name, timeout=30.0, check_same_thread=False) as dst:
+                src.backup(dst)
+        return Path(tmp_name)
+    except Exception:
+        try:
+            Path(tmp_name).unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _upload_sqlite_snapshot_to_neon():
+    if not _ensure_neon_snapshot_table():
+        return False
+    backup_path = _make_consistent_sqlite_backup()
+    if backup_path is None:
+        return False
+    try:
+        data = backup_path.read_bytes()
+        conn = _neon_connect()
+        with conn:
+            with conn.cursor() as cur:
+                # Keep two generations so one failed/corrupt write cannot
+                # immediately destroy the previous durable copy.
+                cur.execute(f"""
+                    SELECT snapshot_id FROM {NEON_SNAPSHOT_TABLE}
+                    ORDER BY updated_at DESC LIMIT 1
+                """)
+                row = cur.fetchone()
+                next_id = 1 if not row or int(row[0]) == 2 else 2
+                cur.execute(f"""
+                    INSERT INTO {NEON_SNAPSHOT_TABLE}(snapshot_id, db_blob, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (snapshot_id) DO UPDATE SET
+                        db_blob = EXCLUDED.db_blob,
+                        updated_at = EXCLUDED.updated_at
+                """, (next_id, psycopg2.Binary(data)))
+        conn.close()
+        logger.info("☁️ Neon: snapshot دیتابیس SQLite با موفقیت ذخیره شد.")
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ Neon snapshot upload failed; SQLite remains active: {e}")
+        return False
+    finally:
+        try:
+            backup_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _restore_sqlite_snapshot_from_neon_if_needed():
+    """Restore the newest Neon snapshot only when local SQLite is missing/empty."""
+    db_path = Path("bot_analytics.db")
+    if db_path.exists() and db_path.stat().st_size > 100:
+        return False
+    if not _ensure_neon_snapshot_table():
+        return False
+    try:
+        conn = _neon_connect()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT db_blob FROM {NEON_SNAPSHOT_TABLE}
+                    ORDER BY updated_at DESC LIMIT 1
+                """)
+                row = cur.fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return False
+
+        import tempfile
+        fd, tmp_name = tempfile.mkstemp(prefix="bot_restore_", suffix=".db")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            tmp_path.write_bytes(bytes(row[0]))
+            # Validate the backup before replacing the live SQLite file.
+            with sqlite3.connect(str(tmp_path), timeout=30.0, check_same_thread=False) as check_conn:
+                check_conn.execute("PRAGMA quick_check")
+            os.replace(tmp_path, db_path)
+            logger.info("♻️ Neon: آخرین snapshot معتبر SQLite بازیابی شد.")
+            return True
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"⚠️ Neon restore failed; a new SQLite database will be used: {e}")
+        return False
+
+
+def neon_sqlite_snapshot_loop():
+    """Background durability loop; failures never stop the trading bot."""
+    global NEON_SNAPSHOT_RUNNING
+    if not _neon_snapshot_enabled():
+        logger.info("ℹ️ Neon mirror غیرفعال است: DATABASE_URL/psycopg2 تنظیم نشده.")
+        return
+    with NEON_SNAPSHOT_LOCK:
+        if NEON_SNAPSHOT_RUNNING:
+            return
+        NEON_SNAPSHOT_RUNNING = True
+    logger.info("☁️ Neon SQLite mirror فعال شد؛ snapshot هر ۳۰ ثانیه.")
+    while True:
+        try:
+            _upload_sqlite_snapshot_to_neon()
+        except Exception as e:
+            logger.warning(f"⚠️ خطای Neon mirror: {e}")
+        time.sleep(NEON_SNAPSHOT_INTERVAL_SECONDS)
+
+# ========================================================================
+
 def init_db():
     with db_lock:
         try:
@@ -365,6 +537,10 @@ def init_db():
         except Exception as e:
             logger.error(f"⚠️ خطای دیتابیس: {e}")
 
+# Restore only when the Render filesystem has no usable local SQLite file.
+# Existing live SQLite data is never overwritten by this mirror.
+_restore_sqlite_snapshot_from_neon_if_needed()
+
 init_db()
 
 def _ensure_production_trade_schema():
@@ -387,6 +563,9 @@ def _ensure_production_trade_schema():
         logger.exception("Production trades schema migration failed: %s", exc)
 
 _ensure_production_trade_schema()
+
+# Start the durability mirror after the original DB initialization/schema work.
+Thread(target=neon_sqlite_snapshot_loop, daemon=True, name="NeonSQLiteMirror").start()
 
 def _record_learning_event(event_type, title, details="", sample_count=0, win_rate=0.0):
     """Persistent, human-readable learning/improvement audit trail."""
