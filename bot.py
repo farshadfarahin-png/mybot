@@ -523,6 +523,30 @@ def init_db():
                     created_at TEXT NOT NULL
                 )
             """)
+            # META-LEARNING is additive only: no existing table/data is altered or deleted.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_learning_state (
+                    state_id INTEGER PRIMARY KEY CHECK(state_id = 1),
+                    state_json TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_meta_learning (
+                    scope TEXT NOT NULL, meta_key TEXT NOT NULL,
+                    trades INTEGER NOT NULL DEFAULT 0, wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0,
+                    pnl_sum REAL NOT NULL DEFAULT 0, gross_profit REAL NOT NULL DEFAULT 0, gross_loss REAL NOT NULL DEFAULT 0,
+                    last_pnl REAL NOT NULL DEFAULT 0, last_update REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY(scope, meta_key)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_meta_learning_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, meta_key TEXT NOT NULL,
+                    decision TEXT NOT NULL DEFAULT '', probability REAL DEFAULT 0, expected_pnl REAL DEFAULT 0,
+                    confidence REAL DEFAULT 0, pnl REAL DEFAULT 0, created_at TEXT NOT NULL
+                )
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS open_positions (
                     token_address TEXT PRIMARY KEY,
@@ -563,6 +587,174 @@ def _ensure_production_trade_schema():
         logger.exception("Production trades schema migration failed: %s", exc)
 
 _ensure_production_trade_schema()
+
+# ==========================================================
+# PRO MAX META-LEARNING ENGINE (ADDITIVE / FAIL-SAFE)
+# ==========================================================
+# Learns only from CLOSED outcomes. Existing signal engines and hard gates
+# remain authoritative. Memory is stored in SQLite, which is already mirrored
+# by the existing Neon snapshot layer, so code changes do not erase learning.
+META_LEARNING_ENABLED = True
+META_LEARNING_VERSION = 1
+META_MIN_PATTERN_SAMPLES = 20
+META_MIN_REGIME_SAMPLES = 12
+META_MIN_ENGINE_SAMPLES = 12
+META_MAX_ADJUSTMENT = 2.25
+META_MAX_RANK_BONUS = 2.50
+META_MAX_PATTERNS = 8000
+META_WILSON_Z = 1.96
+META_MEMORY = {"pattern": {}, "regime": {}, "engine": {}, "global": {}}
+META_MEMORY_LOCK = RLock()
+
+def _meta_empty_stats():
+    return {"trades":0,"wins":0,"losses":0,"pnl_sum":0.0,"gross_profit":0.0,"gross_loss":0.0,"last_pnl":0.0,"last_update":0.0}
+
+def _meta_normalize_stats(raw):
+    out=_meta_empty_stats()
+    if isinstance(raw,dict):
+        for k in out:
+            try:
+                out[k]=int(raw.get(k,out[k]) or out[k]) if k in ("trades","wins","losses") else float(raw.get(k,out[k]) or out[k])
+            except Exception: pass
+    out["trades"]=max(0,int(out["trades"])); out["wins"]=max(0,int(out["wins"])); out["losses"]=max(0,int(out["losses"]))
+    return out
+
+def _meta_load_memory():
+    if not META_LEARNING_ENABLED:return
+    try:
+        with db_lock:
+            conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False)
+            rows=conn.execute("SELECT scope,meta_key,trades,wins,losses,pnl_sum,gross_profit,gross_loss,last_pnl,last_update FROM ai_meta_learning").fetchall(); conn.close()
+        with META_MEMORY_LOCK:
+            for scope,key,trades,wins,losses,pnl_sum,gp,gl,last_pnl,last_update in rows:
+                if scope in META_MEMORY:
+                    META_MEMORY[scope][str(key)]=_meta_normalize_stats({"trades":trades,"wins":wins,"losses":losses,"pnl_sum":pnl_sum,"gross_profit":gp,"gross_loss":gl,"last_pnl":last_pnl,"last_update":last_update})
+        logger.info("🧠 Meta-Learning loaded: %d persistent buckets",len(rows))
+    except Exception as exc: logger.warning("Meta-Learning load failed; trading continues unchanged: %s",exc)
+
+def _meta_save_bucket(scope,key,stats):
+    try:
+        with db_lock:
+            conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False)
+            conn.execute("""INSERT INTO ai_meta_learning(scope,meta_key,trades,wins,losses,pnl_sum,gross_profit,gross_loss,last_pnl,last_update)
+                            VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(scope,meta_key) DO UPDATE SET
+                            trades=excluded.trades,wins=excluded.wins,losses=excluded.losses,pnl_sum=excluded.pnl_sum,
+                            gross_profit=excluded.gross_profit,gross_loss=excluded.gross_loss,last_pnl=excluded.last_pnl,last_update=excluded.last_update""",
+                         (str(scope),str(key),int(stats.get("trades",0)),int(stats.get("wins",0)),int(stats.get("losses",0)),float(stats.get("pnl_sum",0)),float(stats.get("gross_profit",0)),float(stats.get("gross_loss",0)),float(stats.get("last_pnl",0)),float(stats.get("last_update",0))))
+            conn.commit(); conn.close()
+    except Exception as exc: logger.debug("Meta bucket save failed: %s",exc)
+
+def _meta_record_event(meta_key,decision,probability,expected_pnl,confidence,pnl):
+    try:
+        with db_lock:
+            conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False)
+            conn.execute("INSERT INTO ai_meta_learning_events(event_type,meta_key,decision,probability,expected_pnl,confidence,pnl,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                         ("META_DECISION",str(meta_key),str(decision),float(probability or 0),float(expected_pnl or 0),float(confidence or 0),float(pnl or 0),datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit(); conn.close()
+    except Exception: pass
+
+def _meta_clamp(v,lo,hi):
+    try:return max(lo,min(hi,float(v)))
+    except Exception:return lo
+
+def _meta_bucket_log(value,thresholds):
+    try:
+        x=max(0.0,float(value or 0))
+        for i,limit in enumerate(thresholds):
+            if x<float(limit):return i
+        return len(thresholds)
+    except Exception:return 0
+
+def _meta_regime(fusion):
+    try:
+        chg=float(fusion.get("chg",fusion.get("change_5m",0)) or 0); vol=float(fusion.get("vol",0) or 0); liq=float(fusion.get("liq",0) or 0)
+        if liq<CONSENSUS_MIN_LIQUIDITY:return "LOW_LIQ"
+        if abs(chg)>=15:return "HIGH_VOL"
+        if chg>=5:return "BULL"
+        if chg<=-3:return "BEAR"
+        if vol<max(1000.0,CANDIDATE_MIN_VOLUME_5M*1.5):return "LOW_VOL"
+        return "RANGE"
+    except Exception:return "UNKNOWN"
+
+def _meta_pattern_key(fusion):
+    try:
+        group=str(fusion.get("hunter_group") or ("ANALYSIS" if fusion.get("force_independent") else "ENGINE")).upper(); regime=_meta_regime(fusion)
+        chg=_meta_clamp(fusion.get("chg",0),-20,40); buys=int(fusion.get("buys",0) or 0); sells=int(fusion.get("sells",0) or 0); br=_meta_clamp(buys/max(1,sells),0,5)
+        vol=float(fusion.get("vol",0) or 0); liq=float(fusion.get("liq",0) or 0); structure=str(fusion.get("structure","UNKNOWN") or "UNKNOWN").upper()
+        st="BREAKOUT" if "BREAKOUT" in structure else ("SUPPORT" if "SUPPORT" in structure else ("CONTINUATION" if "CONTINUATION" in structure else "OTHER"))
+        engines=fusion.get("engines") or fusion.get("votes") or []
+        if isinstance(engines,str):engines=[x.strip() for x in engines.split(",") if x.strip()]
+        primary=str(engines[0] if engines else group).replace("|","/")
+        return f"v{META_LEARNING_VERSION}|{group}|{regime}|chg:{int(round(chg/2.0)*2)}|br:{round(br*4.0)/4.0:.2f}|vol:{_meta_bucket_log(vol,(1000,5000,20000,100000,500000))}|liq:{_meta_bucket_log(liq,(5000,20000,100000,500000,2000000))}|st:{st}|n:{min(8,len(engines))}|e:{primary}"
+    except Exception:return f"v{META_LEARNING_VERSION}|UNKNOWN"
+
+def _meta_engine_keys(fusion):
+    names=fusion.get("engines") or fusion.get("votes") or []
+    if isinstance(names,str):names=[x.strip() for x in names.split(",") if x.strip()]
+    return list(dict.fromkeys(str(x) for x in names if str(x).strip()))[:8]
+
+def _meta_wilson_lower(wins,total):
+    try:
+        n=int(total)
+        if n<=0:return 0.0
+        p=float(wins)/n; z=META_WILSON_Z; den=1+z*z/n; centre=p+z*z/(2*n); adj=z*math.sqrt(max(0.0,p*(1-p)/n+z*z/(4*n*n))); return max(0.0,(centre-adj)/den)
+    except Exception:return 0.0
+
+def _meta_bucket_metrics(stats):
+    s=_meta_normalize_stats(stats); n=int(s["trades"]); wins=int(s["wins"]); p=(wins+2.0)/(n+4.0); avg=float(s["pnl_sum"])/n if n else 0.0; gp=float(s["gross_profit"]); gl=float(s["gross_loss"]); pf=gp/gl if gl>1e-12 else (999.0 if gp>0 else 0.0)
+    return {"trades":n,"win_prob":p,"avg_pnl":avg,"profit_factor":pf,"lower_wr":_meta_wilson_lower(wins,n) if n else 0.0}
+
+def _meta_evaluate(fusion):
+    pattern_key=_meta_pattern_key(fusion or {})
+    if not META_LEARNING_ENABLED:
+        return {"enabled":False,"pattern_key":pattern_key,"probability":0.5,"expected_pnl":0.0,"confidence":0.0,"adjustment":0.0,"rank_bonus":0.0,"decision":"BASELINE"}
+    regime_key=_meta_regime(fusion or {}); engine_keys=_meta_engine_keys(fusion or {}); sources=[]
+    with META_MEMORY_LOCK:
+        ps=META_MEMORY["pattern"].get(pattern_key)
+        if ps and int(ps.get("trades",0))>=META_MIN_PATTERN_SAMPLES:sources.append((0.60,_meta_bucket_metrics(ps)))
+        rs=META_MEMORY["regime"].get(regime_key)
+        if rs and int(rs.get("trades",0))>=META_MIN_REGIME_SAMPLES:sources.append((0.25,_meta_bucket_metrics(rs)))
+        em=[_meta_bucket_metrics(META_MEMORY["engine"][x]) for x in engine_keys if x in META_MEMORY["engine"] and int(META_MEMORY["engine"][x].get("trades",0))>=META_MIN_ENGINE_SAMPLES]
+        if em:sources.append((0.15,{"trades":sum(x["trades"] for x in em),"win_prob":sum(x["win_prob"] for x in em)/len(em),"avg_pnl":sum(x["avg_pnl"] for x in em)/len(em),"profit_factor":sum(x["profit_factor"] for x in em)/len(em),"lower_wr":sum(x["lower_wr"] for x in em)/len(em)}))
+        gs=META_MEMORY["global"].get("GLOBAL")
+        if gs and int(gs.get("trades",0))>=25:sources.append((0.10,_meta_bucket_metrics(gs)))
+    if not sources:return {"enabled":True,"pattern_key":pattern_key,"regime":regime_key,"probability":0.5,"expected_pnl":0.0,"confidence":0.0,"adjustment":0.0,"rank_bonus":0.0,"decision":"WARMUP"}
+    ws=sum(w for w,_ in sources) or 1.0; probability=sum(w*m["win_prob"] for w,m in sources)/ws; expected_pnl=sum(w*m["avg_pnl"] for w,m in sources)/ws; lower_wr=sum(w*m["lower_wr"] for w,m in sources)/ws; sample_mass=sum(m["trades"] for _,m in sources); confidence=min(1.0,math.log1p(sample_mass)/math.log1p(100.0))
+    raw=(probability-0.50)*8.0+_meta_clamp(expected_pnl,-4,4)*0.45; adjustment=_meta_clamp(raw*confidence,-META_MAX_ADJUSTMENT,META_MAX_ADJUSTMENT); rank_bonus=_meta_clamp(adjustment,-META_MAX_RANK_BONUS,META_MAX_RANK_BONUS); decision="LEARNED_PASS" if adjustment>=0 else "LEARNED_PENALTY"
+    if sample_mass>=META_MIN_PATTERN_SAMPLES and lower_wr<0.40 and expected_pnl<0:decision="LEARNED_REJECT"
+    return {"enabled":True,"pattern_key":pattern_key,"regime":regime_key,"probability":float(probability),"expected_pnl":float(expected_pnl),"confidence":float(confidence),"lower_wr":float(lower_wr),"adjustment":float(adjustment),"rank_bonus":float(rank_bonus),"decision":decision}
+
+def _meta_attach(fusion):
+    out=dict(fusion or {}); meta=_meta_evaluate(out); out["meta_learning"]=meta; out["pattern_key"]=meta.get("pattern_key",_meta_pattern_key(out)); return out
+
+def _meta_rank_bonus(fusion):
+    try:return float(_meta_evaluate(fusion or {}).get("rank_bonus",0) or 0)
+    except Exception:return 0.0
+
+def _meta_quality_allowed(fusion):
+    try:
+        meta=_meta_evaluate(fusion or {})
+        if meta.get("decision")=="LEARNED_REJECT":
+            _diag_reject("META_LEARNING","LEARNED_PATTERN_REJECT",str((fusion or {}).get("token", ""))); return False
+        return True
+    except Exception:return True
+
+def _meta_update_from_closed_trade(position,pnl):
+    if not META_LEARNING_ENABLED or not isinstance(position,dict):return
+    try:
+        fusion_like={"hunter_group":position.get("hunter_group","ENGINE"),"force_independent":position.get("force_independent",False),"chg":position.get("p_change",position.get("m5_change",0)),"vol":position.get("volume",0),"liq":position.get("liquidity",0),"buys":position.get("buys_m5",position.get("buys",0)),"sells":position.get("sells_m5",position.get("sells",0)),"structure":position.get("structure","UNKNOWN"),"engines":position.get("engines") or position.get("engine_names") or []}
+        pattern_key=str(position.get("pattern_key") or _meta_pattern_key(fusion_like)); regime_key=str(position.get("meta_regime") or _meta_regime(fusion_like)); engine_keys=_meta_engine_keys(fusion_like); now=time.time(); pnl=float(pnl or 0); updates=[("pattern",pattern_key),("regime",regime_key),("global","GLOBAL")]+[("engine",x) for x in engine_keys]
+        with META_MEMORY_LOCK:
+            for scope,key in updates:
+                b=META_MEMORY[scope].setdefault(key,_meta_empty_stats()); b["trades"]+=1; b["wins"]+=int(pnl>0); b["losses"]+=int(pnl<0); b["gross_profit"]+=max(0,pnl); b["gross_loss"]+=abs(min(0,pnl)); b["pnl_sum"]+=pnl; b["last_pnl"]=pnl; b["last_update"]=now; _meta_save_bucket(scope,key,b)
+        meta=position.get("meta_learning") or {}; _meta_record_event(pattern_key,meta.get("decision","UNKNOWN"),meta.get("probability",0),meta.get("expected_pnl",0),meta.get("confidence",0),pnl)
+        with META_MEMORY_LOCK:
+            if len(META_MEMORY["pattern"])>META_MAX_PATTERNS:
+                keys=sorted(META_MEMORY["pattern"],key=lambda k:float(META_MEMORY["pattern"][k].get("last_update",0)))
+                for k in keys[:len(keys)-META_MAX_PATTERNS]:META_MEMORY["pattern"].pop(k,None)
+    except Exception as exc:logger.debug("Meta-Learning closed-trade update failed: %s",exc)
+
+_meta_load_memory()
 
 # Start the durability mirror after the original DB initialization/schema work.
 Thread(target=neon_sqlite_snapshot_loop, daemon=True, name="NeonSQLiteMirror").start()
@@ -737,6 +929,15 @@ def _record_closed_position(token_addr,pos,exit_price,pnl_pct,reason,sell_tx_sig
     ok=log_trade_to_db(token_addr,pos.get("symbol","TOKEN"),pos.get("entry_price",0),exit_price,pnl_pct,pnl_usd,reason,uid,"REAL" if is_real else "SIGNAL_ONLY",pos.get("buy_tx_signature",""),sell_tx_signature,is_real,motor_group,motor_engines,motor_mode)
     if ok:
         pos["trade_recorded"]=True; pos["closed_at"]=time.time(); pos["final_pnl_percent"]=float(pnl_pct or 0); pos["final_exit_price"]=float(exit_price or 0)
+        try:
+            if not pos.get("learning_recorded"):
+                record_closed_trade(token_addr=token_addr,symbol=pos.get("symbol",""),side=pos.get("side","BUY"),entry=pos.get("entry_price",0),exit_price=exit_price,pnl_pct=pnl_pct,reason=reason,engine_names=motor_engines,hold_seconds=max(0,int(time.time()-float(pos.get("opened_at",time.time()) or time.time()))),regime=pos.get("meta_regime",pos.get("regime","UNKNOWN")))
+                pos["learning_recorded"]=True
+        except Exception as exc: logger.debug("Closed-trade core learning bridge failed: %s",exc)
+        try:_meta_update_from_closed_trade(pos,float(pnl_pct or 0))
+        except Exception as exc:logger.debug("Meta-learning close bridge failed: %s",exc)
+        try:v7_paper_trade_close(token_addr,exit_price,pnl_pct,reason)
+        except Exception:pass
     return ok
 
 def get_admin_motor_stats():
@@ -2219,6 +2420,12 @@ def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_ch
         "sell_pending": False, "closed": False,
         "engines": list((fusion or {}).get("engines") or (fusion or {}).get("votes") or []),
         "hunter_group": (fusion or {}).get("hunter_group", ""),
+        "pattern_key": str((fusion or {}).get("pattern_key") or _meta_pattern_key(fusion or {})),
+        "meta_regime": str(((fusion or {}).get("meta_learning") or {}).get("regime") or _meta_regime(fusion or {})),
+        "meta_learning": dict((fusion or {}).get("meta_learning") or _meta_evaluate(fusion or {})),
+        "structure": str((fusion or {}).get("structure", "UNKNOWN") or "UNKNOWN"),
+        "buys_m5": int((fusion or {}).get("buys", 0) or 0),
+        "sells_m5": int((fusion or {}).get("sells", 0) or 0),
     }
     with state_lock:
         signal_positions[token_addr] = pos
@@ -3119,7 +3326,7 @@ def build_consensus_signal(token_addr, pair):
             _diag_reject("FUSION", "ENGINE_COOLDOWN", token_addr)
             return None
 
-        return {
+        result = {
             "score": float(score),
             "strength": float(strength),
             "votes": evidence["votes"],
@@ -3136,6 +3343,9 @@ def build_consensus_signal(token_addr, pair):
             "resistance": float(structure.get("resistance", 0.0) or 0.0),
             "breakout": bool(structure.get("breakout", False)),
         }
+        result = _meta_attach(result)
+        result["meta_rank_bonus"] = float(result.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
+        return result
     except Exception as e:
         logger.debug(f"Mode engine evaluation error {token_addr}: {e}")
         return None
@@ -3157,6 +3367,8 @@ def fusion_quality_gate(fusion):
         if buys < 2 or (sells > 0 and buys < sells * CONSENSUS_MIN_BUY_RATIO):
             return False
         if score < CONSENSUS_MIN_SCORE:
+            return False
+        if not _meta_quality_allowed(fusion):
             return False
         return True
     except Exception:
@@ -3186,26 +3398,46 @@ learning_state = {
 }
 
 def _load_learning_state():
+    """Load durable learning from SQLite first; JSON remains a local backup only."""
     global learning_state
+    loaded = False
     try:
-        p = Path(LEARNING_FILE)
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            row = conn.execute("SELECT state_json FROM ai_learning_state WHERE state_id=1").fetchone()
+            conn.close()
+        if row and row[0]:
+            data = json.loads(row[0])
             if isinstance(data, dict):
-                learning_state.update(data)
+                learning_state.update(data); loaded = True
     except Exception as e:
-        logger.warning(f"Learning state load failed: {e}")
+        logger.debug("SQLite learning-state load failed: %s", e)
+    if not loaded:
+        try:
+            p = Path(LEARNING_FILE)
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    learning_state.update(data)
+        except Exception as e:
+            logger.warning(f"Learning state load failed: {e}")
 
 def _save_learning_state():
+    """Persist learning to SQLite + local JSON without deleting either copy."""
+    payload = json.dumps(learning_state, ensure_ascii=False, separators=(",", ":"))
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            conn.execute("INSERT INTO ai_learning_state(state_id,state_json,updated_at) VALUES(1,?,?) ON CONFLICT(state_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at", (payload, time.time()))
+            conn.commit(); conn.close()
+    except Exception as e:
+        logger.debug("SQLite learning-state save failed: %s", e)
     try:
         tmp = Path(LEARNING_FILE + ".tmp")
-        tmp.write_text(
-            json.dumps(learning_state, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(learning_state, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(LEARNING_FILE)
     except Exception as e:
-        logger.warning(f"Learning state save failed: {e}")
+        logger.warning(f"Learning state JSON backup failed: {e}")
 
 def _engine_names_from_fusion(fusion):
     names = (fusion or {}).get("engines") or (fusion or {}).get("engine_names") or []
@@ -4119,11 +4351,17 @@ def _send_fused_signal_impl(token_addr, fusion):
         "📡 سیگنال BUY صادر شد؛ اجرای واقعی فعلاً انجام نمی‌شود."
     )
 
+    # Freeze the learner context before any Telegram/network I/O.
+    fusion = _meta_attach(fusion)
     # Persist the signal BEFORE any notification or wallet work.
     track_signal_only(
         token_addr, symbol, price, tp, sl, fusion.get("vol", 0), fusion.get("liq", 0),
         fusion.get("chg", 0), reason, amount, public_execution_status, fusion=fusion
     )
+    try:
+        v7_paper_trade_open(token_addr, symbol, price, fusion)
+    except Exception:
+        pass
 
     # The public event is never blocked by wallet state.
     _notify_async(
@@ -4504,7 +4742,7 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
             _diag_reject("ENGINE", f"{engine_name}_COOLDOWN", token_addr)
             return None
         group = "ADVANCED" if engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter") else "HULK"
-        return {
+        candidate = {
             "score": float(score), "strength": float(strength),
             "votes": [engine_name],
             "advanced_votes": [engine_name] if group == "ADVANCED" else [],
@@ -4520,6 +4758,9 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
             "breakout": bool(structure.get("breakout", False)),
             "rank_bonus": _sentinel_rank_bonus(token_addr, {"score": score, **q}),
         }
+        candidate = _meta_attach(candidate)
+        candidate["meta_rank_bonus"] = float(candidate.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
+        return candidate
     except Exception as e:
         logger.debug(f"Independent engine {engine_name} failed for {token_addr}: {e}")
         return None
@@ -4738,8 +4979,10 @@ def _candidate_rank_tuple(item):
             except (TypeError, ValueError, OverflowError):
                 return float(default)
         score = _rank_num(c.get("score"), 0.0)
+        meta_bonus = _rank_num(c.get("meta_rank_bonus"), 0.0) if c.get("meta_rank_bonus") is not None else _meta_rank_bonus(c)
+        rank_score = _rank_num(c.get("rank_score"), score) + meta_bonus
         return (
-            _rank_num(c.get("rank_score"), score),
+            rank_score,
             score,
             _rank_num(c.get("chg"), 0.0),
             _rank_num(c.get("vol"), 0.0),
@@ -4774,6 +5017,8 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                     candidate["hunter_group"] = "ANALYSIS"
                     candidate["engines"] = ["Analysis"]
                     candidate["votes"] = ["Analysis"]
+                    candidate = _meta_attach(candidate)
+                    candidate["meta_rank_bonus"] = float(candidate.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
                     # Ranking is selection-only and can never invalidate the candidate.
                     candidate["rank_score"] = float(_candidate_rank_tuple((token_addr, candidate))[0])
                     result["analysis"].append((token_addr, candidate))
@@ -4789,7 +5034,8 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
             if MAX_FUSION_ENABLED:
                 fusion = build_consensus_signal(token_addr, pair)
                 if fusion:
-                    fusion = dict(fusion)
+                    fusion = _meta_attach(fusion)
+                    fusion["meta_rank_bonus"] = float(fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
                     fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
                     fusion["rank_score"] = float(_candidate_rank_tuple((token_addr, fusion))[0])
                     result["fusion"].append((token_addr, fusion))
@@ -4804,7 +5050,8 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                         continue
                     fusion = _independent_engine_candidate(token_addr, pair, engine_name)
                     if fusion and fusion_quality_gate(fusion):
-                        fusion = dict(fusion)
+                        fusion = _meta_attach(fusion)
+                        fusion["meta_rank_bonus"] = float(fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
                         fusion["rank_score"] = float(_candidate_rank_tuple((token_addr, fusion))[0])
                         result["fusion"].append((token_addr, fusion))
         except Exception as exc:
