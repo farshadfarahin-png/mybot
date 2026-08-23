@@ -1557,46 +1557,87 @@ def subscription_monitor_loop():
         time.sleep(60)
 
 def send_telegram_msg(text, target_chat=None, reply_markup=None, parse_mode="Markdown"):
-    """ارسال امن پیام تلگرام و بررسی پاسخ API."""
+    """ارسال امن پیام تلگرام و بررسی پاسخ API با retry اختصاصی 429."""
     chat_target = target_chat if target_chat is not None else TELEGRAM_CHAT_ID
     if not TELEGRAM_BOT_TOKEN or not chat_target:
         logger.error("❌ Telegram config ناقص است: TELEGRAM_BOT_TOKEN / chat_id")
         return False
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_target, "text": str(text), "disable_web_page_preview": True}
     if parse_mode:
         payload["parse_mode"] = parse_mode
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup.to_dict() if hasattr(reply_markup, "to_dict") else reply_markup
-    try:
-        res = http_session.post(url, json=payload, timeout=8)
-        data = res.json()
-        if data.get("ok"):
-            return True
-        logger.error(f"❌ Telegram sendMessage failed: {data.get('description', data)}")
-        if parse_mode:
-            payload.pop("parse_mode", None)
-            retry = http_session.post(url, json=payload, timeout=8)
-            retry_data = retry.json()
-            if retry_data.get("ok"):
-                logger.warning("⚠️ پیام با fallback بدون Markdown ارسال شد.")
-                return True
-            logger.error(f"❌ Telegram fallback بدون Markdown failed: {retry_data.get('description', retry_data)}")
 
-        # اگر مشکل از inline keyboard باشد، خود پیام را بدون دکمه دوباره می‌فرستیم
-        # تا سیگنال به هر حال به کانال برسد و خطای اصلی در لاگ باقی بماند.
-        if payload.get("reply_markup") is not None:
-            payload.pop("reply_markup", None)
-            retry2 = http_session.post(url, json=payload, timeout=8)
-            retry2_data = retry2.json()
-            if retry2_data.get("ok"):
-                logger.warning("⚠️ سیگنال کانال بدون دکمه ارسال شد؛ reply_markup مشکل داشت.")
+    max_429_retries = 5
+    for attempt in range(max_429_retries):
+        try:
+            res = http_session.post(url, json=payload, timeout=8)
+            try:
+                data = res.json()
+            except ValueError:
+                data = {"ok": False, "description": res.text[:500]}
+
+            if data.get("ok"):
                 return True
-            logger.error(f"❌ Telegram fallback بدون دکمه failed: {retry2_data.get('description', retry2_data)}")
-        return False
-    except Exception as e:
-        logger.error(f"❌ خطای ارسال پیام به تلگرام: {e}")
-        return False
+
+            if res.status_code == 429:
+                retry_after_raw = (data.get("parameters") or {}).get("retry_after", 1)
+                try:
+                    retry_after = max(1.0, float(retry_after_raw))
+                except (TypeError, ValueError):
+                    retry_after = 1.0
+
+                wait_seconds = min(retry_after, 60.0)
+                if attempt < max_429_retries - 1:
+                    logger.warning(
+                        "⚠️ Telegram HTTP 429؛ تلاش مجدد %d/%d بعد از %.1f ثانیه.",
+                        attempt + 1, max_429_retries, wait_seconds
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+
+                logger.error(
+                    "❌ Telegram HTTP 429 بعد از %d تلاش همچنان باقی است: %s",
+                    max_429_retries, data.get("description", data)
+                )
+                return False
+
+            logger.error(f"❌ Telegram sendMessage failed: {data.get('description', data)}")
+
+            # fallback قبلی بدون Markdown
+            if parse_mode:
+                payload.pop("parse_mode", None)
+                retry = http_session.post(url, json=payload, timeout=8)
+                try:
+                    retry_data = retry.json()
+                except ValueError:
+                    retry_data = {"ok": False, "description": retry.text[:500]}
+                if retry_data.get("ok"):
+                    logger.warning("⚠️ پیام با fallback بدون Markdown ارسال شد.")
+                    return True
+                logger.error(f"❌ Telegram fallback بدون Markdown failed: {retry_data.get('description', retry_data)}")
+
+            # fallback قبلی بدون keyboard
+            if payload.get("reply_markup") is not None:
+                payload.pop("reply_markup", None)
+                retry2 = http_session.post(url, json=payload, timeout=8)
+                try:
+                    retry2_data = retry2.json()
+                except ValueError:
+                    retry2_data = {"ok": False, "description": retry2.text[:500]}
+                if retry2_data.get("ok"):
+                    logger.warning("⚠️ سیگنال کانال بدون دکمه ارسال شد؛ reply_markup مشکل داشت.")
+                    return True
+                logger.error(f"❌ Telegram fallback بدون دکمه failed: {retry2_data.get('description', retry2_data)}")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ خطای ارسال پیام به تلگرام: {e}")
+            return False
+
+    return False
 
 def _get_bot_setting(key, default=""):
     try:
