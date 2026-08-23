@@ -166,6 +166,8 @@ MASTER_SIGNAL_ENABLED = True
 # مجوز مستقل خرج‌کردن از ولت برای BUY/SELL واقعی؛ پیش‌فرض خاموش
 WALLET_TRADE_PERMISSION = False
 MASTER_SIGNAL_FIRE_NOW = False  # legacy UI pulse; never used as a signal source
+# کلید مستقل انتشار کارت سیگنال به کانال؛ مستقل از کلید مادر و بدون اثر بر تولید/اجرای سیگنال.
+CHANNEL_SIGNAL_ENABLED = True
 # کلید مستقل عیب‌یابی: فقط گزارش Diagnostic را کنترل می‌کند و روی تولید/اجرای سیگنال اثر ندارد.
 # ================= SAFE AI LEARNING CONTROLS =================
 # These switches affect only the learning/adaptation layer.
@@ -575,6 +577,24 @@ def init_db():
                     position_json TEXT NOT NULL,
                     position_type TEXT NOT NULL DEFAULT 'REAL',
                     updated_at REAL NOT NULL
+                )
+            """)
+            # SECURITY AUDIT — additive only; existing tables/data are untouched.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS security_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL DEFAULT '',
+                    event_type TEXT NOT NULL DEFAULT '',
+                    actor_id TEXT NOT NULL DEFAULT '',
+                    chat_id TEXT NOT NULL DEFAULT '',
+                    chat_type TEXT NOT NULL DEFAULT '',
+                    username TEXT NOT NULL DEFAULT '',
+                    first_name TEXT NOT NULL DEFAULT '',
+                    last_name TEXT NOT NULL DEFAULT '',
+                    remote_ip TEXT NOT NULL DEFAULT '',
+                    user_agent TEXT NOT NULL DEFAULT '',
+                    details TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0
                 )
             """)
             conn.commit()
@@ -1666,6 +1686,168 @@ def _set_bot_setting(key, value):
         logger.error(f"bot setting write error: {e}")
         return False
 
+def _get_channel_signal_enabled():
+    global CHANNEL_SIGNAL_ENABLED
+    raw = _get_bot_setting("channel_signal_enabled", "1")
+    CHANNEL_SIGNAL_ENABLED = str(raw).strip().lower() not in ("0", "false", "off", "")
+    return CHANNEL_SIGNAL_ENABLED
+
+def _set_channel_signal_enabled(value):
+    global CHANNEL_SIGNAL_ENABLED
+    new_value = bool(value)
+    if not _set_bot_setting("channel_signal_enabled", "1" if new_value else "0"):
+        return False
+    CHANNEL_SIGNAL_ENABLED = new_value
+    return True
+
+def _security_audit_event(source="", event_type="", actor_id="", chat_id="", chat_type="",
+                          username="", first_name="", last_name="", remote_ip="",
+                          user_agent="", details=""):
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            conn.execute("""
+                INSERT INTO security_audit(
+                    source,event_type,actor_id,chat_id,chat_type,username,first_name,last_name,
+                    remote_ip,user_agent,details,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                str(source or ""), str(event_type or ""), str(actor_id or ""), str(chat_id or ""),
+                str(chat_type or ""), str(username or ""), str(first_name or ""), str(last_name or ""),
+                str(remote_ip or ""), str(user_agent or "")[:300], str(details or "")[:300], time.time()
+            ))
+            conn.commit()
+            conn.close()
+    except Exception as exc:
+        logger.debug("Security audit write failed: %s", exc)
+
+def _security_audit_telegram_update(update):
+    try:
+        user = getattr(update, "effective_user", None)
+        chat = getattr(update, "effective_chat", None)
+        if not user and not chat:
+            return
+        cb = getattr(update, "callback_query", None)
+        msg = getattr(update, "message", None)
+        if cb:
+            event_type = "telegram_callback"
+            details = f"callback={str(cb.data or '')[:120]}"
+        elif msg:
+            event_type = "telegram_message"
+            text = str(getattr(msg, "text", "") or "")
+            details = f"command={text.split()[0][:80]}" if text.startswith("/") else "message"
+        else:
+            event_type = "telegram_update"
+            details = "update"
+        _security_audit_event(
+            source="telegram", event_type=event_type,
+            actor_id=getattr(user, "id", ""), chat_id=getattr(chat, "id", ""),
+            chat_type=getattr(chat, "type", ""), username=getattr(user, "username", ""),
+            first_name=getattr(user, "first_name", ""), last_name=getattr(user, "last_name", ""),
+            details=details
+        )
+    except Exception:
+        pass
+
+def _security_connections_snapshot(limit=30):
+    out = {
+        "channel_signal_enabled": bool(CHANNEL_SIGNAL_ENABLED),
+        "channel_id": str(CHANNEL_ID or ""),
+        "channel_invite_configured": bool(CHANNEL_INVITE_LINK),
+        "telegram_users": [],
+        "web_sources": [],
+        "recent_events": [],
+        "subscribers": [],
+    }
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT telegram_id, wallet_address, expiry_date, status, copy_enabled,
+                       trade_asset, trade_amount_sol, trade_amount_usdc
+                FROM subscribers ORDER BY telegram_id
+            """)
+            for r in cur.fetchall():
+                out["subscribers"].append({
+                    "telegram_id": str(r[0] or ""), "wallet": str(r[1] or ""),
+                    "expiry": str(r[2] or ""), "status": str(r[3] or ""),
+                    "copy_enabled": bool(r[4]), "asset": str(r[5] or ""),
+                    "amount_sol": float(r[6] or 0), "amount_usdc": float(r[7] or 0),
+                })
+            cur.execute("""
+                SELECT actor_id, chat_id, chat_type, username, first_name, last_name,
+                       MAX(created_at) AS last_seen, COUNT(*) AS events
+                FROM security_audit
+                WHERE source='telegram' AND actor_id!=''
+                GROUP BY actor_id, chat_id, chat_type, username, first_name, last_name
+                ORDER BY last_seen DESC LIMIT ?
+            """, (int(limit),))
+            for r in cur.fetchall():
+                out["telegram_users"].append({
+                    "actor_id": str(r[0] or ""), "chat_id": str(r[1] or ""),
+                    "chat_type": str(r[2] or ""), "username": str(r[3] or ""),
+                    "name": (" ".join(x for x in (r[4], r[5]) if x)).strip(),
+                    "last_seen": float(r[6] or 0), "events": int(r[7] or 0),
+                })
+            cur.execute("""
+                SELECT remote_ip, user_agent, MAX(created_at) AS last_seen, COUNT(*) AS events
+                FROM security_audit
+                WHERE source='web' AND remote_ip!=''
+                GROUP BY remote_ip, user_agent
+                ORDER BY last_seen DESC LIMIT ?
+            """, (int(limit),))
+            for r in cur.fetchall():
+                out["web_sources"].append({
+                    "remote_ip": str(r[0] or ""), "user_agent": str(r[1] or ""),
+                    "last_seen": float(r[2] or 0), "events": int(r[3] or 0),
+                })
+            cur.execute("""
+                SELECT source,event_type,actor_id,chat_id,remote_ip,details,created_at
+                FROM security_audit ORDER BY id DESC LIMIT 20
+            """)
+            out["recent_events"] = [
+                {"source":r[0],"event_type":r[1],"actor_id":r[2],"chat_id":r[3],
+                 "remote_ip":r[4],"details":r[5],"created_at":float(r[6] or 0)}
+                for r in cur.fetchall()
+            ]
+            conn.close()
+    except Exception as exc:
+        logger.debug("Security snapshot read failed: %s", exc)
+    return out
+
+def _security_connections_text():
+    snap = _security_connections_snapshot()
+    lines = [
+        "🛡 **اتصالات و دسترسی‌های مشاهده‌شده**", "",
+        f"📢 انتشار سیگنال به کانال: {'🟢 ON' if snap['channel_signal_enabled'] else '🔴 OFF'}",
+        f"📢 مقصد فعلی: `{snap['channel_id'] or 'تنظیم نشده'}`",
+        f"🔗 لینک دعوت ذخیره‌شده: {'🟢 بله' if snap['channel_invite_configured'] else '🔴 خیر'}",
+        "",
+        f"👥 مشترک‌های ثبت‌شده در DB: `{len(snap['subscribers'])}`",
+        f"👁 کاربران/چت‌های Telegram دیده‌شده: `{len(snap['telegram_users'])}`",
+        f"🌐 مبداهای Web دیده‌شده: `{len(snap['web_sources'])}`",
+        "", "👤 **Telegram:**"
+    ]
+    if snap["telegram_users"]:
+        for x in snap["telegram_users"][:15]:
+            user = f"@{x['username']}" if x['username'] else "-"
+            name = x["name"] or "-"
+            lines.append(f"• ID=`{x['actor_id']}` | {user} | {name} | chat={x['chat_type']} | events={x['events']}")
+    else:
+        lines.append("• هنوز فعالیتی ثبت نشده است.")
+    lines += ["", "🌐 **Web:**"]
+    if snap["web_sources"]:
+        for x in snap["web_sources"][:10]:
+            lines.append(f"• `{x['remote_ip']}` | events={x['events']} | {x['user_agent'][:80]}")
+    else:
+        lines.append("• هنوز درخواست وبی ثبت نشده است.")
+    lines += [
+        "", "⚠️ این بخش فقط اتصال‌ها/درخواست‌هایی را نشان می‌دهد که خود سرور واقعاً مشاهده و ثبت کرده است.",
+        "⚠️ Bot API به ما فهرست مخفیِ همه استفاده‌کنندگان از Bot Token یا IP آن‌ها را نمی‌دهد؛ بنابراین این گزارش به‌تنهایی اثبات قطعی هک نیست.",
+    ]
+    return "\n".join(lines)
+
 def _load_channel_config():
     global CHANNEL_ID, CHANNEL_INVITE_LINK
     # تنظیم ذخیره‌شده از پنل VIP را در اولویت قرار می‌دهیم؛ این کار جلوی
@@ -1744,6 +1926,9 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
     """
     global CHANNEL_ID
     _load_channel_config()
+    if not CHANNEL_SIGNAL_ENABLED:
+        logger.info("📢 Channel signal publication is OFF; channel send skipped.")
+        return False
     if not CHANNEL_ID and CHANNEL_INVITE_LINK.startswith("https://t.me/"):
         tail = CHANNEL_INVITE_LINK.split("https://t.me/", 1)[1].strip("/")
         if tail and not tail.startswith("+"):
@@ -5477,6 +5662,21 @@ except Exception as e:
 
 web_app = Flask(__name__)
 
+@web_app.before_request
+def _security_audit_web_request():
+    try:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        remote_ip = forwarded.split(",")[0].strip() if forwarded else (request.remote_addr or "")
+        _security_audit_event(
+            source="web", event_type="http_request",
+            actor_id=str(request.args.get("telegram_id", "") or ""),
+            remote_ip=remote_ip,
+            user_agent=str(request.headers.get("User-Agent", "") or "")[:300],
+            details=f"{request.method} {request.path}"[:200]
+        )
+    except Exception:
+        pass
+
 @web_app.route('/')
 def home():
     html_template = """
@@ -6964,8 +7164,13 @@ def _main_keyboard(is_admin=False):
             f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}",
             callback_data="toggle_master_diagnostic"
         )])
+        rows.append([InlineKeyboardButton(
+            f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}",
+            callback_data="toggle_channel_signal"
+        )])
         rows.append([InlineKeyboardButton("🪟🔮 کنترل شیشه‌ای کامل سیگنال", callback_data="signal_glass")])
         rows.append([InlineKeyboardButton("👑 پنل مدیریت",callback_data="admin"),InlineKeyboardButton("🔐 امنیت/وضعیت",callback_data="security")])
+        rows.append([InlineKeyboardButton("🛡 اتصالات و دسترسی‌های مشاهده‌شده", callback_data="connections")])
         rows.append([InlineKeyboardButton(
             f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}",
             callback_data="daily_signal_limit"
@@ -7006,8 +7211,10 @@ def _persistent_bottom_keyboard(is_admin=False):
         rows += [
             [f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"],
             [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"],
+            [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"],
             ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"],
             ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"],
+            ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"],
             [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"],
             [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
             ["🧠 مرکز یادگیری"],
@@ -7578,7 +7785,8 @@ def start_telegram_bot():
             return
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
+            _security_audit_telegram_update(update)
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 سیگنال اصلی: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data == "toggle_master_signal":
@@ -7604,6 +7812,21 @@ def start_telegram_bot():
                         "✅ مدیریت پوزیشن‌های باز برای TP/SL/Trailing ادامه دارد."
                     )
                 await q.edit_message_text(message, reply_markup=_main_keyboard(is_admin), parse_mode="Markdown")
+                return
+            elif data == "toggle_channel_signal":
+                if not is_admin:
+                    await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    return
+                new_state = not bool(CHANNEL_SIGNAL_ENABLED)
+                if _set_channel_signal_enabled(new_state):
+                    await q.edit_message_text(
+                        f"📢 **ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}**\n\n"
+                        f"مقصد فعلی: `{CHANNEL_ID or 'تنظیم نشده'}`\n"
+                        "این کلید فقط انتشار کارت سیگنال در کانال را کنترل می‌کند و به کلید مادر، تولید سیگنال، خرید واقعی یا مدیریت پوزیشن‌ها دست نمی‌زند.",
+                        reply_markup=_main_keyboard(True), parse_mode="Markdown"
+                    )
+                else:
+                    await q.edit_message_text("❌ تغییر وضعیت ذخیره نشد؛ وضعیت قبلی حفظ شد.", reply_markup=_main_keyboard(True))
                 return
             elif data == "toggle_master_diagnostic":
                 if not is_admin:
@@ -7730,9 +7953,27 @@ def start_telegram_bot():
                     f"🤖 واقعی بسته‌شده: `{a['real_closed']}` | 📡 سیگنال‌محور: `{a['signal_closed']}`",
                     reply_markup=_main_keyboard(is_admin),parse_mode="Markdown"
                 )
+            elif data=="connections":
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                    return
+                await q.edit_message_text(
+                    _security_connections_text(),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="connections")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
+                    ]),
+                    parse_mode="Markdown"
+                )
+                return
             elif data=="security":
                 if not is_admin: await q.edit_message_text("⛔ فقط ادمین.",reply_markup=_main_keyboard(False))
-                else: await q.edit_message_text(f"🔐 **امنیت**\n\nPrivate Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\nRPCها: `{len(RPC_ENDPOINTS)}`\nAdmin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",reply_markup=_main_keyboard(True),parse_mode="Markdown")
+                else: await q.edit_message_text(
+                    f"🔐 **امنیت**\n\nPrivate Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\nRPCها: `{len(RPC_ENDPOINTS)}`\nAdmin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}\n📢 انتشار کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🛡 اتصالات و دسترسی‌های مشاهده‌شده", callback_data="connections")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
+                    ]), parse_mode="Markdown")
             elif data=="admin":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.")
@@ -8344,6 +8585,9 @@ def start_telegram_bot():
         app.add_handler(CommandHandler("setvipchannel",setvipchannel_cmd))
         app.add_handler(CommandHandler("settradesol",settradesol_cmd))
         app.add_handler(CommandHandler("cancel",cancel_trade_limit_cmd))
+        async def security_audit_message_handler(update, context):
+            _security_audit_telegram_update(update)
+        app.add_handler(MessageHandler(filters.ALL, security_audit_message_handler, block=False), group=-1)
         # Persistent bottom panel must run before the existing manual-input handler.
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persistent_bottom_panel_handler))
@@ -8523,6 +8767,10 @@ if __name__ == "__main__":
     except Exception:
         MASTER_SIGNAL_ENABLED = False
         MASTER_SIGNAL_FIRE_NOW = False
+    try:
+        _get_channel_signal_enabled()
+    except Exception:
+        CHANNEL_SIGNAL_ENABLED = True
     ensure_channel_invite_link()
     # Recover open positions before any scanner starts. Signal switches do not control this manager.
     _restore_open_positions()
