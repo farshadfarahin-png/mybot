@@ -10,7 +10,7 @@ import os
 import math
 from pathlib import Path
 
-VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "-1003840577545")
+VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "").strip()
 import sqlite3
 import threading
 import logging
@@ -92,6 +92,7 @@ COPY_TRADING_FEE_PERCENT = 1.0
 COPY_DEFAULT_ASSET = "USDC"
 UNIFIED_ENGINE_NAME = "🤖⚡ هالک AI — موتور متحد بازار"
 BOT_BUILD_VERSION = "V31-PRO-TRADER-SAFE-LAYER-2026"
+BIRDEYE_API_KEY = os.environ.get("BIRDEYE_API_KEY", "").strip()
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -174,6 +175,22 @@ AUTO_IMPROVEMENT_ENABLED = True
 # ==============================================================
 MASTER_DIAGNOSTIC_ENABLED = False
 COPY_TRADING_ENABLED = True
+# ================= PROFESSIONAL WALLET RADAR (ADDITIVE / ISOLATED) =================
+# Independent module: it does not alter existing signal/learning statistics or Neon logic.
+PRO_WALLET_RADAR_ENABLED = False
+PRO_WALLET_COPY_PERMISSION = False
+PRO_WALLET_RADAR_INTERVAL_SECONDS = 1200.0  # 20 minutes; sized for the free Birdeye quota.
+PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 1800.0  # 30 minutes when real-copy permission is ON.
+PRO_WALLET_MIN_TRADES = 10
+PRO_WALLET_MIN_WIN_RATE = 65.0
+PRO_WALLET_DISCOVERY_LIMIT = 10
+PRO_WALLET_PNL_CHECK_LIMIT = 5
+PRO_WALLET_LOOKBACK = "30d"
+PRO_WALLET_STATE_LOCK = RLock()
+PRO_WALLET_LAST_RADAR_AT = 0.0
+PRO_WALLET_LAST_COPY_SCAN_AT = 0.0
+PRO_WALLET_LAST_ERROR = ""
+PRO_WALLET_SELECTED_WALLET = ""
 _MAX_FUSION_PREV = None
 
 BOTTOM_WHALE_RUNNING = True
@@ -796,59 +813,150 @@ def get_learning_dashboard(limit=12):
         return {"params": {}, "events": []}
 
 def _update_adaptive_learning(conn=None):
-    """Learn only from CLOSED real/recorded trades. No fabricated outcomes."""
+    """Learn only from CLOSED outcomes; adapt toward profitability, not higher loss frequency."""
     own = conn is None
     if own:
         conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
     try:
         cur = conn.cursor()
-        cur.execute("SELECT pnl_percent, entry_reason FROM trades ORDER BY id DESC LIMIT ?", (ADAPTIVE_LOOKBACK,))
+        cur.execute(
+            "SELECT pnl_percent, entry_reason FROM trades ORDER BY id DESC LIMIT ?",
+            (ADAPTIVE_LOOKBACK,)
+        )
         rows = cur.fetchall()
         if not rows:
-            return {"sample": 0, "win_rate": 0.0, "score_bonus": 0, "ratio_bonus": 0.0}
-        wins = sum(1 for pnl, _ in rows if float(pnl or 0) > 0)
-        wr = wins / len(rows) * 100.0
-        # Adaptive gate: 80% is a target, never a fake guarantee.
+            return {
+                "sample": 0, "win_rate": 0.0, "avg_pnl": 0.0,
+                "profit_factor": 0.0, "score_bonus": 0,
+                "ratio_bonus": 0.0
+            }
+
+        pnl_values = [float(pnl or 0) for pnl, _ in rows]
+        wins = sum(1 for pnl in pnl_values if pnl > 0)
+        losses = sum(1 for pnl in pnl_values if pnl < 0)
+        decided = wins + losses
+        wr = (wins / decided * 100.0) if decided else 0.0
+        avg_pnl = sum(pnl_values) / max(1, len(pnl_values))
+        gross_profit = sum(pnl for pnl in pnl_values if pnl > 0)
+        gross_loss = abs(sum(pnl for pnl in pnl_values if pnl < 0))
+        profit_factor = (
+            gross_profit / gross_loss
+            if gross_loss > 1e-12
+            else (999.0 if gross_profit > 0 else 0.0)
+        )
+
+        # Profit-seeking policy:
+        # - losing WR or negative average PnL => stricter entry requirements
+        # - weak profit factor => stricter ratio requirements
+        # - healthy profit + high WR => keep the baseline; never loosen gates
         bonus = 0
         ratio_bonus = 0.0
         if len(rows) >= ADAPTIVE_MIN_SAMPLE:
-            if wr < 60:
-                bonus, ratio_bonus = 2, 0.10
-            elif wr < 70:
-                bonus, ratio_bonus = 1, 0.05
-            elif wr < ADAPTIVE_TARGET_WIN_RATE:
-                bonus, ratio_bonus = 1, 0.02
-            elif wr >= 90:
-                bonus, ratio_bonus = 0, 0.0
-        cur.execute("INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_win_rate',?)", (wr,))
-        cur.execute("INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_score_bonus',?)", (bonus,))
-        cur.execute("INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_ratio_bonus',?)", (ratio_bonus,))
-        cur.execute("INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_sample',?)", (len(rows),))
+            if wr < 55 or avg_pnl < -1.0:
+                bonus += 3
+                ratio_bonus += 0.12
+            elif wr < 65 or avg_pnl < 0:
+                bonus += 2
+                ratio_bonus += 0.08
+            elif wr < 75 or profit_factor < 1.10:
+                bonus += 1
+                ratio_bonus += 0.04
+            if profit_factor < 0.90:
+                bonus += 1
+                ratio_bonus += 0.05
+            # Strong profitability does not relax the original hard gates.
+            bonus = min(3, bonus)
+            ratio_bonus = min(0.15, ratio_bonus)
 
-        # Learn per-engine reliability from the actual engines recorded in entry_reason.
-        engines = ["Fire","Trend","Combo","Golden","Technical","UltimateAI","Mempool/SmartMoney","Whale","Social/Hype","Anti-Wash","SmartFilter"]
+        cur.execute(
+            "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_win_rate',?)",
+            (wr,)
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_avg_pnl',?)",
+            (avg_pnl,)
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_profit_factor',?)",
+            (profit_factor,)
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_score_bonus',?)",
+            (bonus,)
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_ratio_bonus',?)",
+            (ratio_bonus,)
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_sample',?)",
+            (len(rows),)
+        )
+
+        engines = [
+            "Fire","Trend","Combo","Golden","Technical","UltimateAI",
+            "Mempool/SmartMoney","Whale","Social/Hype","Anti-Wash","SmartFilter"
+        ]
         for eng in engines:
             tagged = [float(pnl or 0) for pnl, reason in rows if eng in (reason or "")]
             if tagged:
                 ewr = sum(1 for x in tagged if x > 0) / len(tagged) * 100.0
-                cur.execute("INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES(?,?)", (f"engine_wr:{eng}", ewr))
+                eavg = sum(tagged) / len(tagged)
+                egp = sum(x for x in tagged if x > 0)
+                egl = abs(sum(x for x in tagged if x < 0))
+                epf = egp / egl if egl > 1e-12 else (999.0 if egp > 0 else 0.0)
+                cur.execute(
+                    "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES(?,?)",
+                    (f"engine_wr:{eng}", ewr)
+                )
+                cur.execute(
+                    "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES(?,?)",
+                    (f"engine_avg_pnl:{eng}", eavg)
+                )
+                cur.execute(
+                    "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES(?,?)",
+                    (f"engine_pf:{eng}", epf)
+                )
+
         conn.commit()
+
         if AUTO_LEARNING_ENABLED:
             _record_learning_event(
-                "LEARN", "یادگیری از معاملات بسته‌شده",
-                f"نمونه={len(rows)} | Win Rate={wr:.2f}% | score_bonus={bonus} | ratio_bonus={ratio_bonus:.2f}",
-                len(rows), wr
+                "LEARN",
+                "یادگیری سودمحور از معاملات بسته‌شده",
+                (
+                    f"نمونه={len(rows)} | Win Rate={wr:.2f}% | Avg PnL={avg_pnl:+.3f}% | "
+                    f"Profit Factor={profit_factor:.2f} | score_bonus={bonus} | ratio_bonus={ratio_bonus:.2f}"
+                ),
+                len(rows),
+                wr
             )
+
         if AUTO_IMPROVEMENT_ENABLED and len(rows) >= ADAPTIVE_MIN_SAMPLE and (bonus != 0 or ratio_bonus != 0):
             _record_learning_event(
-                "IMPROVEMENT", "بهبود تطبیقی اعمال شد",
-                f"حداقل امتیاز +{bonus} و نسبت اجماع +{ratio_bonus:.2f} بر اساس داده واقعی؛ بدون بازنویسی موتور سیگنال.",
-                len(rows), wr
+                "IMPROVEMENT",
+                "سخت‌گیری سودمحور اعمال شد",
+                (
+                    f"بر اساس داده واقعی: WR={wr:.2f}% | AvgPnL={avg_pnl:+.3f}% | "
+                    f"PF={profit_factor:.2f} | افزایش حداقل امتیاز +{bonus} و نسبت اجماع +{ratio_bonus:.2f}. "
+                    "در شرایط سودده، گیت‌های اصلی شل نمی‌شوند."
+                ),
+                len(rows),
+                wr
             )
-        return {"sample": len(rows), "win_rate": wr, "score_bonus": bonus, "ratio_bonus": ratio_bonus}
+
+        return {
+            "sample": len(rows),
+            "win_rate": wr,
+            "avg_pnl": avg_pnl,
+            "profit_factor": profit_factor,
+            "score_bonus": bonus,
+            "ratio_bonus": ratio_bonus,
+        }
     finally:
         if own:
             conn.close()
+
 
 def get_adaptive_consensus_settings(enabled_count):
     """Return live thresholds learned from recent closed trades."""
@@ -5951,6 +6059,857 @@ def _signal_glass_summary():
         "⚠️ تغییرات این پنل عمداً زنده و دستی هستند؛ برای برگرداندن مقدار، عدد قبلی را دوباره وارد کن."
     )
 
+
+# ================= PROFESSIONAL WALLET RADAR ENGINE =================
+# Additive only. Existing trade/learning/Neon tables are not touched.
+PRO_WALLET_DB_READY = False
+PRO_WALLET_BIRDEYE_BASE = "https://public-api.birdeye.so"
+
+def _pro_wallet_db():
+    """Create/update only isolated wallet-radar tables; never reset existing bot data."""
+    global PRO_WALLET_DB_READY
+    if PRO_WALLET_DB_READY:
+        return True
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pro_wallet_candidates (
+                    wallet_address TEXT PRIMARY KEY,
+                    win_rate REAL NOT NULL DEFAULT 0,
+                    total_trade INTEGER NOT NULL DEFAULT 0,
+                    total_win INTEGER NOT NULL DEFAULT 0,
+                    total_loss INTEGER NOT NULL DEFAULT 0,
+                    total_buy INTEGER NOT NULL DEFAULT 0,
+                    total_sell INTEGER NOT NULL DEFAULT 0,
+                    realized_profit_usd REAL NOT NULL DEFAULT 0,
+                    realized_profit_percent REAL NOT NULL DEFAULT 0,
+                    unrealized_profit_usd REAL NOT NULL DEFAULT 0,
+                    unrealized_profit_percent REAL NOT NULL DEFAULT 0,
+                    total_pnl_usd REAL NOT NULL DEFAULT 0,
+                    cashflow_usd REAL NOT NULL DEFAULT 0,
+                    score REAL NOT NULL DEFAULT 0,
+                    rank_position INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT '',
+                    last_trade_at REAL NOT NULL DEFAULT 0,
+                    last_seen REAL NOT NULL DEFAULT 0
+                )
+            """)
+            # Additive migrations only; existing candidate rows remain untouched.
+            migrations = {
+                "total_buy": "INTEGER NOT NULL DEFAULT 0",
+                "total_sell": "INTEGER NOT NULL DEFAULT 0",
+                "unrealized_profit_usd": "REAL NOT NULL DEFAULT 0",
+                "unrealized_profit_percent": "REAL NOT NULL DEFAULT 0",
+                "cashflow_usd": "REAL NOT NULL DEFAULT 0",
+                "last_trade_at": "REAL NOT NULL DEFAULT 0",
+            }
+            cols = {r[1] for r in cur.execute("PRAGMA table_info(pro_wallet_candidates)").fetchall()}
+            for col, definition in migrations.items():
+                if col not in cols:
+                    cur.execute(f"ALTER TABLE pro_wallet_candidates ADD COLUMN {col} {definition}")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pro_wallet_copy_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tx_hash TEXT NOT NULL UNIQUE,
+                    wallet_address TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    token_address TEXT NOT NULL DEFAULT '',
+                    token_symbol TEXT NOT NULL DEFAULT '',
+                    trade_time REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'SEEN',
+                    result TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pro_wallet_copy_positions (
+                    token_address TEXT PRIMARY KEY,
+                    wallet_address TEXT NOT NULL,
+                    buy_tx_hash TEXT NOT NULL DEFAULT '',
+                    buy_time REAL NOT NULL DEFAULT 0,
+                    amount_sol REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    sell_tx_hash TEXT NOT NULL DEFAULT '',
+                    updated_at REAL NOT NULL DEFAULT 0
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pro_wallet_radar_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    wallet_address TEXT NOT NULL DEFAULT '',
+                    details TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0
+                )
+            """)
+            conn.commit()
+            conn.close()
+        PRO_WALLET_DB_READY = True
+        return True
+    except Exception as exc:
+        logger.warning("Professional Wallet Radar DB init failed: %s", exc)
+        return False
+
+
+def _pro_wallet_setting_bool(key, default=False):
+    try:
+        raw = _get_bot_setting(key, "1" if default else "0")
+        return str(raw).strip().lower() not in ("0", "false", "off", "")
+    except Exception:
+        return bool(default)
+
+def _pro_wallet_set_setting_bool(key, value):
+    return _set_bot_setting(key, "1" if bool(value) else "0")
+
+def _pro_wallet_load_switches():
+    global PRO_WALLET_RADAR_ENABLED, PRO_WALLET_COPY_PERMISSION
+    PRO_WALLET_RADAR_ENABLED = _pro_wallet_setting_bool("pro_wallet_radar_enabled", False)
+    PRO_WALLET_COPY_PERMISSION = _pro_wallet_setting_bool("pro_wallet_copy_permission", False)
+    return PRO_WALLET_RADAR_ENABLED, PRO_WALLET_COPY_PERMISSION
+
+def _pro_wallet_toggle_radar():
+    global PRO_WALLET_RADAR_ENABLED
+    PRO_WALLET_RADAR_ENABLED = not bool(PRO_WALLET_RADAR_ENABLED)
+    _pro_wallet_set_setting_bool("pro_wallet_radar_enabled", PRO_WALLET_RADAR_ENABLED)
+    _pro_wallet_db()
+    return PRO_WALLET_RADAR_ENABLED
+
+def _pro_wallet_toggle_copy():
+    global PRO_WALLET_COPY_PERMISSION
+    PRO_WALLET_COPY_PERMISSION = not bool(PRO_WALLET_COPY_PERMISSION)
+    # Never allow an unknown/default wallet to start real copying.
+    if not PRO_WALLET_COPY_PERMISSION:
+        _pro_wallet_set_setting_bool("pro_wallet_copy_permission", False)
+    else:
+        _pro_wallet_set_setting_bool("pro_wallet_copy_permission", True)
+    _pro_wallet_db()
+    return PRO_WALLET_COPY_PERMISSION
+
+def _pro_wallet_api_get(path, params=None, timeout=10):
+    if not BIRDEYE_API_KEY:
+        return None, "BIRDEYE_API_KEY تنظیم نشده"
+    try:
+        headers = {
+            "X-API-KEY": BIRDEYE_API_KEY,
+            "x-chain": "solana",
+            "accept": "application/json",
+        }
+        res = http_session.get(
+            f"{PRO_WALLET_BIRDEYE_BASE}{path}",
+            headers=headers,
+            params=params or {},
+            timeout=timeout,
+        )
+        if res.status_code != 200:
+            return None, f"Birdeye HTTP {res.status_code}"
+        payload = res.json()
+        if not payload.get("success", True):
+            return None, str(payload.get("message") or "Birdeye request failed")
+        return payload.get("data") if isinstance(payload, dict) else None, ""
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+def _pro_wallet_number(obj, *keys, default=0.0):
+    if not isinstance(obj, dict):
+        return float(default)
+    for key in keys:
+        try:
+            value = obj.get(key)
+            if value is not None:
+                return float(value)
+        except Exception:
+            pass
+    return float(default)
+
+def _pro_wallet_int(obj, *keys, default=0):
+    try:
+        return int(round(_pro_wallet_number(obj, *keys, default=default)))
+    except Exception:
+        return int(default)
+
+def _pro_wallet_extract_items(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("items", "list", "traders", "data", "rows"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                nested = _pro_wallet_extract_items(value)
+                if nested:
+                    return nested
+    return []
+
+def _pro_wallet_discover():
+    """
+    Discover many trader wallets from Birdeye and fall back to token-top-trader
+    discovery when the global trader board is empty/unavailable.
+    This function only reads external data and never touches the main bot DB.
+    """
+    candidates = []
+    seen = set()
+    errors = []
+
+    def add_wallets(items):
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            wallet = str(
+                item.get("address")
+                or item.get("wallet")
+                or item.get("walletAddress")
+                or item.get("owner")
+                or item.get("trader")
+                or item.get("account")
+                or ""
+            ).strip()
+            if wallet and len(wallet) >= 20 and wallet not in seen:
+                seen.add(wallet)
+                candidates.append(wallet)
+
+    # Primary: global trader leaderboard. We deliberately ask for more than the
+    # final ranking count so the PnL verification stage has enough candidates.
+    for sort_by in ("realized_pnl", "total_pnl"):
+        data, err = _pro_wallet_api_get(
+            "/trader/gainers-losers",
+            params={
+                "type": PRO_WALLET_LOOKBACK,
+                "sort_by": sort_by,
+                "sort_type": "desc",
+                "offset": 0,
+                "limit": min(100, max(25, PRO_WALLET_DISCOVERY_LIMIT * 5)),
+            },
+            timeout=12,
+        )
+        if data is not None:
+            add_wallets(_pro_wallet_extract_items(data))
+            if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
+                break
+        elif err:
+            errors.append(f"leaderboard/{sort_by}: {err}")
+
+    # Fallback: discover traders from several currently active Solana tokens.
+    # This fixes the common case where the global trader board returns no items
+    # for a Standard/free key while token-level top traders remain available.
+    if len(candidates) < max(5, PRO_WALLET_PNL_CHECK_LIMIT):
+        try:
+            market_tokens = get_real_market_trending_tokens()[:3]
+        except Exception as exc:
+            market_tokens = []
+            errors.append(f"market-token fallback: {exc}")
+        for token_addr in market_tokens:
+            if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
+                break
+            data, err = _pro_wallet_api_get(
+                "/defi/v2/tokens/top_traders",
+                params={
+                    "address": token_addr,
+                    "time_frame": PRO_WALLET_LOOKBACK,
+                    "sort_by": "realized_pnl",
+                    "sort_type": "desc",
+                    "offset": 0,
+                    "limit": 10,
+                    "ui_amount_mode": "scaled",
+                },
+                timeout=12,
+            )
+            if data is not None:
+                add_wallets(_pro_wallet_extract_items(data))
+            elif err:
+                errors.append(f"top_traders/{token_addr[:8]}: {err}")
+
+    if not candidates:
+        if errors:
+            return [], " | ".join(errors[-3:])
+        return [], "هنوز Wallet مناسب از Birdeye دریافت نشد"
+    return candidates[:max(25, PRO_WALLET_DISCOVERY_LIMIT * 3)], ""
+
+
+def _pro_wallet_refresh():
+    global PRO_WALLET_LAST_RADAR_AT, PRO_WALLET_LAST_ERROR, PRO_WALLET_SELECTED_WALLET
+    if not _pro_wallet_db():
+        return False, "DB رادار آماده نشد"
+    if not BIRDEYE_API_KEY:
+        PRO_WALLET_LAST_ERROR = "BIRDEYE_API_KEY تنظیم نشده"
+        return False, PRO_WALLET_LAST_ERROR
+
+    wallets, err = _pro_wallet_discover()
+    if err and not wallets:
+        PRO_WALLET_LAST_ERROR = err
+        PRO_WALLET_LAST_RADAR_AT = time.time()
+        return False, err
+    if not wallets:
+        PRO_WALLET_LAST_ERROR = "هنوز Wallet مناسب از Birdeye دریافت نشد"
+        PRO_WALLET_LAST_RADAR_AT = time.time()
+        return False, PRO_WALLET_LAST_ERROR
+
+    ranked = []
+    checked = 0
+    for wallet in wallets:
+        if checked >= max(5, PRO_WALLET_PNL_CHECK_LIMIT):
+            break
+        data, pnl_err = _pro_wallet_api_get(
+            "/wallet/v2/pnl/summary",
+            params={
+                "wallet": wallet,
+                "duration": PRO_WALLET_LOOKBACK,
+                "position_scope": "duration_only",
+            },
+            timeout=12,
+        )
+        checked += 1
+        if data is None:
+            logger.debug("Wallet PnL lookup failed %s: %s", wallet, pnl_err)
+            continue
+
+        counts = data.get("counts") if isinstance(data, dict) else {}
+        pnl = data.get("pnl") if isinstance(data, dict) else {}
+        counts = counts if isinstance(counts, dict) else {}
+        pnl = pnl if isinstance(pnl, dict) else {}
+
+        total_buy = _pro_wallet_int(counts, "total_buy", "totalBuy")
+        total_sell = _pro_wallet_int(counts, "total_sell", "totalSell")
+        total_trade = _pro_wallet_int(counts, "total_trade", "totalTrade", default=total_buy + total_sell)
+        total_win = _pro_wallet_int(counts, "total_win", "totalWin")
+        total_loss = _pro_wallet_int(counts, "total_loss", "totalLoss")
+        win_rate = _pro_wallet_number(counts, "win_rate", "winRate")
+        realized_usd = _pro_wallet_number(
+            pnl, "realized_profit_usd", "realizedProfitUsd", "realizedPnlUsd"
+        )
+        realized_pct = _pro_wallet_number(
+            pnl, "realized_profit_percent", "realizedProfitPercent", "roi"
+        )
+        unrealized_usd = _pro_wallet_number(
+            pnl, "unrealized_profit_usd", "unrealizedProfitUsd", "unrealizedPnlUsd"
+        )
+        unrealized_pct = _pro_wallet_number(
+            pnl, "unrealized_profit_percent", "unrealizedProfitPercent"
+        )
+        total_usd = _pro_wallet_number(
+            pnl, "total_usd", "totalUsd", "total_pnl_usd", "totalPnlUsd"
+        )
+        cashflow_usd = _pro_wallet_number(
+            pnl, "cashflow_usd", "cashflowUsd", "cashFlowUsd"
+        )
+        last_trade_at = _pro_wallet_number(
+            pnl, "last_trade_time", "lastTradeTime", "last_trade_unix_time", "lastTradeUnixTime", default=0
+        )
+
+        # Some responses calculate win_rate but omit total_trade. Use the explicit
+        # win/loss counts as the minimum evidence rather than discarding the wallet.
+        if total_trade <= 0:
+            total_trade = total_win + total_loss
+        if total_trade <= 0:
+            continue
+        if win_rate <= 0 and (total_win + total_loss) > 0:
+            win_rate = (total_win / max(1, total_win + total_loss)) * 100.0
+
+        avg_realized_pct = realized_pct / max(1, total_trade)
+        # Profit-seeking score: quality first, then realized outcome, then consistency.
+        wr_component = max(0.0, min(100.0, win_rate))
+        profit_component = max(-50.0, min(150.0, realized_pct))
+        consistency_component = max(0.0, min(100.0, (total_win / max(1, total_trade)) * 100.0))
+        loss_penalty = 0.0
+        if realized_usd < 0:
+            loss_penalty += min(30.0, abs(realized_usd) / max(100.0, abs(realized_usd) + 100.0) * 30.0)
+        if total_loss > total_win and total_loss > 0:
+            loss_penalty += min(15.0, ((total_loss - total_win) / total_trade) * 15.0)
+        score = (
+            wr_component * 0.50
+            + max(0.0, profit_component) * 0.30
+            + consistency_component * 0.20
+            - loss_penalty
+        )
+
+        ranked.append({
+            "wallet_address": wallet,
+            "win_rate": win_rate,
+            "total_trade": total_trade,
+            "total_win": total_win,
+            "total_loss": total_loss,
+            "total_buy": total_buy,
+            "total_sell": total_sell,
+            "realized_profit_usd": realized_usd,
+            "realized_profit_percent": realized_pct,
+            "unrealized_profit_usd": unrealized_usd,
+            "unrealized_profit_percent": unrealized_pct,
+            "total_pnl_usd": total_usd,
+            "cashflow_usd": cashflow_usd,
+            "avg_realized_pct": avg_realized_pct,
+            "last_trade_at": last_trade_at,
+            "score": score,
+        })
+
+    ranked.sort(
+        key=lambda x: (
+            x["score"],
+            x["win_rate"],
+            x["realized_profit_usd"],
+            x["total_trade"],
+        ),
+        reverse=True,
+    )
+
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            now = time.time()
+            cur.execute("UPDATE pro_wallet_candidates SET rank_position=0 WHERE 1=1")
+            for idx, item in enumerate(ranked, 1):
+                cur.execute("""
+                    INSERT INTO pro_wallet_candidates(
+                        wallet_address,win_rate,total_trade,total_win,total_loss,total_buy,total_sell,
+                        realized_profit_usd,realized_profit_percent,unrealized_profit_usd,
+                        unrealized_profit_percent,total_pnl_usd,cashflow_usd,score,rank_position,
+                        source,last_trade_at,last_seen
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(wallet_address) DO UPDATE SET
+                        win_rate=excluded.win_rate,total_trade=excluded.total_trade,
+                        total_win=excluded.total_win,total_loss=excluded.total_loss,
+                        total_buy=excluded.total_buy,total_sell=excluded.total_sell,
+                        realized_profit_usd=excluded.realized_profit_usd,
+                        realized_profit_percent=excluded.realized_profit_percent,
+                        unrealized_profit_usd=excluded.unrealized_profit_usd,
+                        unrealized_profit_percent=excluded.unrealized_profit_percent,
+                        total_pnl_usd=excluded.total_pnl_usd,
+                        cashflow_usd=excluded.cashflow_usd,score=excluded.score,
+                        rank_position=excluded.rank_position,source=excluded.source,
+                        last_trade_at=excluded.last_trade_at,last_seen=excluded.last_seen
+                """, (
+                    item["wallet_address"], item["win_rate"], item["total_trade"],
+                    item["total_win"], item["total_loss"], item["total_buy"], item["total_sell"],
+                    item["realized_profit_usd"], item["realized_profit_percent"],
+                    item["unrealized_profit_usd"], item["unrealized_profit_percent"],
+                    item["total_pnl_usd"], item["cashflow_usd"], item["score"], idx,
+                    "Birdeye trader board/top traders + wallet PnL", item["last_trade_at"], now
+                ))
+            cur.execute("""
+                INSERT INTO pro_wallet_radar_events(event_type,wallet_address,details,created_at)
+                VALUES(?,?,?,?)
+            """, (
+                "RADAR_REFRESH",
+                ranked[0]["wallet_address"] if ranked else "",
+                json.dumps({
+                    "candidates": len(ranked),
+                    "checked": checked,
+                    "qualified": sum(
+                        1 for x in ranked
+                        if x["total_trade"] >= PRO_WALLET_MIN_TRADES
+                        and x["win_rate"] >= PRO_WALLET_MIN_WIN_RATE
+                        and x["realized_profit_usd"] >= 0
+                    ),
+                    "discovery_error": err or "",
+                }, ensure_ascii=False, separators=(",", ":")),
+                now
+            ))
+            conn.commit()
+            conn.close()
+    except Exception as exc:
+        PRO_WALLET_LAST_ERROR = f"ذخیره آمار رادار: {exc}"
+        return False, PRO_WALLET_LAST_ERROR
+
+    qualified = [
+        x for x in ranked
+        if x["total_trade"] >= PRO_WALLET_MIN_TRADES
+        and x["win_rate"] >= PRO_WALLET_MIN_WIN_RATE
+        and x["realized_profit_usd"] >= 0
+    ]
+    with PRO_WALLET_STATE_LOCK:
+        new_selected = qualified[0]["wallet_address"] if qualified else ""
+        if new_selected != PRO_WALLET_SELECTED_WALLET:
+            # Reset copy baseline whenever the leader changes; do not copy old trades.
+            _set_bot_setting("pro_wallet_last_copy_scan_at", int(time.time()))
+        PRO_WALLET_SELECTED_WALLET = new_selected
+        PRO_WALLET_LAST_RADAR_AT = time.time()
+        PRO_WALLET_LAST_ERROR = err or ""
+    _set_bot_setting("pro_wallet_selected_wallet", PRO_WALLET_SELECTED_WALLET)
+    return True, f"{len(ranked)} Wallet بررسی شد | {len(qualified)} Wallet واجد شرایط کپی"
+
+
+def _pro_wallet_stats():
+    if not _pro_wallet_db():
+        return []
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            rows = conn.execute("""
+                SELECT wallet_address,win_rate,total_trade,total_win,total_loss,total_buy,total_sell,
+                       realized_profit_usd,realized_profit_percent,unrealized_profit_usd,
+                       unrealized_profit_percent,total_pnl_usd,cashflow_usd,score,rank_position,
+                       source,last_trade_at,last_seen
+                FROM pro_wallet_candidates
+                WHERE total_trade > 0
+                ORDER BY score DESC, win_rate DESC, realized_profit_usd DESC, total_trade DESC
+                LIMIT 5
+            """).fetchall()
+            conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def _pro_wallet_panel_text():
+    _pro_wallet_load_switches()
+    rows = _pro_wallet_stats()
+    selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
+    last_at = PRO_WALLET_LAST_RADAR_AT
+    if not last_at:
+        try:
+            last_at = max([float(r[-1] or 0) for r in rows] or [0.0])
+        except Exception:
+            last_at = 0.0
+    last_text = datetime.fromtimestamp(last_at).strftime("%Y-%m-%d %H:%M:%S") if last_at else "-"
+
+    qualified = [
+        r for r in rows
+        if int(r[2] or 0) >= PRO_WALLET_MIN_TRADES
+        and float(r[1] or 0) >= PRO_WALLET_MIN_WIN_RATE
+        and float(r[7] or 0) >= 0
+    ]
+
+    lines = [
+        "💎 **Professional Wallet Radar**",
+        "",
+        f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
+        f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+        f"🔑 Birdeye API: {'🟢 آماده' if BIRDEYE_API_KEY else '🔴 تنظیم نشده'}",
+        f"👛 Wallet منتخب: `{selected or '-'}`",
+        f"✅ واجد شرایط کپی: `{len(qualified)}`",
+        f"🕒 آخرین بروزرسانی: `{last_text}`",
+    ]
+
+    if PRO_WALLET_LAST_ERROR:
+        lines.extend(["", f"⚠️ `{PRO_WALLET_LAST_ERROR}`"])
+
+    lines.extend(["", "🏆 **جزئیات بهترین Walletها:**"])
+    if not rows:
+        lines.append("هیچ دادهٔ قابل‌اعتباری از Birdeye دریافت نشده.")
+        lines.append("رصد را روشن نگه دار و «بروزرسانی آمار» را بزن.")
+    else:
+        for idx, r in enumerate(rows, 1):
+            (
+                wallet, wr, trades, wins, losses, buys, sells,
+                r_usd, r_pct, u_usd, u_pct, total_usd, cashflow,
+                score, rank, source, last_trade_at, seen
+            ) = r
+            short = f"{wallet[:6]}…{wallet[-6:]}" if len(wallet) > 14 else wallet
+            qualified_flag = (
+                "✅ کاندید کپی"
+                if int(trades or 0) >= PRO_WALLET_MIN_TRADES
+                and float(wr or 0) >= PRO_WALLET_MIN_WIN_RATE
+                and float(r_usd or 0) >= 0
+                else "⏳ نیاز به داده بیشتر"
+            )
+            last_trade_text = (
+                datetime.fromtimestamp(float(last_trade_at)).strftime("%m-%d %H:%M")
+                if float(last_trade_at or 0) > 0 else "-"
+            )
+            lines.extend([
+                f"{idx}) `{short}` — {qualified_flag}",
+                f"   🏆 WR `{float(wr):.1f}%` | معاملات `{int(trades)}` | برد/باخت `{int(wins)}/{int(losses)}`",
+                f"   🟢 BUY `{int(buys)}` | 🔴 SELL `{int(sells)}`",
+                f"   💵 Realized `${float(r_usd):+,.2f}` (`{float(r_pct):+.2f}%`)",
+                f"   📈 Unrealized `${float(u_usd):+,.2f}` (`{float(u_pct):+.2f}%`)",
+                f"   💰 Total PnL `${float(total_usd):+,.2f}` | Cashflow `${float(cashflow):+,.2f}`",
+                f"   🧠 Score `{float(score):.2f}` | آخرین معامله `{last_trade_text}`",
+            ])
+
+    lines.extend([
+        "",
+        "📌 **قانون انتخاب:** Win Rate بالا + سود تحقق‌یافته غیرمنفی + تعداد معامله کافی.",
+        "📌 قبل از کپی واقعی، ربات اول رصد و آمار را جمع می‌کند؛ معاملات قبل از زمان فعال‌سازی کپی کپی نمی‌شوند.",
+        "ℹ️ این آمار در جداول مستقل Professional Wallet ذخیره می‌شود و به آمار قدیمی ربات دست نمی‌زند.",
+    ])
+    return "\n".join(lines)
+
+
+def _pro_wallet_record_event(tx_hash, wallet, side, token_address, token_symbol, trade_time, status, result):
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT OR IGNORE INTO pro_wallet_copy_events(
+                    tx_hash,wallet_address,side,token_address,token_symbol,trade_time,status,result,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+            """, (
+                str(tx_hash), str(wallet), str(side), str(token_address or ""),
+                str(token_symbol or ""), float(trade_time or 0), str(status),
+                str(result or ""), time.time()
+            ))
+            inserted = cur.rowcount > 0
+            conn.commit()
+            conn.close()
+        return inserted
+    except Exception as exc:
+        logger.warning("Professional Wallet event log failed: %s", exc)
+        return False
+
+def _pro_wallet_extract_trade_item(item):
+    if not isinstance(item, dict):
+        return None
+
+    tx_hash = str(
+        item.get("txHash") or item.get("tx_hash") or item.get("signature") or item.get("hash") or ""
+    ).strip()
+
+    side = str(
+        item.get("side") or item.get("direction") or item.get("tradeType") or item.get("tx_type") or ""
+    ).strip().upper()
+
+    token_address = str(
+        item.get("tokenAddress") or item.get("baseAddress") or item.get("token") or ""
+    ).strip()
+
+    base = item.get("base") if isinstance(item.get("base"), dict) else {}
+    quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+    token_address = token_address or str(
+        base.get("address") or base.get("tokenAddress") or ""
+    ).strip()
+
+    token_symbol = str(
+        item.get("tokenSymbol") or item.get("symbol") or base.get("symbol") or ""
+    ).strip()
+
+    trade_time = _pro_wallet_number(
+        item, "blockUnixTime", "blockTime", "unixTime", "timestamp", default=time.time()
+    )
+
+    # Side fallback from explicit textual types.
+    if side not in ("BUY", "SELL"):
+        low = side.lower()
+        if "buy" in low:
+            side = "BUY"
+        elif "sell" in low:
+            side = "SELL"
+
+    # Safe inference from from/to asset identities when available.
+    if side not in ("BUY", "SELL"):
+        from_obj = item.get("from") if isinstance(item.get("from"), dict) else {}
+        to_obj = item.get("to") if isinstance(item.get("to"), dict) else {}
+        from_addr = str(from_obj.get("address") or item.get("fromAddress") or "").strip()
+        to_addr = str(to_obj.get("address") or item.get("toAddress") or "").strip()
+        quote_mints = {SOL_MINT, USDC_MINT}
+        if from_addr in quote_mints and to_addr and to_addr not in quote_mints:
+            side, token_address = "BUY", token_address or to_addr
+        elif to_addr in quote_mints and from_addr and from_addr not in quote_mints:
+            side, token_address = "SELL", token_address or from_addr
+
+    if side not in ("BUY", "SELL") or not token_address or not tx_hash:
+        return None
+
+    return {
+        "tx_hash": tx_hash,
+        "side": side,
+        "token_address": token_address,
+        "token_symbol": token_symbol or "TOKEN",
+        "trade_time": trade_time,
+    }
+
+def _pro_wallet_copy_poll():
+    global PRO_WALLET_LAST_COPY_SCAN_AT, PRO_WALLET_LAST_ERROR
+
+    if not (PRO_WALLET_RADAR_ENABLED and PRO_WALLET_COPY_PERMISSION):
+        return
+    if not WALLET_TRADE_PERMISSION:
+        PRO_WALLET_LAST_ERROR = "مجوز اصلی معامله واقعی ولت خاموش است"
+        return
+    if not BIRDEYE_API_KEY:
+        PRO_WALLET_LAST_ERROR = "BIRDEYE_API_KEY تنظیم نشده"
+        return
+    if not _pro_wallet_db():
+        return
+
+    selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
+    if not selected:
+        rows = _pro_wallet_stats()
+        selected = str(rows[0][0]) if rows else ""
+    if not selected:
+        PRO_WALLET_LAST_ERROR = "هیچ Wallet واجد شرایط برای کپی انتخاب نشده"
+        return
+
+    # Real-copy requires the currently selected wallet to remain qualified.
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            row = conn.execute("""
+                SELECT wallet_address,win_rate,total_trade,realized_profit_usd
+                FROM pro_wallet_candidates
+                WHERE wallet_address=?
+            """, (selected,)).fetchone()
+            conn.close()
+        if not row:
+            PRO_WALLET_LAST_ERROR = "Wallet منتخب هنوز آمار معتبر ندارد"
+            return
+        _, wr, trades, realized_usd = row
+        if int(trades or 0) < PRO_WALLET_MIN_TRADES or float(wr or 0) < PRO_WALLET_MIN_WIN_RATE or float(realized_usd or 0) < 0:
+            PRO_WALLET_LAST_ERROR = "Wallet منتخب دیگر حداقل‌های سود/Win Rate را ندارد؛ کپی متوقف شد"
+            return
+    except Exception as exc:
+        PRO_WALLET_LAST_ERROR = f"بررسی Wallet منتخب: {exc}"
+        return
+
+    now = int(time.time())
+    last_scan = int(PRO_WALLET_LAST_COPY_SCAN_AT or 0)
+    saved_wallet = str(_get_bot_setting("pro_wallet_last_copy_wallet", "") or "")
+    if saved_wallet != selected:
+        # Leader changed: establish a fresh baseline and never replay old transactions.
+        last_scan = now
+        PRO_WALLET_LAST_COPY_SCAN_AT = now
+        _set_bot_setting("pro_wallet_last_copy_scan_at", now)
+        _set_bot_setting("pro_wallet_last_copy_wallet", selected)
+        return
+
+    if last_scan <= 0:
+        saved = _get_bot_setting("pro_wallet_last_copy_scan_at", "")
+        try:
+            last_scan = int(float(saved or 0))
+        except Exception:
+            last_scan = 0
+
+    if last_scan <= 0:
+        last_scan = now
+        PRO_WALLET_LAST_COPY_SCAN_AT = now
+        _set_bot_setting("pro_wallet_last_copy_scan_at", now)
+        _set_bot_setting("pro_wallet_last_copy_wallet", selected)
+        return
+
+    data, err = _pro_wallet_api_get(
+        "/trader/txs/seek_by_time",
+        params={
+            "address": selected,
+            "after_time": last_scan,
+            "before_time": now,
+            "limit": 100,
+            "tx_type": "swap",
+        },
+        timeout=12,
+    )
+    PRO_WALLET_LAST_COPY_SCAN_AT = now
+    _set_bot_setting("pro_wallet_last_copy_scan_at", now)
+    _set_bot_setting("pro_wallet_last_copy_wallet", selected)
+
+    if data is None:
+        PRO_WALLET_LAST_ERROR = err
+        return
+
+    items = _pro_wallet_extract_items(data)
+    events = [_pro_wallet_extract_trade_item(x) for x in items]
+    events = [x for x in events if x]
+    events.sort(key=lambda x: (x["trade_time"], x["tx_hash"]))
+
+    for ev in events:
+        if not _pro_wallet_record_event(
+            ev["tx_hash"], selected, ev["side"], ev["token_address"],
+            ev["token_symbol"], ev["trade_time"], "DETECTED", ""
+        ):
+            continue
+
+        try:
+            if ev["side"] == "BUY":
+                amount = max(
+                    0.0,
+                    min(
+                        float(MAX_TRADE_SOL),
+                        0.01 if float(MAX_TRADE_SOL) > 0 else 0.0
+                    )
+                )
+                if amount <= 0:
+                    result = "COPY_BUY_BLOCKED_AMOUNT"
+                    _pro_wallet_record_event(
+                        ev["tx_hash"], selected, ev["side"], ev["token_address"],
+                        ev["token_symbol"], ev["trade_time"], "BLOCKED", result
+                    )
+                    continue
+                ok, result = execute_real_buy(ev["token_address"], amount)
+                if ok:
+                    with db_lock:
+                        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                        conn.execute("""
+                            INSERT OR REPLACE INTO pro_wallet_copy_positions(
+                                token_address,wallet_address,buy_tx_hash,buy_time,amount_sol,status,updated_at
+                            ) VALUES(?,?,?,?,?,?,?)
+                        """, (
+                            ev["token_address"], selected, ev["tx_hash"], ev["trade_time"],
+                            amount, "OPEN", time.time()
+                        ))
+                        conn.commit()
+                        conn.close()
+                    status = "REAL_BUY_OK"
+                else:
+                    status = "REAL_BUY_FAILED"
+            else:
+                with db_lock:
+                    conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                    row = conn.execute(
+                        "SELECT token_address FROM pro_wallet_copy_positions WHERE token_address=? AND status='OPEN'",
+                        (ev["token_address"],)
+                    ).fetchone()
+                    conn.close()
+                if not row:
+                    status = "SELL_IGNORED_NOT_OWNED"
+                    result = "No open Professional Wallet copy position"
+                else:
+                    token_balance = int(get_token_balance(ev["token_address"]) or 0)
+                    if token_balance <= 0:
+                        status = "SELL_IGNORED_EMPTY"
+                        result = "No token balance"
+                    else:
+                        ok, result = execute_real_sell(ev["token_address"], token_balance)
+                        status = "REAL_SELL_OK" if ok else "REAL_SELL_FAILED"
+                        if ok:
+                            with db_lock:
+                                conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                                conn.execute("""
+                                    UPDATE pro_wallet_copy_positions
+                                    SET status='CLOSED', sell_tx_hash=?, updated_at=?
+                                    WHERE token_address=?
+                                """, (str(result), time.time(), ev["token_address"]))
+                                conn.commit()
+                                conn.close()
+
+            _pro_wallet_record_event(
+                ev["tx_hash"], selected, ev["side"], ev["token_address"],
+                ev["token_symbol"], ev["trade_time"], status, str(result)
+            )
+            logger.info(
+                "💎 Professional Wallet copy %s | wallet=%s | token=%s | tx=%s | result=%s",
+                ev["side"], selected, ev["token_address"], ev["tx_hash"], result
+            )
+        except Exception as exc:
+            _pro_wallet_record_event(
+                ev["tx_hash"], selected, ev["side"], ev["token_address"],
+                ev["token_symbol"], ev["trade_time"], "ERROR", f"{type(exc).__name__}:{exc}"
+            )
+            logger.exception("Professional Wallet copy error")
+
+
+def professional_wallet_radar_loop():
+    """Independent 20m radar + optional 30m real-copy poll."""
+    global PRO_WALLET_LAST_ERROR
+    _pro_wallet_load_switches()
+    while True:
+        try:
+            now = time.time()
+            if PRO_WALLET_RADAR_ENABLED and BIRDEYE_API_KEY:
+                if now - float(PRO_WALLET_LAST_RADAR_AT or 0) >= PRO_WALLET_RADAR_INTERVAL_SECONDS:
+                    _pro_wallet_refresh()
+                if PRO_WALLET_COPY_PERMISSION and now - float(PRO_WALLET_LAST_COPY_SCAN_AT or 0) >= PRO_WALLET_COPY_POLL_INTERVAL_SECONDS:
+                    _pro_wallet_copy_poll()
+        except Exception as exc:
+            PRO_WALLET_LAST_ERROR = f"{type(exc).__name__}: {exc}"
+            logger.warning("Professional Wallet Radar loop error: %s", exc)
+        time.sleep(5.0)
+
+_pro_wallet_load_switches()
+# =====================================================================
+
+
 def _main_keyboard(is_admin=False):
     rows=[[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
@@ -5975,6 +6934,17 @@ def _main_keyboard(is_admin=False):
             callback_data="toggle_engine_analysis"
         )])
         rows.append([InlineKeyboardButton("🎁 عضویت رایگان کاربر",callback_data="free_users")])
+        rows.append([
+            InlineKeyboardButton(
+                f"🔭 رصد Wallet: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
+                callback_data="pro_wallet_toggle_radar"
+            ),
+            InlineKeyboardButton(
+                f"🛒 کپی واقعی Wallet: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+                callback_data="pro_wallet_toggle_copy"
+            ),
+        ])
+        rows.append([InlineKeyboardButton("💎 آمار Professional Wallet", callback_data="pro_wallet_panel")])
     return InlineKeyboardMarkup(rows)
 
 def _persistent_bottom_keyboard(is_admin=False):
@@ -6284,6 +7254,17 @@ def start_telegram_bot():
                 )
                 return
 
+            # Professional Wallet Radar status (separate module).
+            if label == "💎 آمار Professional Wallet":
+                if not is_admin:
+                    await msg.reply_text("⛔ فقط ادمین.")
+                    return
+                await msg.reply_text(
+                    _pro_wallet_panel_text(),
+                    parse_mode="Markdown"
+                )
+                return
+
             # وضعیت ولت
             if label == "💼 وضعیت ولت":
                 if not is_admin:
@@ -6556,7 +7537,7 @@ def start_telegram_bot():
             return
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 سیگنال اصلی: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data == "toggle_master_signal":
@@ -7112,6 +8093,121 @@ def start_telegram_bot():
                     )
                 return
 
+            elif data == "pro_wallet_panel":
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                    return
+                await q.edit_message_text(
+                    _pro_wallet_panel_text(),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
+                            callback_data="pro_wallet_toggle_radar"
+                        )],
+                        [InlineKeyboardButton(
+                            f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+                            callback_data="pro_wallet_toggle_copy"
+                        )],
+                        [InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="pro_wallet_refresh")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+                    ]),
+                    parse_mode="Markdown"
+                )
+                return
+
+            elif data == "pro_wallet_toggle_radar":
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                    return
+                state = _pro_wallet_toggle_radar()
+                if state:
+                    ok, message = _pro_wallet_refresh()
+                    status = f"✅ {message}" if ok else f"⚠️ {message}"
+                    text = (
+                        f"🔭 **رصد Professional Wallet روشن شد**\n\n"
+                        f"{status}\n"
+                        "📊 آمار Walletها در دیتابیس مستقل ذخیره می‌شود.\n"
+                        "⛔ رصد به‌تنهایی اجازه خرید/فروش واقعی نمی‌دهد."
+                    )
+                else:
+                    text = "🔴 **رصد Professional Wallet خاموش شد**\n\n✅ فقط این رادار خاموش شد؛ ربات اصلی و آمار قدیمی دست‌نخورده باقی می‌مانند."
+                await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        f"🔭 اجازه رصد: {'🟢 ON' if state else '🔴 OFF'}",
+                        callback_data="pro_wallet_toggle_radar"
+                    )],
+                    [InlineKeyboardButton(
+                        f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+                        callback_data="pro_wallet_toggle_copy"
+                    )],
+                    [InlineKeyboardButton("📊 آمار Walletها", callback_data="pro_wallet_panel")],
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+                ]), parse_mode="Markdown")
+                return
+
+            elif data == "pro_wallet_toggle_copy":
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                    return
+                if not PRO_WALLET_RADAR_ENABLED:
+                    await q.answer("اول اجازه رصد را روشن کن.", show_alert=True)
+                    return
+                state = _pro_wallet_toggle_copy()
+                if state and not WALLET_TRADE_PERMISSION:
+                    text = (
+                        "⚠️ **کپی واقعی درخواست شد ولی مجوز اصلی ولت خاموش است.**\n\n"
+                        "کلید اصلی `مجوز معامله واقعی از ولت` هنوز OFF است؛ بنابراین هیچ خرید/فروش واقعی اجرا نمی‌شود."
+                    )
+                elif state:
+                    PRO_WALLET_LAST_COPY_SCAN_AT = 0.0
+                    _set_bot_setting("pro_wallet_last_copy_scan_at", "0")
+                    text = (
+                        "🟢 **اجازه کپی واقعی Wallet روشن شد.**\n\n"
+                        "کپی فقط از بهترین Wallet رتبه‌بندی‌شده انجام می‌شود.\n"
+                        "خرید/فروش از همین لحظه فقط با مجوز اصلی ولت انجام خواهد شد."
+                    )
+                else:
+                    text = "🔴 **اجازه کپی واقعی Wallet خاموش شد.**\n\n✅ رصد و آمار می‌توانند مستقل ادامه داشته باشند."
+                await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
+                        callback_data="pro_wallet_toggle_radar"
+                    )],
+                    [InlineKeyboardButton(
+                        f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+                        callback_data="pro_wallet_toggle_copy"
+                    )],
+                    [InlineKeyboardButton("📊 آمار Walletها", callback_data="pro_wallet_panel")],
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+                ]), parse_mode="Markdown")
+                return
+
+            elif data == "pro_wallet_refresh":
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                    return
+                if not PRO_WALLET_RADAR_ENABLED:
+                    await q.answer("رصد خاموش است.", show_alert=True)
+                    return
+                ok, message = _pro_wallet_refresh()
+                await q.edit_message_text(
+                    f"{'✅' if ok else '⚠️'} **Professional Wallet Radar**\n\n{message}\n\n{_pro_wallet_panel_text()}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
+                            callback_data="pro_wallet_toggle_radar"
+                        )],
+                        [InlineKeyboardButton(
+                            f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+                            callback_data="pro_wallet_toggle_copy"
+                        )],
+                        [InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="pro_wallet_refresh")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+                    ]),
+                    parse_mode="Markdown"
+                )
+                return
+
             elif data.startswith("toggle_"):
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.",reply_markup=_main_keyboard(False)); return
@@ -7391,6 +8487,7 @@ if __name__ == "__main__":
     _restore_open_positions()
 
     threads = [
+        Thread(target=professional_wallet_radar_loop, daemon=True, name="ProfessionalWalletRadar"),
         Thread(target=pro_trader_cache_maintenance_loop, daemon=True, name="ProTraderCache"),
         Thread(target=self_learning_ai_optimizer_loop, daemon=True, name="AILearning"),
         # رادار واحد فقط یک Thread اجرایی دارد؛ رفتار آن بر اساس سه حالت اصلی تغییر می‌کند و خرید فقط از بهترین کاندیدای هر sweep انجام می‌شود.
