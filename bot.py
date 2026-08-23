@@ -4690,13 +4690,17 @@ def _elite_refresh_market_cache(force=False):
         found = get_real_market_trending_tokens()
         # Stable de-duplication; keep the complete discovered universe.
         unique = list(dict.fromkeys(found))
+        if not unique:
+            logger.warning("⚠️ Elite discovery returned no tokens؛ cache سالم قبلی حفظ شد.")
+            return
         if len(unique) > ELITE_MAX_UNIQUE_TOKENS:
             unique = unique[:ELITE_MAX_UNIQUE_TOKENS]
         with state_lock:
             _elite_market_cache = unique
             _elite_market_cache_time = time.time()
     except Exception as e:
-        logger.debug(f"Elite market refresh error: {e}")
+        # Discovery errors must never erase a previously healthy market cache.
+        logger.debug(f"Elite market refresh error؛ cache سالم قبلی حفظ شد: {e}")
     finally:
         _elite_market_refresh_lock.release()
 
@@ -4749,8 +4753,8 @@ def _fetch_best_solana_pairs_batch(token_addrs):
                 _dex_last_request_time = time.time()
             if res.status_code == 429:
                 retry_after = float(res.headers.get("Retry-After", "1") or 1)
-                logger.warning("⚠️ DexScreener HTTP 429؛ batch radar %.1fs مکث می‌کند.", retry_after)
-                time.sleep(min(max(retry_after, 0.5), 5.0))
+                logger.warning("⚠️ DexScreener HTTP 429؛ batch radar %.1fs مکث می‌کند؛ cache قبلی حفظ می‌شود.", retry_after)
+                time.sleep(min(max(retry_after, 1.0), 10.0))
                 continue
             if res.status_code != 200:
                 logger.debug("DexScreener batch status=%s", res.status_code)
