@@ -199,6 +199,10 @@ PRO_WALLET_LAST_RADAR_AT = 0.0
 PRO_WALLET_LAST_COPY_SCAN_AT = 0.0
 PRO_WALLET_LAST_ERROR = ""
 PRO_WALLET_SELECTED_WALLET = ""
+# ⏱️ فقط برای جلوگیری از اسپم Birdeye هنگام تمام‌شدن Compute Units.
+# این تنظیمات به هیچ دکمه یا منطق دیگری دست نمی‌زنند.
+PRO_WALLET_BIRDEYE_COOLDOWN_SECONDS = 15 * 60
+PRO_WALLET_BIRDEYE_COOLDOWN_UNTIL = 0.0
 _MAX_FUSION_PREV = None
 
 BOTTOM_WHALE_RUNNING = True
@@ -6980,12 +6984,45 @@ def _pro_wallet_extract_items(data):
 
 
 def _pro_wallet_wallet_from_item(item):
+    """
+    # 👛 استخراج آدرس واقعی Wallet از پاسخ Birdeye.
+    # Birdeye ممکن است آدرس را مستقیم یا داخل یک آبجکت wallet برگرداند.
+    # این تابع عمداً چند شکل پاسخ را پوشش می‌دهد تا Wallet واقعی از دست نرود.
+    """
     if not isinstance(item, dict):
         return ""
-    return str(
-        item.get("address") or item.get("wallet") or item.get("walletAddress")
-        or item.get("owner") or item.get("trader") or item.get("account") or ""
-    ).strip()
+
+    def _candidate(value):
+        if isinstance(value, str):
+            value = value.strip()
+            # آدرس Solana معمولاً بین 32 تا 44 کاراکتر است.
+            if 32 <= len(value) <= 64:
+                return value
+            return ""
+        if isinstance(value, dict):
+            for k in ("address", "walletAddress", "wallet_address", "owner", "trader", "publicKey", "public_key"):
+                got = _candidate(value.get(k))
+                if got:
+                    return got
+        return ""
+
+    # شکل‌های مستقیم و رایج پاسخ.
+    for key in (
+        "address", "wallet", "walletAddress", "wallet_address",
+        "owner", "trader", "account", "accountAddress", "publicKey", "public_key",
+        "userAddress", "user_address"
+    ):
+        got = _candidate(item.get(key))
+        if got:
+            return got
+
+    # بعضی پاسخ‌ها آدرس را در بخش‌های تو در تو قرار می‌دهند.
+    for parent_key in ("walletInfo", "wallet_info", "traderInfo", "trader_info", "user", "accountInfo", "account_info"):
+        got = _candidate(item.get(parent_key))
+        if got:
+            return got
+
+    return ""
 
 
 def _pro_wallet_item_metrics(item):
@@ -7042,34 +7079,58 @@ def _pro_wallet_item_metrics(item):
 
 
 def _pro_wallet_discover(force=False):
-    """کشف چند Wallet با فقط یک درخواست 30-CU به leaderboard."""
+    """
+    # 🔎 کشف واقعی چند Wallet حرفه‌ای از Birdeye.
+    # طبق مستندات فعلی Birdeye:
+    #   endpoint = /trader/gainers-losers
+    #   type = yesterday | today | 1W | 30d | 90d
+    #   sort_by = PnL | realized_pnl | unrealized_pnl
+    #   limit تا 100
+    # بنابراین فقط یک درخواست می‌زنیم تا CU بی‌جهت مصرف نشود.
+    # این تابع هیچ دکمه، انتخاب Wallet یا منطق کپی را تغییر نمی‌دهد.
+    """
+    # برای پیدا کردن Walletهای فعال و سودده، PnL هفتگی انتخاب شده است.
+    # یک درخواست 30-CU بیشتر نمی‌زنیم؛ اگر CU تمام باشد باید همان خطا شفاف نمایش داده شود.
     data, err = _pro_wallet_api_get(
         "/trader/gainers-losers",
         params={
-            "type": PRO_WALLET_LOOKBACK,
-            "sort_by": "realized_pnl",
+            "type": "1W",
+            "sort_by": "PnL",
             "sort_type": "desc",
             "offset": 0,
-            "limit": min(100, max(25, PRO_WALLET_DISCOVERY_LIMIT)),
+            "limit": min(100, max(20, int(PRO_WALLET_DISCOVERY_LIMIT or 20))),
         },
         timeout=15,
         force=force,
     )
     if data is None:
         return [], err
+
+    # پاسخ رسمی این endpoint به‌صورت data.items است؛ extractor فعلی هر دو حالت
+    # list و dict را پوشش می‌دهد.
     items = _pro_wallet_extract_items(data)
     candidates = []
     seen = set()
+
     for item in items:
         wallet = _pro_wallet_wallet_from_item(item)
-        if not wallet or len(wallet) < 20 or wallet in seen:
+        if not wallet or wallet in seen:
             continue
         seen.add(wallet)
         metrics = _pro_wallet_item_metrics(item)
         metrics["wallet_address"] = wallet
         candidates.append(metrics)
+
     if not candidates:
-        return [], "Birdeye پاسخ داد ولی هیچ Wallet قابل استخراج از leaderboard پیدا نشد"
+        # اگر پاسخ موفق بود ولی آدرس استخراج نشد، نمونه کلیدهای پاسخ را در خطا ثبت کن
+        # تا دفعه بعد بدون دست‌زدن به پنل بدانیم Birdeye دقیقاً چه ساختاری فرستاده است.
+        sample_keys = []
+        for item in items[:3]:
+            if isinstance(item, dict):
+                sample_keys.append(sorted(str(k) for k in item.keys())[:30])
+        detail = json.dumps(sample_keys, ensure_ascii=False)[:900]
+        return [], f"Birdeye پاسخ داد اما هیچ Wallet قابل استخراج نبود. کلیدهای نمونه پاسخ: {detail}"
+
     return candidates, ""
 
 
@@ -7126,7 +7187,7 @@ def _pro_wallet_refresh(force=True):
                     item["total_loss"], item["total_buy"], item["total_sell"], item["realized_profit_usd"],
                     item["realized_profit_percent"], item["unrealized_profit_usd"], item["unrealized_profit_percent"],
                     item["total_pnl_usd"], item["cashflow_usd"], item["score"], idx,
-                    "Birdeye Trader Gainers/Losers (30d)", item["last_trade_at"], now
+                    "Birdeye Trader Gainers/Losers (1W / PnL)", item["last_trade_at"], now
                 ))
             qualified = sum(
                 1 for x in wallets
@@ -7149,7 +7210,7 @@ def _pro_wallet_refresh(force=True):
         PRO_WALLET_SELECTED_WALLET = selected
     _set_bot_setting("pro_wallet_selected_wallet", PRO_WALLET_SELECTED_WALLET or "")
     PRO_WALLET_LAST_ERROR = err or ""
-    return True, f"{len(wallets)} Wallet از Birdeye دریافت شد؛ انتخاب Wallet کاملاً دستی است و رفرش انتخاب قبلی را عوض نمی‌کند."
+    return True, f"{len(wallets)} Wallet واقعی از Birdeye دریافت شد؛ انتخاب Wallet کاملاً دستی است و رفرش انتخاب قبلی را عوض نمی‌کند."
 
 
 def _pro_wallet_stats():
