@@ -8564,6 +8564,7 @@ def start_telegram_bot():
             return
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
+            global PRO_WALLET_SELECTED_WALLET, PRO_WALLET_LAST_COPY_SCAN_AT
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
             _security_audit_telegram_update(update)
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
@@ -9277,7 +9278,6 @@ def start_telegram_bot():
                     return
                 # Selection is manual and persistent. Establish a fresh baseline
                 # so historical transactions are never replayed after selection.
-                global PRO_WALLET_SELECTED_WALLET, PRO_WALLET_LAST_COPY_SCAN_AT
                 PRO_WALLET_SELECTED_WALLET = wallet
                 now = int(time.time())
                 PRO_WALLET_LAST_COPY_SCAN_AT = now
