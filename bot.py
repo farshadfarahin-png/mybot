@@ -1,3 +1,11 @@
+# ============================================================
+# 💎 Professional Wallet Radar — نسخه تشخیصی و پایدار
+# این فایل نسخه‌ای اختصاصی برای رصد Walletهای حرفه‌ای Solana است.
+# هدف: اتصال واقعی به Birdeye، کشف چند Wallet، انتخاب دستی Wallet و
+# آماده‌سازی کپی واقعی BUY/SELL بدون دستکاری موتورهای اصلی ربات.
+# تمام بخش‌های اضافه‌شده با توضیحات فارسی مشخص شده‌اند.
+# ============================================================
+
 # V17 TRUE HUNTER — verified architecture: independent lanes, MAX unified attack, rotating low-latency radar.
 import time
 import asyncio
@@ -94,6 +102,9 @@ COPY_DEFAULT_ASSET = "USDC"
 UNIFIED_ENGINE_NAME = "🤖⚡ هالک AI — موتور متحد بازار"
 BOT_BUILD_VERSION = "V31-PRO-TRADER-SAFE-LAYER-2026"
 BIRDEYE_API_KEY = os.environ.get("BIRDEYE_API_KEY", "").strip()
+# 🔐 شناسه ادمین مخصوص Professional Wallet؛ اختیاری و فقط برای همین بخش.
+# اگر در Render مقدار بدهی، همین کاربر می‌تواند کلیدهای رادار را کنترل کند.
+PRO_WALLET_ADMIN_USER_ID = os.environ.get("PRO_WALLET_ADMIN_USER_ID", "").strip()
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -6850,23 +6861,68 @@ def _pro_wallet_load_switches():
     return PRO_WALLET_RADAR_ENABLED, PRO_WALLET_COPY_PERMISSION
 
 def _pro_wallet_toggle_radar():
+    # 🔭 تغییر وضعیت رصد؛ اول در حافظه و دیتابیس با نتیجهٔ قابل‌بررسی ذخیره می‌شود.
+    # اگر ذخیره‌سازی شکست بخورد، کلید ظاهراً ON نمی‌شود تا وضعیت دروغین نشان ندهیم.
     global PRO_WALLET_RADAR_ENABLED
-    PRO_WALLET_RADAR_ENABLED = not bool(PRO_WALLET_RADAR_ENABLED)
-    _pro_wallet_set_setting_bool("pro_wallet_radar_enabled", PRO_WALLET_RADAR_ENABLED)
-    _pro_wallet_db()
-    return PRO_WALLET_RADAR_ENABLED
+    try:
+        current = _pro_wallet_setting_bool("pro_wallet_radar_enabled", False)
+        new_state = not current
+        ok = _pro_wallet_set_setting_bool("pro_wallet_radar_enabled", new_state)
+        if not ok:
+            return PRO_WALLET_RADAR_ENABLED, False, "ذخیره وضعیت رصد در bot_settings شکست خورد."
+        PRO_WALLET_RADAR_ENABLED = new_state
+        _pro_wallet_db()
+        return PRO_WALLET_RADAR_ENABLED, True, ""
+    except Exception as exc:
+        return PRO_WALLET_RADAR_ENABLED, False, f"خطای کلید رصد: {type(exc).__name__}: {exc}"
 
 def _pro_wallet_toggle_copy():
-    # 🔐 کلید «اجازه کپی واقعی Wallet» مستقل از انتخاب Wallet است.
-    # یعنی می‌توانی کلید را ON کنی و بعد Wallet را انتخاب کنی؛
-    # تا وقتی Wallet انتخاب نشده، هیچ معامله‌ای اجرا نخواهد شد.
+    # 🛒 کلید «اجازه کپی واقعی Wallet» کاملاً مستقل از انتخاب Wallet است.
+    # ON شدن این کلید به‌تنهایی معامله‌ای اجرا نمی‌کند؛ Wallet باید جداگانه انتخاب شود.
     global PRO_WALLET_COPY_PERMISSION
-    _pro_wallet_load_switches()
-    new_state = not bool(PRO_WALLET_COPY_PERMISSION)
-    ok = _pro_wallet_set_setting_bool("pro_wallet_copy_permission", new_state)
-    PRO_WALLET_COPY_PERMISSION = new_state if ok else False
-    _pro_wallet_db()
-    return PRO_WALLET_COPY_PERMISSION
+    try:
+        current = _pro_wallet_setting_bool("pro_wallet_copy_permission", False)
+        new_state = not current
+        ok = _pro_wallet_set_setting_bool("pro_wallet_copy_permission", new_state)
+        if not ok:
+            return PRO_WALLET_COPY_PERMISSION, False, "ذخیره وضعیت کپی واقعی در bot_settings شکست خورد."
+        PRO_WALLET_COPY_PERMISSION = new_state
+        _pro_wallet_db()
+        return PRO_WALLET_COPY_PERMISSION, True, ""
+    except Exception as exc:
+        return PRO_WALLET_COPY_PERMISSION, False, f"خطای کلید کپی واقعی: {type(exc).__name__}: {exc}"
+
+def _pro_wallet_is_admin(update):
+    # 👮 تشخیص ادمین برای Professional Wallet.
+    # اگر PRO_WALLET_ADMIN_USER_ID در Render تنظیم شده باشد، همان شناسه معیار اصلی است.
+    try:
+        user_id = str(getattr(getattr(update, "effective_user", None), "id", "") or "")
+        chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+        if PRO_WALLET_ADMIN_USER_ID:
+            return user_id == PRO_WALLET_ADMIN_USER_ID
+        # سازگاری با ساختار قبلی: در چت خصوصی user_id با TELEGRAM_CHAT_ID برابر است.
+        return bool(TELEGRAM_CHAT_ID and (user_id == str(TELEGRAM_CHAT_ID) or chat_id == str(TELEGRAM_CHAT_ID)))
+    except Exception:
+        return False
+
+def _pro_wallet_birdeye_healthcheck():
+    # 🧪 تست سلامت API: فقط برای تشخیص دسترسی کلید Birdeye است و هیچ معامله‌ای انجام نمی‌دهد.
+    data, err = _pro_wallet_api_get(
+        "/defi/v3/search",
+        params={
+            "query": "SOL",
+            "sort_by": "volume_24h_usd",
+            "sort_type": "desc",
+            "offset": 0,
+            "limit": 5,
+            "verify_token": "true",
+            "ui_amount_mode": "scaled",
+        },
+        timeout=12,
+    )
+    if data is None:
+        return False, err or "پاسخ معتبر از Birdeye دریافت نشد."
+    return True, "API Key معتبر و قابل‌دسترسی است."
 
 def _pro_wallet_api_get(path, params=None, timeout=10):
     if not BIRDEYE_API_KEY:
@@ -6931,12 +6987,8 @@ def _pro_wallet_extract_items(data):
     return []
 
 def _pro_wallet_discover():
-    """
-    🔭 کشف چندین Wallet از Birdeye.
-    مسیر ۱: Trader Gainers/Losers.
-    مسیر ۲: Top Traders چند توکن فعال سولانا.
-    این بخش فقط داده می‌خواند و هیچ BUY/SELL اجرا نمی‌کند.
-    """
+    # 🔎 کشف Walletهای حرفه‌ای در دو لایه: Leaderboard و Top Traders توکن‌ها.
+    # مقادیر زیر عمداً فقط از enumهای رسمی Birdeye انتخاب شده‌اند.
     candidates, seen, errors = [], set(), []
 
     def add_wallets(items):
@@ -6951,47 +7003,55 @@ def _pro_wallet_discover():
                 seen.add(wallet)
                 candidates.append(wallet)
 
-    # 🏆 مسیر رسمی Leaderboard؛ پارامترها مطابق مستندات فعلی Birdeye هستند.
-    for window in (PRO_WALLET_LOOKBACK, "7d", "24h"):
-        for sort_by in ("realized_pnl", "PnL", "unrealized_pnl"):
+    # 🏆 مسیر ۱: Trader Gainers/Losers با مقادیر رسمی type و sort_by.
+    for window in ("30d", "1W", "today", "yesterday", "90d"):
+        for sort_by in ("PnL", "realized_pnl", "unrealized_pnl"):
             data, err = _pro_wallet_api_get(
                 "/trader/gainers-losers",
                 params={
-                    "type": window, "sort_by": sort_by, "sort_type": "desc",
-                    "offset": 0, "limit": min(100, max(25, PRO_WALLET_DISCOVERY_LIMIT * 2)),
+                    "type": window,
+                    "sort_by": sort_by,
+                    "sort_type": "desc",
+                    "offset": 0,
+                    "limit": 100,
                 },
                 timeout=12,
             )
             if data is not None:
                 add_wallets(_pro_wallet_extract_items(data))
-                if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
-                    return candidates[:PRO_WALLET_DISCOVERY_LIMIT], ""
             elif err:
                 errors.append(f"leaderboard/{window}/{sort_by}: {err}")
+            if len(candidates) >= 30:
+                return candidates[:30], ""
 
-    # 🔎 مسیر مستقل Top Traders؛ برای هر توکن چند معیار فعالیت را امتحان می‌کنیم.
+    # 🔎 مسیر ۲: ابتدا توکن‌های فعال سولانا را از موتور موجود خود ربات می‌گیریم.
     try:
-        market_tokens = get_real_market_trending_tokens()[:8]
+        market_tokens = list(dict.fromkeys(get_real_market_trending_tokens()[:15]))
     except Exception as exc:
         market_tokens = []
-        errors.append(f"market-token fallback: {type(exc).__name__}: {exc}")
+        errors.append(f"market-token discovery: {type(exc).__name__}: {exc}")
 
-    # اگر DexScreener موقتاً داده نداد، این دو توکن استاندارد سولانا مسیر را زنده نگه می‌دارند.
+    # اگر منبع بازار توکن نداد، از دو توکن دارای آدرس قطعی سولانا فقط به‌عنوان fallback استفاده می‌کنیم.
     for token_addr in (SOL_MINT, USDC_MINT):
         if token_addr not in market_tokens:
             market_tokens.append(token_addr)
 
     for token_addr in market_tokens:
-        if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
+        if len(candidates) >= 30:
             break
-        for sort_by in ("volume", "trade", "realized_pnl"):
-            if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
+        for sort_by in ("volume", "trade", "total_pnl", "realized_pnl"):
+            if len(candidates) >= 30:
                 break
             data, err = _pro_wallet_api_get(
                 "/defi/v2/tokens/top_traders",
                 params={
-                    "address": token_addr, "time_frame": PRO_WALLET_LOOKBACK,
-                    "sort_by": sort_by, "sort_type": "desc", "offset": 0, "limit": 10,
+                    "address": token_addr,
+                    "time_frame": "30d",
+                    "sort_by": sort_by,
+                    "sort_type": "desc",
+                    "offset": 0,
+                    "limit": 10,
+                    "ui_amount_mode": "scaled",
                 },
                 timeout=12,
             )
@@ -7001,8 +7061,8 @@ def _pro_wallet_discover():
                 errors.append(f"top_traders/{token_addr[:8]}/{sort_by}: {err}")
 
     if not candidates:
-        return [], " | ".join(errors[-5:]) if errors else "هنوز Wallet مناسبی از Birdeye دریافت نشد"
-    return candidates[:PRO_WALLET_DISCOVERY_LIMIT], ""
+        return [], " | ".join(errors[-6:]) if errors else "Birdeye هیچ Walletای برنگرداند."
+    return candidates[:30], ""
 
 def _pro_wallet_refresh():
     global PRO_WALLET_LAST_RADAR_AT, PRO_WALLET_LAST_ERROR, PRO_WALLET_SELECTED_WALLET
@@ -7010,6 +7070,13 @@ def _pro_wallet_refresh():
         return False, "DB رادار آماده نشد"
     if not BIRDEYE_API_KEY:
         PRO_WALLET_LAST_ERROR = "BIRDEYE_API_KEY تنظیم نشده"
+        return False, PRO_WALLET_LAST_ERROR
+
+    # 🧪 اول خود کلید Birdeye را تست می‌کنیم تا «API آماده» صرفاً به‌معنای وجود متغیر محیطی نباشد.
+    health_ok, health_msg = _pro_wallet_birdeye_healthcheck()
+    if not health_ok:
+        PRO_WALLET_LAST_ERROR = f"تست API Birdeye شکست خورد: {health_msg}"
+        PRO_WALLET_LAST_RADAR_AT = time.time()
         return False, PRO_WALLET_LAST_ERROR
 
     wallets, err = _pro_wallet_discover()
@@ -7254,6 +7321,7 @@ def _pro_wallet_panel_text():
         "",
         f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
         f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+        f"🔐 مجوز اصلی معامله از ولت: {'🟢 ON' if WALLET_TRADE_PERMISSION else '🔴 OFF'}",
         f"🔑 Birdeye API: {'🟢 آماده' if BIRDEYE_API_KEY else '🔴 تنظیم نشده'}",
         f"👛 Wallet منتخب: `{selected or '-'}`",
         f"📊 Walletهای بررسی‌شده: `{len(rows)}`",
@@ -8867,8 +8935,8 @@ def start_telegram_bot():
                 return
 
             elif data == "pro_wallet_panel":
-                if not is_admin:
-                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                if not _pro_wallet_is_admin(update):
+                    await q.edit_message_text("⛔ دسترسی ادمین رد شد.\nشناسه کاربر را در Render با `PRO_WALLET_ADMIN_USER_ID` تنظیم کن.", reply_markup=_main_keyboard(False), parse_mode="Markdown")
                     return
                 await q.edit_message_text(
                     _pro_wallet_panel_text(),
@@ -8878,8 +8946,8 @@ def start_telegram_bot():
                 return
 
             elif data.startswith("pro_wallet_select:"):
-                if not is_admin:
-                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                if not _pro_wallet_is_admin(update):
+                    await q.edit_message_text("⛔ دسترسی ادمین رد شد.\nشناسه کاربر را در Render با `PRO_WALLET_ADMIN_USER_ID` تنظیم کن.", reply_markup=_main_keyboard(False), parse_mode="Markdown")
                     return
                 wallet = str(data.split(":", 1)[1]).strip()
                 if len(wallet) < 20:
@@ -8902,11 +8970,13 @@ def start_telegram_bot():
                 return
 
             elif data == "pro_wallet_toggle_radar":
-                if not is_admin:
-                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                if not _pro_wallet_is_admin(update):
+                    await q.edit_message_text("⛔ دسترسی ادمین رد شد.\nشناسه کاربر را در Render با `PRO_WALLET_ADMIN_USER_ID` تنظیم کن.", reply_markup=_main_keyboard(False), parse_mode="Markdown")
                     return
-                state = _pro_wallet_toggle_radar()
-                if state:
+                state, saved_ok, save_error = _pro_wallet_toggle_radar()
+                if not saved_ok:
+                    text = f"❌ **کلید رصد تغییر نکرد.**\n\n`{save_error}`"
+                elif state:
                     ok, message = _pro_wallet_refresh()
                     status = f"✅ {message}" if ok else f"⚠️ {message}"
                     text = (
@@ -8925,8 +8995,8 @@ def start_telegram_bot():
                 return
 
             elif data == "pro_wallet_toggle_copy":
-                if not is_admin:
-                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                if not _pro_wallet_is_admin(update):
+                    await q.edit_message_text("⛔ دسترسی ادمین رد شد.\nشناسه کاربر را در Render با `PRO_WALLET_ADMIN_USER_ID` تنظیم کن.", reply_markup=_main_keyboard(False), parse_mode="Markdown")
                     return
                 if not PRO_WALLET_RADAR_ENABLED:
                     await q.answer("اول اجازه رصد را روشن کن.", show_alert=True)
@@ -8935,8 +9005,10 @@ def start_telegram_bot():
                 _pro_wallet_load_switches()
                 _load_wallet_trade_permission()
                 selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
-                state = _pro_wallet_toggle_copy()
-                if state and not WALLET_TRADE_PERMISSION:
+                state, saved_ok, save_error = _pro_wallet_toggle_copy()
+                if not saved_ok:
+                    text = f"❌ **کلید کپی واقعی تغییر نکرد.**\n\n`{save_error}`"
+                elif state and not WALLET_TRADE_PERMISSION:
                     # Permission can be ON in the radar UI, but real execution remains
                     # blocked by the bot's independent master wallet-trade permission.
                     text = (
@@ -8966,8 +9038,8 @@ def start_telegram_bot():
                 return
 
             elif data == "pro_wallet_refresh":
-                if not is_admin:
-                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                if not _pro_wallet_is_admin(update):
+                    await q.edit_message_text("⛔ دسترسی ادمین رد شد.\nشناسه کاربر را در Render با `PRO_WALLET_ADMIN_USER_ID` تنظیم کن.", reply_markup=_main_keyboard(False), parse_mode="Markdown")
                     return
                 if not PRO_WALLET_RADAR_ENABLED:
                     await q.answer("رصد خاموش است.", show_alert=True)
