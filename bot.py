@@ -7174,6 +7174,53 @@ def _pro_wallet_stats():
         return []
 
 
+
+def _pro_wallet_keyboard():
+    """
+    # ------------------------------------------------------------
+    # 🎛️ کیبورد اختصاصی Professional Wallet Radar
+    # این تابع عمداً جدا نگه داشته شده تا دکمه‌های رصد، کپی واقعی،
+    # انتخاب Wallet، بروزرسانی آمار و بازگشت همیشه داخل همین پنل باشند.
+    # ------------------------------------------------------------
+    # نکته مهم: نبودن این تابع باعث NameError می‌شود و در نتیجه
+    # پنل Professional Wallet بدون کیبورد یا ناقص نمایش داده می‌شود.
+    # ------------------------------------------------------------
+    """
+    rows = _pro_wallet_stats()
+    selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
+            callback_data="pro_wallet_toggle_radar"
+        )],
+        [InlineKeyboardButton(
+            f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+            callback_data="pro_wallet_toggle_copy"
+        )],
+    ]
+
+    # 👛 Walletهای پیدا شده را به‌صورت دکمه انتخاب دستی نمایش می‌دهیم.
+    for idx in range(0, min(len(rows), 10), 2):
+        row_buttons = []
+        for j in range(idx, min(idx + 2, len(rows))):
+            wallet = str(rows[j][0])
+            short = f"{wallet[:4]}…{wallet[-4:]}"
+            mark = "🎯" if wallet == selected else "👛"
+            row_buttons.append(InlineKeyboardButton(
+                f"{mark} #{j + 1} {short}",
+                callback_data=f"pro_wallet_select:{wallet}"
+            ))
+        keyboard.append(row_buttons)
+
+    # 🔄 بروزرسانی آمار و 🔙 بازگشت همیشه در انتهای پنل هستند.
+    keyboard.extend([
+        [InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="pro_wallet_refresh")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
 def _pro_wallet_panel_text():
     _pro_wallet_load_switches()
     rows = _pro_wallet_stats()
