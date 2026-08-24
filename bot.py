@@ -7743,58 +7743,36 @@ def _main_keyboard(is_admin=False):
         rows.append([InlineKeyboardButton("💎 آمار Professional Wallet", callback_data="pro_wallet_panel")])
     return InlineKeyboardMarkup(rows)
 
-def _persistent_bottom_keyboard(is_admin=False):
-    """
-    حالت پایدار/پیش‌فرض: فقط کلید «🎛 چهار کلید» در نوار پایین.
-    این تابع عمداً همان ReplyKeyboard را برمی‌گرداند تا کلید همیشه در پایین
-    بماند؛ پنل بزرگ فقط با لمس همین کلید باز می‌شود.
-    """
-    return ReplyKeyboardMarkup(
-        [["🎛 چهار کلید"]],
-        resize_keyboard=True,
-        one_time_keyboard=False,
-        is_persistent=True,
-        selective=False,
-    )
+def _bottom_panel_inline_keyboard(is_open=False, is_admin=False):
+    """Inline callback control: no toggle command is sent to the chat."""
+    if not is_open:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("🎛 چهار کلید", callback_data="bottom_panel_open")
+        ]])
+    rows = [
+        [InlineKeyboardButton("🎛 چهار کلید", callback_data="bottom_panel_close")],
+        [InlineKeyboardButton("📊 وضعیت موتورها", callback_data="bottom_status_engines"),
+         InlineKeyboardButton("💼 وضعیت ولت", callback_data="bottom_status_wallet")],
+        [InlineKeyboardButton("📈 آمار معاملات", callback_data="bottom_status_trades"),
+         InlineKeyboardButton("💎 آمار Wallet", callback_data="pro_wallet_panel")],
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton("👑 پنل مدیریت", callback_data="admin"),
+                     InlineKeyboardButton("🔐 امنیت/وضعیت", callback_data="security")])
+        rows.append([InlineKeyboardButton("🛡 اتصالات و دسترسی‌ها", callback_data="connections")])
+    return InlineKeyboardMarkup(rows)
 
+def _persistent_bottom_keyboard(is_admin=False):
+    # Legacy keyboard retained for compatibility; the toggle itself is callback-only.
+    return ReplyKeyboardMarkup([["🎛 چهار کلید"]], resize_keyboard=True, one_time_keyboard=False, is_persistent=True, selective=False)
 
 def _expanded_bottom_keyboard(is_admin=False):
-    """
-    پنل بازشده پایین. همان «🎛 چهار کلید» در خود Reply Keyboard می‌ماند
-    و با همان کلید، پنل دوباره بسته می‌شود؛ کلید جداگانه برای بستن وجود ندارد.
-    """
-    rows = [
-        ["🎛 چهار کلید"],
-        ["/start"],
-        ["📊 وضعیت موتورها", "💼 وضعیت ولت"],
-        ["📈 آمار معاملات", "🎛 کنترل موتورها"],
-    ]
-    if WEBAPP_URL:
-        rows.append(["📱 Mini App VIP"])
-    elif CHANNEL_INVITE_LINK:
-        rows.append(["📢 کانال VIP"])
+    rows = [["🎛 چهار کلید"], ["/start"], ["📊 وضعیت موتورها", "💼 وضعیت ولت"], ["📈 آمار معاملات", "🎛 کنترل موتورها"]]
+    if WEBAPP_URL: rows.append(["📱 Mini App VIP"])
+    elif CHANNEL_INVITE_LINK: rows.append(["📢 کانال VIP"])
     if is_admin:
-        rows += [
-            [f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"],
-            [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"],
-            [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"],
-            ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"],
-            ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"],
-            ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"],
-            [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"],
-            [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
-            ["🧠 مرکز یادگیری"],
-            [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"],
-            [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
-            ["🎁 عضویت رایگان کاربر"],
-        ]
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-        one_time_keyboard=False,
-        is_persistent=True,
-        selective=False,
-    )
+        rows += [[f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"], [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"], [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"], ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"], ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"], ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"], [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"], [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"], ["🧠 مرکز یادگیری"], [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"], [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"], ["🎁 عضویت رایگان کاربر"]]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False, is_persistent=True, selective=False)
 
 
 ENGINE_SWITCHES = [
@@ -7886,12 +7864,10 @@ def start_telegram_bot():
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
-            # پنل فعلی بالا عمداً حفظ می‌شود.
-            # این پیام دوم فقط Reply Keyboard دائمی پایین تلگرام را فعال می‌کند.
+            # کنترل ثابت پنل پایین با callback انجام می‌شود؛ هیچ دستور متنی toggle ارسال نمی‌شود.
             await update.message.reply_text(
-                "🎛 **پنل کنترل پایین فعال است**\n"
-                "هر زمان سیگنال‌های جدید بیایند، این پنل پایین چت باقی می‌ماند.",
-                reply_markup=_persistent_bottom_keyboard(is_admin),
+                "🎛 **پنل کنترل**\n\nپنل در حالت بسته است.",
+                reply_markup=_bottom_panel_inline_keyboard(False, is_admin),
                 parse_mode="Markdown"
             )
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
@@ -8068,19 +8044,8 @@ def start_telegram_bot():
             # یک کلید ثابت پایین: همان کلید هم باز می‌کند و هم می‌بندد.
             # وضعیت فقط در context کاربر نگه‌داری می‌شود؛ پنل اصلی ربات دست‌نخورده می‌ماند.
             if label == "🎛 چهار کلید":
-                panel_open = bool(context.user_data.get("bottom_panel_open", False))
-                if panel_open:
-                    context.user_data["bottom_panel_open"] = False
-                    await msg.reply_text(
-                        "⬇️ پنل پایین بسته شد.",
-                        reply_markup=_persistent_bottom_keyboard(is_admin)
-                    )
-                else:
-                    context.user_data["bottom_panel_open"] = True
-                    await msg.reply_text(
-                        "🎛 پنل پایین باز شد.",
-                        reply_markup=_expanded_bottom_keyboard(is_admin)
-                    )
+                # Toggle واقعی فقط با InlineKeyboard callback انجام می‌شود.
+                # این مسیر قدیمی عمداً هیچ پیام یا دستور جدیدی تولید نمی‌کند.
                 return
 
             # وضعیت موتورها
@@ -8392,6 +8357,27 @@ def start_telegram_bot():
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
             _security_audit_telegram_update(update)
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
+            if data == "bottom_panel_open":
+                await q.edit_message_text("🎛 **پنل کنترل**\n\nپنل باز است.", reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
+                return
+            if data == "bottom_panel_close":
+                await q.edit_message_text("🎛 **پنل کنترل**\n\nپنل بسته است.", reply_markup=_bottom_panel_inline_keyboard(False, is_admin), parse_mode="Markdown")
+                return
+            if data == "bottom_status_engines":
+                await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n" + _engine_status_lines(), reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
+                return
+            if data == "bottom_status_wallet":
+                if not is_admin:
+                    await q.answer("⛔ فقط ادمین.", show_alert=True)
+                    return
+                sol_balance = await _tg_bg(get_sol_balance)
+                state = "🟢 ON — BUY/SELL واقعی مجاز است" if WALLET_TRADE_PERMISSION else "🔴 OFF — معامله واقعی ممنوع است"
+                await q.edit_message_text(f"💼 **ولت اصلی**\n\n💰 موجودی SOL: `{sol_balance:.6f}`\n🔐 مجوز معامله: {state}", reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
+                return
+            if data == "bottom_status_trades":
+                stats = await _tg_bg(get_advanced_trade_analytics)
+                await q.edit_message_text("📈 **آمار معاملات**\n\n" + str(stats), reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
+                return
             if data != "connections":
                 _security_panel_cancel_refresh(cid)
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 سیگنال اصلی: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
