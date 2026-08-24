@@ -99,6 +99,9 @@ COPY_DEFAULT_ASSET = "USDC"
 UNIFIED_ENGINE_NAME = "🤖⚡ هالک AI — موتور متحد بازار"
 BOT_BUILD_VERSION = "V31-PRO-TRADER-SAFE-LAYER-2026"
 BIRDEYE_API_KEY = os.environ.get("BIRDEYE_API_KEY", "").strip()
+# 🔑 کلید رایگان Solana Tracker برای Professional Wallet Radar
+SOLANATRACKER_API_KEY = os.environ.get("SOLANATRACKER_API_KEY", "").strip()
+SOLANATRACKER_BASE = "https://data.solanatracker.io"
 
 # ==========================================
 # بخش مدیریت پیشرفته RPC چرخشی (RPC Rotation System)
@@ -6767,6 +6770,8 @@ def _signal_glass_summary():
 # ============================================================
 PRO_WALLET_DB_READY = False
 PRO_WALLET_BIRDEYE_BASE = "https://public-api.birdeye.so"
+# Professional Wallet Radar از اینجا به بعد برای شکار Wallet از Solana Tracker استفاده می‌کند.
+PRO_WALLET_SOLANATRACKER_BASE = "https://data.solanatracker.io"
 
 # 🧾 این نسخه فقط Walletهایی را قابل انتخاب می‌کند که همه شروط شکار را همزمان داشته باشند.
 # دکمه‌ها و منطق کپی واقعی عمداً در این تغییر دست‌نخورده باقی مانده‌اند.
@@ -7151,74 +7156,160 @@ def _pro_wallet_item_metrics(item):
 
 def _pro_wallet_discover(force=False):
     """
-    # 🔎 شکار Walletهای واجد شرایط از Birdeye.
-    # فقط یک درخواست Leaderboard می‌زنیم تا مصرف CU کنترل شود.
-    # سپس همه شروط کاربر روی همان پاسخ اعمال می‌شوند.
+    🔎 شکار Walletهای واجد شرایط از Solana Tracker PnL V2.
+
+    فقط یک درخواست Leaderboard برای هر رفرش ارسال می‌شود.
+    شروط کاربر بعد از دریافت همان پاسخ اعمال می‌شوند:
+      WR >= 80% | P/L(ROI) >= 70% | معاملات >= 12 | موفق >= 9 | حجم >= $5,000
+
+    نکته: Solana Tracker در Leaderboard تعداد بردِ معامله را به‌صورت
+    فیلد مستقل برنمی‌گرداند؛ بنابراین «معاملات موفق» از trades × winRate
+    محاسبه می‌شود تا شرط حداقل 9 برد قابل اعمال باشد.
     """
-    # 🔋 قبل از هر درخواست 30-CU، سهمیه رایگان را بررسی می‌کنیم.
-    # این کار جلوی تکرار خطای 400 و مصرف بیهوده اعتبار را می‌گیرد.
-    remaining, credit_err = _pro_wallet_birdeye_remaining_cu()
-    if remaining is not None and remaining < 31:
-        return [], (f"اعتبار رایگان Birdeye کافی نیست: {remaining:.0f} CU باقی مانده؛ "
-                     "برای شکار حداقل 30 CU لازم است. پس از شارژ/ریست سهمیه دوباره تلاش می‌کنیم.")
-    if remaining is None and credit_err:
-        # اگر endpoint اعتبار در دسترس نبود، فقط یک درخواست اصلی را امتحان می‌کنیم؛
-        # اما در صورت 400/CU فوراً Cooldown فعال می‌شود.
-        pass
+    if not SOLANATRACKER_API_KEY:
+        return [], "SOLANATRACKER_API_KEY تنظیم نشده"
 
-    data, err = _pro_wallet_api_get(
-        "/trader/gainers-losers",
-        params={"type": PRO_WALLET_LOOKBACK, "sort_by": "realized_pnl", "sort_type": "desc", "offset": 0,
-                "limit": min(100, max(20, int(PRO_WALLET_DISCOVERY_LIMIT or 100)))},
-        timeout=15, force=force,
-    )
-    if data is None:
-        return [], err
-
-    items = _pro_wallet_extract_items(data)
-    candidates, seen = [], set()
-    rejected = {"trades": 0, "wins": 0, "wr": 0, "pnl": 0, "volume": 0, "wallet": 0}
-
-    for item in items:
-        wallet = _pro_wallet_wallet_from_item(item)
-        if not wallet or wallet in seen:
-            rejected["wallet"] += 1
-            continue
-        seen.add(wallet)
-        metrics = _pro_wallet_item_metrics(item)
-        metrics["wallet_address"] = wallet
-
-        if int(metrics["total_trade"]) < PRO_WALLET_MIN_TRADES:
-            rejected["trades"] += 1; continue
-        if int(metrics["total_win"]) < PRO_WALLET_MIN_WINS:
-            rejected["wins"] += 1; continue
-        if float(metrics["win_rate"]) < PRO_WALLET_MIN_WIN_RATE:
-            rejected["wr"] += 1; continue
-        if float(metrics["realized_profit_percent"]) < PRO_WALLET_MIN_PNL_PERCENT:
-            rejected["pnl"] += 1; continue
-        if float(metrics["total_volume_usd"]) < PRO_WALLET_MIN_VOLUME_USD:
-            rejected["volume"] += 1; continue
-
-        candidates.append(metrics)
-
-    if not items:
-        return [], "Birdeye پاسخ موفق داد ولی لیست Walletها خالی بود."
-
-    if not candidates:
-        return [], (
-            f"از {len(items)} کاندیدا هیچ Walletی همه شروط را نداشت. "
-            f"شرایط: WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}% | P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}% | "
-            f"معاملات≥{PRO_WALLET_MIN_TRADES} | موفق≥{PRO_WALLET_MIN_WINS} | حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f}. "
-            f"ردشدن‌ها: trades={rejected['trades']}, wins={rejected['wins']}, WR={rejected['wr']}, "
-            f"P/L={rejected['pnl']}, volume={rejected['volume']}."
+    try:
+        headers = {
+            "x-api-key": SOLANATRACKER_API_KEY,
+            "accept": "application/json",
+        }
+        params = {
+            "sort": "realized",
+            "direction": "desc",
+            "limit": min(100, max(20, int(PRO_WALLET_DISCOVERY_LIMIT or 100))),
+            "days": 90,
+            "minTrades": PRO_WALLET_MIN_TRADES,
+            "minWinRate": PRO_WALLET_MIN_WIN_RATE,
+            "minRoi": PRO_WALLET_MIN_PNL_PERCENT,
+            "excludeArbitrage": "true",
+            "pnlMode": "adjusted",
+        }
+        res = http_session.get(
+            f"{PRO_WALLET_SOLANATRACKER_BASE}/v2/pnl/leaderboard/top",
+            headers=headers,
+            params=params,
+            timeout=20,
         )
+        body = (res.text or "").strip()
+        try:
+            data = res.json()
+        except Exception:
+            data = None
 
-    candidates.sort(key=lambda x: (float(x["score"]), float(x["realized_profit_percent"]), float(x["win_rate"])), reverse=True)
-    return candidates[:25], (
-        f"{len(candidates)} Wallet واجد شرایط از {len(items)} کاندیدا پیدا شد "
-        f"(WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}%، P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}%، "
-        f"معاملات≥{PRO_WALLET_MIN_TRADES}، موفق≥{PRO_WALLET_MIN_WINS}، حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f})."
-    )
+        if res.status_code != 200:
+            if isinstance(data, dict):
+                msg = str(data.get("message") or data.get("error") or data.get("msg") or body[:300])
+            else:
+                msg = body[:300]
+            return [], f"Solana Tracker HTTP {res.status_code} — {msg or 'پاسخ نامشخص'}"
+
+        if not isinstance(data, dict):
+            return [], "Solana Tracker پاسخ JSON معتبر برنگرداند"
+
+        items = _pro_wallet_extract_items(data)
+        if not items:
+            return [], "Solana Tracker پاسخ موفق داد ولی Leaderboard خالی بود."
+
+        candidates = []
+        rejected = {"trades": 0, "wins": 0, "wr": 0, "pnl": 0, "volume": 0, "wallet": 0}
+        seen = set()
+
+        for item in items:
+            wallet = _pro_wallet_wallet_from_item(item)
+            if not wallet or wallet in seen:
+                rejected["wallet"] += 1
+                continue
+            seen.add(wallet)
+
+            period = item.get("period") if isinstance(item.get("period"), dict) else {}
+            counts = item.get("counts") if isinstance(item.get("counts"), dict) else {}
+            days = period.get("days") if isinstance(period.get("days"), dict) else {}
+            pnl = item.get("pnl") if isinstance(item.get("pnl"), dict) else {}
+
+            total_trade = _pro_wallet_int(counts, "trades", "totalTrades", default=0)
+            win_rate = _pro_wallet_number(item, "winRate", "win_rate", default=0.0)
+            if win_rate <= 0:
+                win_rate = _pro_wallet_number(days, "winRate", "win_rate", default=0.0)
+
+            realized_usd = _pro_wallet_number(period, "realized", default=0.0)
+            if realized_usd == 0:
+                realized_usd = _pro_wallet_number(pnl, "realized", default=0.0)
+
+            realized_pct = _pro_wallet_number(period, "roi", "ROI", default=0.0)
+            if realized_pct == 0:
+                realized_pct = _pro_wallet_number(item, "roi", "ROI", default=0.0)
+
+            total_volume_usd = _pro_wallet_number(period, "volume", default=0.0)
+            if total_volume_usd <= 0:
+                total_volume_usd = _pro_wallet_number(item, "volume", "totalVolume", "total_volume", default=0.0)
+
+            total_win = int(round((win_rate / 100.0) * total_trade)) if total_trade > 0 and win_rate > 0 else 0
+            total_win = max(0, min(total_trade, total_win))
+            total_loss = max(0, total_trade - total_win)
+
+            metrics = {
+                "wallet_address": wallet,
+                "win_rate": win_rate,
+                "total_trade": total_trade,
+                "total_win": total_win,
+                "total_loss": total_loss,
+                "total_buy": _pro_wallet_int(counts, "buys", default=0),
+                "total_sell": _pro_wallet_int(counts, "sells", default=0),
+                "realized_profit_usd": realized_usd,
+                "realized_profit_percent": realized_pct,
+                "unrealized_profit_usd": _pro_wallet_number(pnl, "unrealized", default=0.0),
+                "unrealized_profit_percent": 0.0,
+                "total_pnl_usd": _pro_wallet_number(pnl, "total", default=realized_usd),
+                "cashflow_usd": total_volume_usd,
+                "total_volume_usd": total_volume_usd,
+                "last_trade_at": _pro_wallet_number(item.get("timing", {}), "lastTrade", "last_trade", default=0.0),
+                "score": (
+                    max(0.0, min(100.0, win_rate)) * 0.40
+                    + max(-50.0, min(150.0, realized_pct)) * 0.30
+                    + min(100.0, float(total_trade)) * 0.15
+                    + min(100.0, math.log10(max(1.0, total_volume_usd)) * 12.0) * 0.15
+                ),
+            }
+
+            if total_trade < PRO_WALLET_MIN_TRADES:
+                rejected["trades"] += 1
+                continue
+            if total_win < PRO_WALLET_MIN_WINS:
+                rejected["wins"] += 1
+                continue
+            if win_rate < PRO_WALLET_MIN_WIN_RATE:
+                rejected["wr"] += 1
+                continue
+            if realized_pct < PRO_WALLET_MIN_PNL_PERCENT:
+                rejected["pnl"] += 1
+                continue
+            if total_volume_usd < PRO_WALLET_MIN_VOLUME_USD:
+                rejected["volume"] += 1
+                continue
+
+            candidates.append(metrics)
+
+        if not candidates:
+            return [], (
+                f"از {len(items)} کاندیدای Solana Tracker هیچ Walletی همه شروط را نداشت. "
+                f"شرایط: WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}% | P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}% | "
+                f"معاملات≥{PRO_WALLET_MIN_TRADES} | موفق≥{PRO_WALLET_MIN_WINS} | حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f}. "
+                f"ردشدن‌ها: trades={rejected['trades']}, wins={rejected['wins']}, WR={rejected['wr']}, "
+                f"P/L={rejected['pnl']}, volume={rejected['volume']}."
+            )
+
+        candidates.sort(
+            key=lambda x: (float(x["score"]), float(x["realized_profit_percent"]), float(x["win_rate"])),
+            reverse=True,
+        )
+        return candidates[:25], (
+            f"{len(candidates)} Wallet واجد شرایط از {len(items)} کاندیدای Solana Tracker پیدا شد "
+            f"(WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}%، P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}%، "
+            f"معاملات≥{PRO_WALLET_MIN_TRADES}، موفق≥{PRO_WALLET_MIN_WINS}، حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f})."
+        )
+    except Exception as exc:
+        return [], f"خطای Solana Tracker: {type(exc).__name__}: {exc}"
 
 
 def _pro_wallet_refresh(force=True):
@@ -7226,8 +7317,8 @@ def _pro_wallet_refresh(force=True):
     global PRO_WALLET_LAST_RADAR_AT, PRO_WALLET_LAST_ERROR, PRO_WALLET_SELECTED_WALLET
     if not _pro_wallet_db():
         return False, "DB رادار آماده نشد"
-    if not BIRDEYE_API_KEY:
-        PRO_WALLET_LAST_ERROR = "BIRDEYE_API_KEY تنظیم نشده"
+    if not SOLANATRACKER_API_KEY:
+        PRO_WALLET_LAST_ERROR = "SOLANATRACKER_API_KEY تنظیم نشده"
         return False, PRO_WALLET_LAST_ERROR
 
     wallets, err = _pro_wallet_discover(force=force)
@@ -7390,7 +7481,7 @@ def _pro_wallet_panel_text():
         f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
         f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
         f"🔐 مجوز اصلی معامله از ولت: {'🟢 ON' if WALLET_TRADE_PERMISSION else '🔴 OFF'}",
-        f"🔑 Birdeye API: {'🟢 تنظیم شده' if BIRDEYE_API_KEY else '🔴 تنظیم نشده'}",
+        f"🔑 Solana Tracker API: {'🟢 تنظیم شده' if SOLANATRACKER_API_KEY else '🔴 تنظیم نشده'}",
         f"👛 Wallet منتخب: `{selected or '-'}`",
         f"📊 Walletهای پیدا شده: `{len(rows)}` | واجد شرایط: `{len(qualified)}`",
         f"🎯 شروط شکار: WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}% | P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}% | معاملات≥{PRO_WALLET_MIN_TRADES} | موفق≥{PRO_WALLET_MIN_WINS} | حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f}",
