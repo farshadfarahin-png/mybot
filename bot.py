@@ -7521,10 +7521,16 @@ def _pro_wallet_keyboard():
     for wallet in manual_wallets[:10]:
         short = f"{wallet[:4]}…{wallet[-4:]}"
         mark = "🎯" if wallet == selected else "🧩"
-        keyboard.append([InlineKeyboardButton(
-            f"{mark} دستی {short}",
-            callback_data=f"pro_wallet_select:{wallet}"
-        )])
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{mark} دستی {short}",
+                callback_data=f"pro_wallet_select:{wallet}"
+            ),
+            InlineKeyboardButton(
+                "🗑 حذف",
+                callback_data=f"pro_wallet_delete_manual:{wallet}"
+            )
+        ])
 
     keyboard.append([
         InlineKeyboardButton("➕ افزودن Wallet دستی", callback_data="pro_wallet_add_manual")
@@ -9221,6 +9227,44 @@ def start_telegram_bot():
                     reply_markup=_pro_wallet_keyboard(),
                     parse_mode="Markdown"
                 )
+                return
+
+            elif data.startswith("pro_wallet_delete_manual:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                    return
+                wallet = str(data.split(":", 1)[1]).strip()
+                if not _pro_wallet_is_valid_address(wallet):
+                    await q.answer("Wallet نامعتبر است.", show_alert=True)
+                    return
+                try:
+                    with db_lock:
+                        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                        conn.execute(
+                            "DELETE FROM pro_wallet_manual_wallets WHERE wallet_address=?",
+                            (wallet,)
+                        )
+                        conn.commit()
+                        conn.close()
+
+                    global PRO_WALLET_SELECTED_WALLET, PRO_WALLET_LAST_COPY_SCAN_AT
+                    selected_now = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
+                    if selected_now == wallet:
+                        PRO_WALLET_SELECTED_WALLET = ""
+                        PRO_WALLET_LAST_COPY_SCAN_AT = 0
+                        _set_bot_setting("pro_wallet_selected_wallet", "")
+                        _set_bot_setting("pro_wallet_last_copy_scan_at", 0)
+                        _set_bot_setting("pro_wallet_last_copy_wallet", "")
+
+                    await q.answer("Wallet دستی حذف شد.", show_alert=True)
+                    await q.edit_message_text(
+                        _pro_wallet_panel_text(),
+                        reply_markup=_pro_wallet_keyboard(),
+                        parse_mode="Markdown"
+                    )
+                except Exception as exc:
+                    logger.exception("Professional Wallet manual wallet delete error: %s", exc)
+                    await q.answer("حذف Wallet انجام نشد.", show_alert=True)
                 return
 
             elif data.startswith("pro_wallet_select:"):
