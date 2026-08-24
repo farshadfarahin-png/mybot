@@ -182,12 +182,12 @@ COPY_TRADING_ENABLED = True
 # Independent module: it does not alter existing signal/learning statistics or Neon logic.
 PRO_WALLET_RADAR_ENABLED = False
 PRO_WALLET_COPY_PERMISSION = False
-PRO_WALLET_RADAR_INTERVAL_SECONDS = 1200.0  # 20 minutes; wallet discovery/statistics refresh
+PRO_WALLET_RADAR_INTERVAL_SECONDS = 600.0  # 🔄 بروزرسانی رادار هر 10 دقیقه
 PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 60.0  # 60 seconds for real-copy monitoring
-PRO_WALLET_MIN_TRADES = 10
-PRO_WALLET_MIN_WIN_RATE = 65.0
-PRO_WALLET_DISCOVERY_LIMIT = 12
-PRO_WALLET_PNL_CHECK_LIMIT = 10
+PRO_WALLET_MIN_TRADES = 5
+PRO_WALLET_MIN_WIN_RATE = 55.0
+PRO_WALLET_DISCOVERY_LIMIT = 25
+PRO_WALLET_PNL_CHECK_LIMIT = 15
 PRO_WALLET_LOOKBACK = "30d"
 PRO_WALLET_STATE_LOCK = RLock()
 PRO_WALLET_LAST_RADAR_AT = 0.0
@@ -6857,13 +6857,14 @@ def _pro_wallet_toggle_radar():
     return PRO_WALLET_RADAR_ENABLED
 
 def _pro_wallet_toggle_copy():
+    # 🔐 کلید «اجازه کپی واقعی Wallet» مستقل از انتخاب Wallet است.
+    # یعنی می‌توانی کلید را ON کنی و بعد Wallet را انتخاب کنی؛
+    # تا وقتی Wallet انتخاب نشده، هیچ معامله‌ای اجرا نخواهد شد.
     global PRO_WALLET_COPY_PERMISSION
-    PRO_WALLET_COPY_PERMISSION = not bool(PRO_WALLET_COPY_PERMISSION)
-    # Never allow an unknown/default wallet to start real copying.
-    if not PRO_WALLET_COPY_PERMISSION:
-        _pro_wallet_set_setting_bool("pro_wallet_copy_permission", False)
-    else:
-        _pro_wallet_set_setting_bool("pro_wallet_copy_permission", True)
+    _pro_wallet_load_switches()
+    new_state = not bool(PRO_WALLET_COPY_PERMISSION)
+    ok = _pro_wallet_set_setting_bool("pro_wallet_copy_permission", new_state)
+    PRO_WALLET_COPY_PERMISSION = new_state if ok else False
     _pro_wallet_db()
     return PRO_WALLET_COPY_PERMISSION
 
@@ -6882,9 +6883,15 @@ def _pro_wallet_api_get(path, params=None, timeout=10):
             params=params or {},
             timeout=timeout,
         )
+        try:
+            payload = res.json()
+        except Exception:
+            payload = {}
         if res.status_code != 200:
-            return None, f"Birdeye HTTP {res.status_code}"
-        payload = res.json()
+            detail = ""
+            if isinstance(payload, dict):
+                detail = str(payload.get("message") or payload.get("error") or payload.get("msg") or "").strip()
+            return None, f"Birdeye HTTP {res.status_code}" + (f" — {detail}" if detail else "")
         if not payload.get("success", True):
             return None, str(payload.get("message") or "Birdeye request failed")
         return payload.get("data") if isinstance(payload, dict) else None, ""
@@ -6925,88 +6932,77 @@ def _pro_wallet_extract_items(data):
 
 def _pro_wallet_discover():
     """
-    Discover many trader wallets from Birdeye and fall back to token-top-trader
-    discovery when the global trader board is empty/unavailable.
-    This function only reads external data and never touches the main bot DB.
+    🔭 کشف چندین Wallet از Birdeye.
+    مسیر ۱: Trader Gainers/Losers.
+    مسیر ۲: Top Traders چند توکن فعال سولانا.
+    این بخش فقط داده می‌خواند و هیچ BUY/SELL اجرا نمی‌کند.
     """
-    candidates = []
-    seen = set()
-    errors = []
+    candidates, seen, errors = [], set(), []
 
     def add_wallets(items):
         for item in items or []:
             if not isinstance(item, dict):
                 continue
             wallet = str(
-                item.get("address")
-                or item.get("wallet")
-                or item.get("walletAddress")
-                or item.get("owner")
-                or item.get("trader")
-                or item.get("account")
-                or ""
+                item.get("address") or item.get("wallet") or item.get("walletAddress")
+                or item.get("owner") or item.get("trader") or item.get("account") or ""
             ).strip()
             if wallet and len(wallet) >= 20 and wallet not in seen:
                 seen.add(wallet)
                 candidates.append(wallet)
 
-    # Primary: global trader leaderboard. We deliberately ask for more than the
-    # final ranking count so the PnL verification stage has enough candidates.
-    for sort_by in ("realized_pnl", "PnL"):
-        data, err = _pro_wallet_api_get(
-            "/trader/gainers-losers",
-            params={
-                "type": PRO_WALLET_LOOKBACK,
-                "sort_by": sort_by,
-                "sort_type": "desc",
-                "offset": 0,
-                "limit": min(100, max(25, PRO_WALLET_DISCOVERY_LIMIT * 5)),
-            },
-            timeout=12,
-        )
-        if data is not None:
-            add_wallets(_pro_wallet_extract_items(data))
-            if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
-                break
-        elif err:
-            errors.append(f"leaderboard/{sort_by}: {err}")
+    # 🏆 مسیر رسمی Leaderboard؛ پارامترها مطابق مستندات فعلی Birdeye هستند.
+    for window in (PRO_WALLET_LOOKBACK, "7d", "24h"):
+        for sort_by in ("realized_pnl", "PnL", "unrealized_pnl"):
+            data, err = _pro_wallet_api_get(
+                "/trader/gainers-losers",
+                params={
+                    "type": window, "sort_by": sort_by, "sort_type": "desc",
+                    "offset": 0, "limit": min(100, max(25, PRO_WALLET_DISCOVERY_LIMIT * 2)),
+                },
+                timeout=12,
+            )
+            if data is not None:
+                add_wallets(_pro_wallet_extract_items(data))
+                if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
+                    return candidates[:PRO_WALLET_DISCOVERY_LIMIT], ""
+            elif err:
+                errors.append(f"leaderboard/{window}/{sort_by}: {err}")
 
-    # Fallback: discover traders from several currently active Solana tokens.
-    # This fixes the common case where the global trader board returns no items
-    # for a Standard/free key while token-level top traders remain available.
-    if len(candidates) < max(5, PRO_WALLET_PNL_CHECK_LIMIT):
-        try:
-            market_tokens = get_real_market_trending_tokens()[:3]
-        except Exception as exc:
-            market_tokens = []
-            errors.append(f"market-token fallback: {exc}")
-        for token_addr in market_tokens:
+    # 🔎 مسیر مستقل Top Traders؛ برای هر توکن چند معیار فعالیت را امتحان می‌کنیم.
+    try:
+        market_tokens = get_real_market_trending_tokens()[:8]
+    except Exception as exc:
+        market_tokens = []
+        errors.append(f"market-token fallback: {type(exc).__name__}: {exc}")
+
+    # اگر DexScreener موقتاً داده نداد، این دو توکن استاندارد سولانا مسیر را زنده نگه می‌دارند.
+    for token_addr in (SOL_MINT, USDC_MINT):
+        if token_addr not in market_tokens:
+            market_tokens.append(token_addr)
+
+    for token_addr in market_tokens:
+        if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
+            break
+        for sort_by in ("volume", "trade", "realized_pnl"):
             if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
                 break
             data, err = _pro_wallet_api_get(
                 "/defi/v2/tokens/top_traders",
                 params={
-                    "address": token_addr,
-                    "time_frame": PRO_WALLET_LOOKBACK,
-                    "sort_by": "realized_pnl",
-                    "sort_type": "desc",
-                    "offset": 0,
-                    "limit": 10,
-                    "ui_amount_mode": "scaled",
+                    "address": token_addr, "time_frame": PRO_WALLET_LOOKBACK,
+                    "sort_by": sort_by, "sort_type": "desc", "offset": 0, "limit": 10,
                 },
                 timeout=12,
             )
             if data is not None:
                 add_wallets(_pro_wallet_extract_items(data))
             elif err:
-                errors.append(f"top_traders/{token_addr[:8]}: {err}")
+                errors.append(f"top_traders/{token_addr[:8]}/{sort_by}: {err}")
 
     if not candidates:
-        if errors:
-            return [], " | ".join(errors[-3:])
-        return [], "هنوز Wallet مناسب از Birdeye دریافت نشد"
-    return candidates[:max(25, PRO_WALLET_DISCOVERY_LIMIT * 3)], ""
-
+        return [], " | ".join(errors[-5:]) if errors else "هنوز Wallet مناسبی از Birdeye دریافت نشد"
+    return candidates[:PRO_WALLET_DISCOVERY_LIMIT], ""
 
 def _pro_wallet_refresh():
     global PRO_WALLET_LAST_RADAR_AT, PRO_WALLET_LAST_ERROR, PRO_WALLET_SELECTED_WALLET
@@ -7233,7 +7229,9 @@ def _pro_wallet_stats():
 
 
 def _pro_wallet_panel_text():
+    # 📊 وضعیت مجوزها بعد از Restart/Deploy از دیتابیس دوباره خوانده می‌شود.
     _pro_wallet_load_switches()
+    _load_wallet_trade_permission()
     rows = _pro_wallet_stats()
     selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
     last_at = PRO_WALLET_LAST_RADAR_AT
@@ -8934,11 +8932,9 @@ def start_telegram_bot():
                     await q.answer("اول اجازه رصد را روشن کن.", show_alert=True)
                     return
 
+                _pro_wallet_load_switches()
+                _load_wallet_trade_permission()
                 selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
-                if not PRO_WALLET_COPY_PERMISSION and not selected:
-                    await q.answer("اول یک Wallet را از لیست انتخاب کن.", show_alert=True)
-                    return
-
                 state = _pro_wallet_toggle_copy()
                 if state and not WALLET_TRADE_PERMISSION:
                     # Permission can be ON in the radar UI, but real execution remains
@@ -8956,9 +8952,9 @@ def start_telegram_bot():
                     _set_bot_setting("pro_wallet_last_copy_wallet", selected)
                     text = (
                         "🟢 **کپی واقعی Wallet روشن شد.**\n\n"
-                        f"🎯 Wallet منتخب: `{selected}`\n"
-                        "📌 از همین لحظه فقط معاملات جدید این Wallet بررسی می‌شوند؛ معاملات قبلی هرگز replay نمی‌شوند.\n"
-                        "⚡ مانیتورینگ مستقل کپی واقعی فعال است."
+                        f"🎯 Wallet منتخب: `{selected or '- هنوز انتخاب نشده -'}`\n"
+                        + ("📌 از همین لحظه فقط معاملات جدید این Wallet بررسی می‌شوند؛ معاملات قبلی هرگز replay نمی‌شوند.\n" if selected else "⏳ کپی آماده است؛ به محض انتخاب Wallet، فقط معاملات جدید آن بررسی می‌شوند.\n")
+                        + "⚡ مانیتورینگ مستقل کپی واقعی فعال است."
                     )
                 else:
                     text = "🔴 **اجازه کپی واقعی Wallet خاموش شد.**\n\n✅ رصد و آمار می‌توانند مستقل ادامه داشته باشند."
