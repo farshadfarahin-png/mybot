@@ -327,8 +327,6 @@ NEON_SNAPSHOT_INTERVAL_SECONDS = 30
 NEON_SNAPSHOT_TABLE = "bot_sqlite_snapshots"
 NEON_SNAPSHOT_LOCK = Lock()
 NEON_SNAPSHOT_RUNNING = False
-NEON_LAST_SUCCESS_AT = 0.0
-NEON_LAST_ERROR = ""
 
 try:
     import psycopg2
@@ -391,9 +389,7 @@ def _make_consistent_sqlite_backup():
 
 
 def _upload_sqlite_snapshot_to_neon():
-    global NEON_LAST_SUCCESS_AT, NEON_LAST_ERROR
     if not _ensure_neon_snapshot_table():
-        NEON_LAST_ERROR = "Neon is not configured or psycopg2 is unavailable."
         return False
     backup_path = _make_consistent_sqlite_backup()
     if backup_path is None:
@@ -419,12 +415,9 @@ def _upload_sqlite_snapshot_to_neon():
                         updated_at = EXCLUDED.updated_at
                 """, (next_id, psycopg2.Binary(data)))
         conn.close()
-        NEON_LAST_SUCCESS_AT = time.time()
-        NEON_LAST_ERROR = ""
         logger.info("☁️ Neon: snapshot دیتابیس SQLite با موفقیت ذخیره شد.")
         return True
     except Exception as e:
-        NEON_LAST_ERROR = f"{type(e).__name__}: {e}"[:300]
         logger.warning(f"⚠️ Neon snapshot upload failed; SQLite remains active: {e}")
         return False
     finally:
@@ -1735,15 +1728,6 @@ def _set_channel_signal_enabled(value):
     CHANNEL_SIGNAL_ENABLED = new_value
     return True
 
-# Isolated live security-panel controls (no trading/signal impact).
-_SECURITY_PANEL_REFRESH_INTERVAL = 5.0
-_SECURITY_PANEL_REFRESH_TASKS = {}
-_SECURITY_PANEL_MAX_TELEGRAM = 50
-_SECURITY_PANEL_MAX_WEB = 50
-_SECURITY_PANEL_MAX_BLOCKS = 50
-# Telegram hard limit is 4096 chars. Keep a safety margin for formatting/edit operations.
-_SECURITY_PANEL_MAX_TEXT = 4000
-
 _SECURITY_RATE_LOCK = Lock()
 _SECURITY_RATE_BUCKETS = {}
 _SECURITY_RATE_WINDOW = 60.0
@@ -1756,16 +1740,6 @@ _SECURITY_SUSPICIOUS_MARKERS = (
     "/.env", "/.git", "/wp-admin", "/wp-login", "/phpmyadmin", "/xmlrpc.php",
     "/vendor/phpunit", "/cgi-bin/", "../", "%2e%2e", "%252e", "jndi:",
 )
-_SECURITY_MONITOR_UA_MARKERS = ("uptimerobot", "uptime robot")
-
-
-def _security_is_monitoring_probe(user_agent="", remote_ip=""):
-    """Hide known uptime/health-check traffic from the human security panel.
-    The raw audit record is still retained; this is display filtering only.
-    """
-    ua = str(user_agent or "").lower()
-    ip = str(remote_ip or "").strip().lower()
-    return any(marker in ua for marker in _SECURITY_MONITOR_UA_MARKERS)
 
 
 def _security_request_id():
@@ -2042,42 +2016,27 @@ def _security_connections_snapshot(limit=30):
                     "name": (" ".join(x for x in (r[4], r[5]) if x)).strip(),
                     "last_seen": float(r[6] or 0), "events": int(r[7] or 0),
                 })
-            # Fetch extra rows because benign monitoring probes are filtered from the UI.
-            web_limit = max(int(limit) * 5, 50)
             cur.execute("""
                 SELECT remote_ip, user_agent, MAX(created_at) AS last_seen, COUNT(*) AS events
                 FROM security_audit
                 WHERE source='web' AND remote_ip!=''
                 GROUP BY remote_ip, user_agent
                 ORDER BY last_seen DESC LIMIT ?
-            """, (web_limit,))
+            """, (int(limit),))
             for r in cur.fetchall():
-                remote_ip = str(r[0] or "")
-                user_agent = str(r[1] or "")
-                if _security_is_monitoring_probe(user_agent, remote_ip):
-                    continue
                 out["web_sources"].append({
-                    "remote_ip": remote_ip, "user_agent": user_agent,
+                    "remote_ip": str(r[0] or ""), "user_agent": str(r[1] or ""),
                     "last_seen": float(r[2] or 0), "events": int(r[3] or 0),
                 })
-                if len(out["web_sources"]) >= int(limit):
-                    break
             cur.execute("""
-                SELECT source,event_type,actor_id,chat_id,remote_ip,details,created_at,user_agent
-                FROM security_audit ORDER BY id DESC LIMIT 100
+                SELECT source,event_type,actor_id,chat_id,remote_ip,details,created_at
+                FROM security_audit ORDER BY id DESC LIMIT 20
             """)
-            for r in cur.fetchall():
-                remote_ip = str(r[4] or "")
-                user_agent = str(r[7] or "")
-                if str(r[0] or "") == "web" and _security_is_monitoring_probe(user_agent, remote_ip):
-                    continue
-                out["recent_events"].append({
-                    "source":r[0],"event_type":r[1],"actor_id":r[2],"chat_id":r[3],
-                    "remote_ip":remote_ip,"details":r[5],"created_at":float(r[6] or 0),
-                    "user_agent":user_agent,
-                })
-                if len(out["recent_events"]) >= 20:
-                    break
+            out["recent_events"] = [
+                {"source":r[0],"event_type":r[1],"actor_id":r[2],"chat_id":r[3],
+                 "remote_ip":r[4],"details":r[5],"created_at":float(r[6] or 0)}
+                for r in cur.fetchall()
+            ]
             conn.close()
     except Exception as exc:
         logger.debug("Security snapshot read failed: %s", exc)
@@ -2296,91 +2255,49 @@ def _security_blocked_telegram_update(update):
 
 _security_connections_snapshot_base=_security_connections_snapshot
 def _security_connections_snapshot(limit=30):
-    limit=max(1,min(int(limit or 30),_SECURITY_PANEL_MAX_TELEGRAM,_SECURITY_PANEL_MAX_WEB))
     out=_security_connections_snapshot_base(limit); _security_ensure_block_table()
-    # Neon status is read-only here; it never blocks or alters the security panel.
-    if NEON_DATABASE_URL and psycopg2 is not None:
-        neon_state = "🟢 فعال"
-        if NEON_LAST_SUCCESS_AT:
-            neon_last = datetime.fromtimestamp(NEON_LAST_SUCCESS_AT).strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            neon_last = "هنوز snapshot موفقی ثبت نشده"
-    elif NEON_DATABASE_URL:
-        neon_state = "🟠 DATABASE_URL هست ولی psycopg2 در دسترس نیست"
-        neon_last = "-"
-    else:
-        neon_state = "🔴 تنظیم نشده"
-        neon_last = "-"
-    out["neon_status"] = {"state": neon_state, "last_success": neon_last, "last_error": NEON_LAST_ERROR[:180]}
     try:
         with db_lock:
             conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
-            rows=cur.execute("SELECT block_type,block_value,reason,created_at,created_by FROM security_blocks WHERE active=1 ORDER BY created_at DESC LIMIT ?",(_SECURITY_PANEL_MAX_BLOCKS,)).fetchall(); conn.close()
+            rows=cur.execute("SELECT block_type,block_value,reason,created_at,created_by FROM security_blocks WHERE active=1 ORDER BY created_at DESC").fetchall(); conn.close()
         out['blocks']=[{'type':str(r[0] or ''),'value':str(r[1] or ''),'reason':str(r[2] or ''),'created_at':float(r[3] or 0),'created_by':str(r[4] or '')} for r in rows]
-    except Exception:
-        out['blocks']=[]
+    except Exception: out['blocks']=[]
     for x in out.get('telegram_users',[]): x['blocked']=_security_block_exists('telegram',str(x.get('actor_id') or ''))
     for x in out.get('web_sources',[]): x['blocked']=_security_block_exists('ip',str(x.get('remote_ip') or ''))
     return out
 
-def _security_connections_text(snap=None):
-    snap=snap if isinstance(snap,dict) else _security_connections_snapshot(50)
-    lines=[
-        "🛡 **اتصالات و دسترسی‌های مشاهده‌شده — کنترل امنیتی**","",
-        f"📢 انتشار سیگنال به کانال: {'🟢 ON' if snap['channel_signal_enabled'] else '🔴 OFF'}",
-        f"📢 مقصد فعلی: `{snap['channel_id'] or 'تنظیم نشده'}`",
-        f"🔗 لینک دعوت ذخیره‌شده: {'🟢 بله' if snap['channel_invite_configured'] else '🔴 خیر'}",
-        f"☁️ Neon SQLite Mirror: {snap.get('neon_status', {}).get('state', '🔴 نامشخص')}",
-        f"   آخرین snapshot موفق: `{snap.get('neon_status', {}).get('last_success', '-')}`",
-        f"👥 مشترک‌های ثبت‌شده DB: `{len(snap['subscribers'])}`",
-        f"👁 Telegram دیده‌شده: `{len(snap.get('telegram_users') or [])}`",
-        f"🌐 Web دیده‌شده: `{len(snap.get('web_sources') or [])}",
-        "", "👤 **Telegram:**"
-    ]
-    trs=(snap.get('telegram_users') or [])[:_SECURITY_PANEL_MAX_TELEGRAM]
-    wrs=(snap.get('web_sources') or [])[:_SECURITY_PANEL_MAX_WEB]
-    brs=(snap.get('blocks') or [])[:_SECURITY_PANEL_MAX_BLOCKS]
-    if trs:
-        for x in trs:
-            user=f"@{x.get('username')}" if x.get('username') else '-'
-            state='🚫 BLOCKED' if x.get('blocked') else '🟢 ACTIVE'
-            lines.append(f"• ID=`{x.get('actor_id','')}` | {user} | chat={x.get('chat_type') or '-'} | events={x.get('events',0)} | {state}")
-    else: lines.append('• هنوز فعالیتی ثبت نشده است.')
-    lines += ["", "🌐 **Web:**"]
-    if wrs:
-        for x in wrs:
-            state='🚫 BLOCKED' if x.get('blocked') else '🟢 ACTIVE'
-            ua=str(x.get('user_agent') or '')[:90]
-            lines.append(f"• `{x.get('remote_ip','')}` | events={x.get('events',0)} | {state} | {ua}")
-    else: lines.append('• هنوز درخواست وبی ثبت نشده است.')
-    lines += ["", "🚫 **مسدودی‌های فعال:**"]
-    if brs:
-        for b in brs: lines.append(f"• `{b.get('type','')}`=`{b.get('value','')}` | {str(b.get('reason',''))[:100]}")
+def _security_connections_text():
+    snap=_security_connections_snapshot(); lines=["🛡 **اتصالات و دسترسی‌های مشاهده‌شده — کنترل امنیتی**","",f"📢 انتشار سیگنال به کانال: {'🟢 ON' if snap['channel_signal_enabled'] else '🔴 OFF'}",f"📢 مقصد فعلی: `{snap['channel_id'] or 'تنظیم نشده'}`",f"🔗 لینک دعوت ذخیره‌شده: {'🟢 بله' if snap['channel_invite_configured'] else '🔴 خیر'}","",f"👥 مشترک‌های ثبت‌شده DB: `{len(snap['subscribers'])}`",f"👁 Telegram دیده‌شده: `{len(snap['telegram_users'])}`",f"🌐 Web دیده‌شده: `{len(snap['web_sources'])}`","","👤 **Telegram:**"]
+    for x in (snap.get('telegram_users') or [])[:10]:
+        user=f"@{x['username']}" if x.get('username') else '-'; state='🚫 BLOCKED' if x.get('blocked') else '🟢 ACTIVE'; lines.append(f"• ID=`{x['actor_id']}` | {user} | chat={x.get('chat_type') or '-'} | events={x.get('events',0)} | {state}")
+    if not snap.get('telegram_users'): lines.append('• هنوز فعالیتی ثبت نشده است.')
+    lines += ["","🌐 **Web:**"]
+    for x in (snap.get('web_sources') or [])[:10]:
+        state='🚫 BLOCKED' if x.get('blocked') else '🟢 ACTIVE'; lines.append(f"• `{x['remote_ip']}` | events={x.get('events',0)} | {state} | {x.get('user_agent','')[:70]}")
+    if not snap.get('web_sources'): lines.append('• هنوز درخواست وبی ثبت نشده است.')
+    lines += ["","🚫 **مسدودی‌های فعال:**"]
+    if snap.get('blocks'):
+        for b in snap['blocks'][:20]: lines.append(f"• `{b['type']}`=`{b['value']}` | {b['reason'][:80]}")
     else: lines.append('• هیچ موردی مسدود نیست.')
-    lines += ["", "⚠️ مسدودسازی واقعی است؛ دسترسی جدید رد می‌شود و لاگ‌های قبلی حذف نمی‌شوند.", "⚠️ Bot API فهرست مخفی استفاده‌کنندگان از Bot Token را ارائه نمی‌کند."]
-    full='\n'.join(lines)
-    if len(full)<=_SECURITY_PANEL_MAX_TEXT: return full
-    clipped=[]; used=0
-    for line in lines:
-        extra=len(line)+(1 if clipped else 0)
-        if used+extra>_SECURITY_PANEL_MAX_TEXT-180: break
-        clipped.append(line); used+=extra
-    clipped += ["", "⚠️ نمایش برای جلوگیری از خطای طول پیام محدود شده است؛ رکوردها در DB باقی می‌مانند.", "🔄 این پنل هر ۵ ثانیه خودکار به‌روزرسانی می‌شود."]
-    return '\n'.join(clipped)[:_SECURITY_PANEL_MAX_TEXT]
+    lines += ["","⚠️ مسدودسازی واقعی است؛ دسترسی جدید رد می‌شود و لاگ‌های قبلی حذف نمی‌شوند.","⚠️ Bot API فهرست مخفی استفاده‌کنندگان از Bot Token را ارائه نمی‌کند."]
+    return '\n'.join(lines)
 
-def _security_connections_keyboard(snap=None,max_entities=20):
-    snap=snap if isinstance(snap,dict) else _security_connections_snapshot(50); rows=[]; represented=set()
+def _security_connections_keyboard(snap=None,max_entities=8):
+    snap=snap if isinstance(snap,dict) else _security_connections_snapshot(30); rows=[]
+    represented=set()
     for x in (snap.get('telegram_users') or [])[:max_entities]:
         uid=str(x.get('actor_id') or '').strip()
         if not uid or (TELEGRAM_CHAT_ID and uid==str(TELEGRAM_CHAT_ID)): continue
-        represented.add(('telegram',uid)); action='security_confirm_unblock_tg' if x.get('blocked') else 'security_confirm_block_tg'; label=f"🟢 رفع مسدودی TG {uid}" if x.get('blocked') else f"🚫 مسدود TG {uid}"
+        represented.add(('telegram',uid))
+        action='security_confirm_unblock_tg' if x.get('blocked') else 'security_confirm_block_tg'; label=f"🟢 رفع مسدودی TG {uid}" if x.get('blocked') else f"🚫 مسدود TG {uid}"
         rows.append([InlineKeyboardButton(label,callback_data=f"{action}:{uid}")])
     for x in (snap.get('web_sources') or [])[:max_entities]:
         ip=str(x.get('remote_ip') or '').strip()
         if not ip or ip in ('127.0.0.1','::1','localhost'): continue
-        represented.add(('ip',ip)); action='security_confirm_unblock_ip' if x.get('blocked') else 'security_confirm_block_ip'; label=f"🟢 رفع مسدودی IP {ip}" if x.get('blocked') else f"🚫 مسدود IP {ip}"
+        represented.add(('ip',ip))
+        action='security_confirm_unblock_ip' if x.get('blocked') else 'security_confirm_block_ip'; label=f"🟢 رفع مسدودی IP {ip}" if x.get('blocked') else f"🚫 مسدود IP {ip}"
         rows.append([InlineKeyboardButton(label,callback_data=f"{action}:{ip}")])
-    for b in (snap.get('blocks') or [])[:_SECURITY_PANEL_MAX_BLOCKS]:
+    for b in (snap.get('blocks') or []):
         bt=str(b.get('type') or ''); bv=str(b.get('value') or '')
         if bt not in ('telegram','ip') or not bv or (bt,bv) in represented: continue
         if bt=='telegram':
@@ -2388,43 +2305,8 @@ def _security_connections_keyboard(snap=None,max_entities=20):
             rows.append([InlineKeyboardButton(f"🟢 رفع مسدودی TG {bv}",callback_data=f"security_confirm_unblock_tg:{bv}")])
         elif bv not in ('127.0.0.1','::1','localhost'):
             rows.append([InlineKeyboardButton(f"🟢 رفع مسدودی IP {bv}",callback_data=f"security_confirm_unblock_ip:{bv}")])
-    rows.append([InlineKeyboardButton('🔄 بروزرسانی',callback_data='connections')])
-    rows.append([InlineKeyboardButton('🔙 بازگشت',callback_data='home')])
+    rows.append([InlineKeyboardButton('🔄 بروزرسانی',callback_data='connections')]); rows.append([InlineKeyboardButton('🔙 بازگشت',callback_data='home')])
     return InlineKeyboardMarkup(rows)
-
-def _security_panel_cancel_refresh(chat_id):
-    task=_SECURITY_PANEL_REFRESH_TASKS.pop(str(chat_id),None)
-    if task and not task.done(): task.cancel()
-
-async def _security_panel_refresh_loop(bot,chat_id,message_id):
-    key=str(chat_id)
-    try:
-        while True:
-            await asyncio.sleep(_SECURITY_PANEL_REFRESH_INTERVAL)
-            snap=_security_connections_snapshot(50)
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=_security_connections_text(snap).replace("**", "").replace("`", ""),
-                    reply_markup=_security_connections_keyboard(snap),
-                    parse_mode=None
-                )
-            except Exception as exc:
-                if 'not modified' in str(exc).lower(): continue
-                raise
-    except asyncio.CancelledError:
-        return
-    except Exception as exc:
-        logger.debug("Security panel auto-refresh stopped for %s: %s",chat_id,exc)
-    finally:
-        if _SECURITY_PANEL_REFRESH_TASKS.get(key) is asyncio.current_task(): _SECURITY_PANEL_REFRESH_TASKS.pop(key,None)
-
-def _security_panel_start_refresh(context,chat_id,message_id):
-    _security_panel_cancel_refresh(chat_id)
-    task=asyncio.create_task(_security_panel_refresh_loop(context.bot,chat_id,message_id))
-    _SECURITY_PANEL_REFRESH_TASKS[str(chat_id)]=task
-    return task
 
 def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="", execution_tx="", pnl_percent=None):
     # کانال باید تمام سیگنال‌های معتبر BUY و SELL را که از مسیر اصلی آمده‌اند منتشر کند.
@@ -7743,29 +7625,42 @@ def _main_keyboard(is_admin=False):
         rows.append([InlineKeyboardButton("💎 آمار Professional Wallet", callback_data="pro_wallet_panel")])
     return InlineKeyboardMarkup(rows)
 
-def _bottom_panel_inline_keyboard(is_open=False, is_admin=False):
-    """Inline callback control: no toggle command is sent to the chat."""
-    if not is_open:
-        return InlineKeyboardMarkup([[
-            InlineKeyboardButton("🎛 چهار کلید", callback_data="bottom_panel_open")
-        ]])
-    rows = [
-        [InlineKeyboardButton("🎛 چهار کلید", callback_data="bottom_panel_close")],
-        [InlineKeyboardButton("📊 وضعیت موتورها", callback_data="bottom_status_engines"),
-         InlineKeyboardButton("💼 وضعیت ولت", callback_data="bottom_status_wallet")],
-        [InlineKeyboardButton("📈 آمار معاملات", callback_data="bottom_status_trades"),
-         InlineKeyboardButton("💎 آمار Wallet", callback_data="pro_wallet_panel")],
-    ]
-    if is_admin:
-        rows.append([InlineKeyboardButton("👑 پنل مدیریت", callback_data="admin"),
-                     InlineKeyboardButton("🔐 امنیت/وضعیت", callback_data="security")])
-        rows.append([InlineKeyboardButton("🛡 اتصالات و دسترسی‌ها", callback_data="connections")])
-    return InlineKeyboardMarkup(rows)
-
 def _persistent_bottom_keyboard(is_admin=False):
-    """Deprecated: the bottom control is inline so button presses never appear as chat messages."""
-    return None
-
+    """
+    پنل پایین تلگرام به‌صورت Reply Keyboard.
+    پنل Inline فعلی حذف/جابجا نمی‌شود؛ این فقط یک نسخهٔ دوم و دائمی از
+    کنترل‌های اصلی است تا هنگام زیاد شدن سیگنال‌ها همچنان پایین چت در دسترس باشد.
+    """
+    rows = [
+        ["📊 وضعیت موتورها", "💼 وضعیت ولت"],
+        ["📈 آمار معاملات", "🎛 کنترل موتورها"],
+    ]
+    if WEBAPP_URL:
+        rows.append(["📱 Mini App VIP"])
+    elif CHANNEL_INVITE_LINK:
+        rows.append(["📢 کانال VIP"])
+    if is_admin:
+        rows += [
+            [f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"],
+            [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"],
+            [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"],
+            ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"],
+            ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"],
+            ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"],
+            [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"],
+            [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
+            ["🧠 مرکز یادگیری"],
+            [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"],
+            [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
+            ["🎁 عضویت رایگان کاربر"],
+        ]
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        is_persistent=False,
+        selective=False,
+    )
 
 ENGINE_SWITCHES = [
     ("Analysis", "ANALYSIS_ENGINE_ENABLED", "toggle_engine_analysis"),
@@ -7856,10 +7751,12 @@ def start_telegram_bot():
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
-            # پنل کنترل فقط Inline است؛ لمس دکمه‌ها هیچ پیام متنی جدیدی در چت ایجاد نمی‌کند.
+            # پنل فعلی بالا عمداً حفظ می‌شود.
+            # این پیام دوم فقط Reply Keyboard دائمی پایین تلگرام را فعال می‌کند.
             await update.message.reply_text(
-                "🎛 **پنل کنترل**\n\nپنل بسته است.",
-                reply_markup=_bottom_panel_inline_keyboard(False, is_admin),
+                "🎛 **پنل کنترل پایین فعال است**\n"
+                "هر زمان سیگنال‌های جدید بیایند، این پنل پایین چت باقی می‌ماند.",
+                reply_markup=_persistent_bottom_keyboard(is_admin),
                 parse_mode="Markdown"
             )
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
@@ -8026,19 +7923,8 @@ def start_telegram_bot():
                 return
 
             label = msg.text.strip()
-            # If the user leaves the security panel via a Reply Keyboard action,
-            # stop editing the old security message. The connections action above
-            # starts a fresh refresh task for its new message.
-            _security_panel_cancel_refresh(msg.chat_id)
             cid = str(update.effective_user.id)
             is_admin = bool(TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID))
-
-            # یک کلید ثابت پایین: همان کلید هم باز می‌کند و هم می‌بندد.
-            # وضعیت فقط در context کاربر نگه‌داری می‌شود؛ پنل اصلی ربات دست‌نخورده می‌ماند.
-            if label == "🎛 چهار کلید":
-                # Toggle واقعی فقط با InlineKeyboard callback انجام می‌شود.
-                # این مسیر قدیمی عمداً هیچ پیام یا دستور جدیدی تولید نمی‌کند.
-                return
 
             # وضعیت موتورها
             if label == "📊 وضعیت موتورها":
@@ -8208,21 +8094,6 @@ def start_telegram_bot():
                 return
 
             # Admin / security
-            if label == "🛡 اتصالات و دسترسی‌های مشاهده‌شده":
-                if not is_admin:
-                    await msg.reply_text("⛔ فقط ادمین.")
-                    return
-                _security_panel_cancel_refresh(msg.chat_id)
-                snap = _security_connections_snapshot(limit=50)
-                security_text = _security_connections_text(snap).replace("**", "").replace("`", "")
-                sent = await msg.reply_text(
-                    security_text,
-                    reply_markup=_security_connections_keyboard(snap),
-                    parse_mode=None
-                )
-                _security_panel_start_refresh(context, msg.chat_id, sent.message_id)
-                return
-
             if label == "👑 پنل مدیریت":
                 if not is_admin:
                     await msg.reply_text("⛔ دسترسی غیرمجاز.")
@@ -8349,29 +8220,6 @@ def start_telegram_bot():
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
             _security_audit_telegram_update(update)
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
-            if data == "bottom_panel_open":
-                await q.edit_message_text("🎛 **پنل کنترل**\n\nپنل باز است.", reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
-                return
-            if data == "bottom_panel_close":
-                await q.edit_message_text("🎛 **پنل کنترل**\n\nپنل بسته است.", reply_markup=_bottom_panel_inline_keyboard(False, is_admin), parse_mode="Markdown")
-                return
-            if data == "bottom_status_engines":
-                await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n" + _engine_status_lines(), reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
-                return
-            if data == "bottom_status_wallet":
-                if not is_admin:
-                    await q.answer("⛔ فقط ادمین.", show_alert=True)
-                    return
-                sol_balance = await _tg_bg(get_sol_balance)
-                state = "🟢 ON — BUY/SELL واقعی مجاز است" if WALLET_TRADE_PERMISSION else "🔴 OFF — معامله واقعی ممنوع است"
-                await q.edit_message_text(f"💼 **ولت اصلی**\n\n💰 موجودی SOL: `{sol_balance:.6f}`\n🔐 مجوز معامله: {state}", reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
-                return
-            if data == "bottom_status_trades":
-                stats = await _tg_bg(get_advanced_trade_analytics)
-                await q.edit_message_text("📈 **آمار معاملات**\n\n" + str(stats), reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
-                return
-            if data != "connections":
-                _security_panel_cancel_refresh(cid)
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 سیگنال اصلی: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             elif data == "toggle_master_signal":
                 if not is_admin:
@@ -8563,9 +8411,7 @@ def start_telegram_bot():
                 else:
                     block_type, prefix = "ip", "security_apply_block_ip:"
                 value=data[len(prefix):]; ok,msg=_security_block_entity(block_type,value,"manual_admin_block",str(cid)); snap=_security_connections_snapshot(30)
-                await q.edit_message_text(("✅ **دسترسی مسدود شد.**\n\n" if ok else "⚠️ **مسدودسازی انجام نشد.**\n\n")+msg+"\n\n"+_security_connections_text(snap),reply_markup=_security_connections_keyboard(snap),parse_mode="Markdown")
-                _security_panel_start_refresh(context,q.message.chat.id,q.message.message_id)
-                return
+                await q.edit_message_text(("✅ **دسترسی مسدود شد.**\n\n" if ok else "⚠️ **مسدودسازی انجام نشد.**\n\n")+msg,reply_markup=_security_connections_keyboard(snap),parse_mode="Markdown"); return
             elif data.startswith("security_apply_unblock_tg:") or data.startswith("security_apply_unblock_ip:"):
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False)); return
@@ -8574,30 +8420,17 @@ def start_telegram_bot():
                 else:
                     block_type, prefix = "ip", "security_apply_unblock_ip:"
                 value=data[len(prefix):]; ok=_security_unblock_entity(block_type,value,str(cid)); snap=_security_connections_snapshot(30)
-                await q.edit_message_text(("✅ **رفع مسدودی انجام شد.**" if ok else "⚠️ **رفع مسدودی انجام نشد.**")+"\n\n"+_security_connections_text(snap),reply_markup=_security_connections_keyboard(snap),parse_mode="Markdown")
-                _security_panel_start_refresh(context,q.message.chat.id,q.message.message_id)
-                return
+                await q.edit_message_text("✅ **رفع مسدودی انجام شد.**" if ok else "⚠️ **رفع مسدودی انجام نشد.**",reply_markup=_security_connections_keyboard(snap),parse_mode="Markdown"); return
             elif data=="connections":
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
                     return
-                snap = _security_connections_snapshot(limit=50)
-                security_text = _security_connections_text(snap).replace("**", "").replace("`", "")
-                try:
-                    await q.edit_message_text(
-                        security_text,
-                        reply_markup=_security_connections_keyboard(snap),
-                        parse_mode=None
-                    )
-                    security_message_id = q.message.message_id
-                except Exception as exc:
-                    logger.warning("Security connections edit failed; sending fallback: %s", exc)
-                    sent = await q.message.reply_text(
-                        security_text,
-                        reply_markup=_security_connections_keyboard(snap)
-                    )
-                    security_message_id = sent.message_id
-                _security_panel_start_refresh(context, q.message.chat.id, security_message_id)
+                snap = _security_connections_snapshot(limit=30)
+                await q.edit_message_text(
+                    _security_connections_text(),
+                    reply_markup=_security_connections_keyboard(snap),
+                    parse_mode="Markdown"
+                )
                 return
             elif data=="security":
                 if not is_admin: await q.edit_message_text("⛔ فقط ادمین.",reply_markup=_main_keyboard(False))
@@ -9067,31 +8900,6 @@ def start_telegram_bot():
                 if not PRO_WALLET_RADAR_ENABLED:
                     await q.answer("اول اجازه رصد را روشن کن.", show_alert=True)
                     return
-
-                # کپی واقعی فقط برای Wallet منتخب و واجد شرایط فعال می‌شود.
-                selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
-                if not selected:
-                    await q.answer("اول از لیست، یک Wallet را انتخاب کن.", show_alert=True)
-                    return
-                try:
-                    with db_lock:
-                        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-                        selected_row = conn.execute(
-                            "SELECT win_rate,total_trade,realized_profit_usd FROM pro_wallet_candidates WHERE wallet_address=?",
-                            (selected,)
-                        ).fetchone()
-                        conn.close()
-                except Exception:
-                    selected_row = None
-                if (
-                    not selected_row
-                    or int(selected_row[1] or 0) < PRO_WALLET_MIN_TRADES
-                    or float(selected_row[0] or 0) < PRO_WALLET_MIN_WIN_RATE
-                    or float(selected_row[2] or 0) < 0
-                ):
-                    await q.answer("Wallet منتخب حداقل شرایط کپی واقعی را ندارد.", show_alert=True)
-                    return
-
                 state = _pro_wallet_toggle_copy()
                 if state and not WALLET_TRADE_PERMISSION:
                     text = (
@@ -9103,8 +8911,8 @@ def start_telegram_bot():
                     _set_bot_setting("pro_wallet_last_copy_scan_at", "0")
                     text = (
                         "🟢 **اجازه کپی واقعی Wallet روشن شد.**\n\n"
-                        f"Wallet منتخب: `{selected}`\n"
-                        "از این لحظه فقط معاملات جدید همین Wallet پایش و در صورت داشتن مجوز اصلی، BUY/SELL واقعی اجرا می‌شوند."
+                        "کپی فقط از بهترین Wallet رتبه‌بندی‌شده انجام می‌شود.\n"
+                        "خرید/فروش از همین لحظه فقط با مجوز اصلی ولت انجام خواهد شد."
                     )
                 else:
                     text = "🔴 **اجازه کپی واقعی Wallet خاموش شد.**\n\n✅ رصد و آمار می‌توانند مستقل ادامه داشته باشند."
@@ -9254,6 +9062,7 @@ def start_telegram_bot():
         app.add_handler(MessageHandler(filters.ALL, security_audit_message_handler, block=False), group=-1)
         # Persistent bottom panel must run before the existing manual-input handler.
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persistent_bottom_panel_handler))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
         app.run_polling(drop_pending_updates=False)
