@@ -7763,41 +7763,9 @@ def _bottom_panel_inline_keyboard(is_open=False, is_admin=False):
     return InlineKeyboardMarkup(rows)
 
 def _persistent_bottom_keyboard(is_admin=False):
-    """
-    پنل پایین تلگرام به‌صورت Reply Keyboard.
-    پنل Inline فعلی حذف/جابجا نمی‌شود؛ این فقط یک نسخهٔ دوم و دائمی از
-    کنترل‌های اصلی است تا هنگام زیاد شدن سیگنال‌ها همچنان پایین چت در دسترس باشد.
-    """
-    rows = [
-        ["📊 وضعیت موتورها", "💼 وضعیت ولت"],
-        ["📈 آمار معاملات", "🎛 کنترل موتورها"],
-    ]
-    if WEBAPP_URL:
-        rows.append(["📱 Mini App VIP"])
-    elif CHANNEL_INVITE_LINK:
-        rows.append(["📢 کانال VIP"])
-    if is_admin:
-        rows += [
-            [f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"],
-            [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"],
-            [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"],
-            ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"],
-            ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"],
-            ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"],
-            [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"],
-            [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
-            ["🧠 مرکز یادگیری"],
-            [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"],
-            [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
-            ["🎁 عضویت رایگان کاربر"],
-        ]
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-        one_time_keyboard=False,
-        is_persistent=False,
-        selective=False,
-    )
+    """Deprecated: the bottom control is inline so button presses never appear as chat messages."""
+    return None
+
 
 ENGINE_SWITCHES = [
     ("Analysis", "ANALYSIS_ENGINE_ENABLED", "toggle_engine_analysis"),
@@ -7888,9 +7856,9 @@ def start_telegram_bot():
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
-            # کنترل ثابت پنل پایین با callback انجام می‌شود؛ هیچ دستور متنی toggle ارسال نمی‌شود.
+            # پنل کنترل فقط Inline است؛ لمس دکمه‌ها هیچ پیام متنی جدیدی در چت ایجاد نمی‌کند.
             await update.message.reply_text(
-                "🎛 **پنل کنترل**\n\nپنل در حالت بسته است.",
+                "🎛 **پنل کنترل**\n\nپنل بسته است.",
                 reply_markup=_bottom_panel_inline_keyboard(False, is_admin),
                 parse_mode="Markdown"
             )
@@ -9286,7 +9254,6 @@ def start_telegram_bot():
         app.add_handler(MessageHandler(filters.ALL, security_audit_message_handler, block=False), group=-1)
         # Persistent bottom panel must run before the existing manual-input handler.
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manual_trade_limit_message))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persistent_bottom_panel_handler))
         app.add_handler(CallbackQueryHandler(button_handler))
         logger.info("🤖 ربات تلگرام با منوی کنترل شیشه‌ای استارت شد.")
         app.run_polling(drop_pending_updates=False)
