@@ -12,6 +12,7 @@ import json
 import base64
 import base58
 import os
+import re
 import math
 import secrets
 from pathlib import Path
@@ -6863,6 +6864,13 @@ def _pro_wallet_db():
                     created_at REAL NOT NULL DEFAULT 0
                 )
             """)
+            # Walletهای دستی جدا از لیست رادار ذخیره می‌شوند تا Refresh آنها را حذف نکند.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pro_wallet_manual_wallets (
+                    wallet_address TEXT PRIMARY KEY,
+                    added_at REAL NOT NULL DEFAULT 0
+                )
+            """)
             conn.commit()
             conn.close()
         PRO_WALLET_DB_READY = True
@@ -6885,9 +6893,14 @@ def _pro_wallet_set_setting_bool(key, value):
 
 
 def _pro_wallet_load_switches():
-    global PRO_WALLET_RADAR_ENABLED, PRO_WALLET_COPY_PERMISSION
+    global PRO_WALLET_RADAR_ENABLED, PRO_WALLET_COPY_PERMISSION, PRO_WALLET_SELECTED_WALLET
     PRO_WALLET_RADAR_ENABLED = _pro_wallet_setting_bool("pro_wallet_radar_enabled", False)
     PRO_WALLET_COPY_PERMISSION = _pro_wallet_setting_bool("pro_wallet_copy_permission", False)
+    # Wallet منتخب و Walletهای دستی بعد از Restart هم حفظ می‌شوند.
+    saved_selected = str(_get_bot_setting("pro_wallet_selected_wallet", "") or "").strip()
+    if saved_selected:
+        PRO_WALLET_SELECTED_WALLET = saved_selected
+    _pro_wallet_db()
     return PRO_WALLET_RADAR_ENABLED, PRO_WALLET_COPY_PERMISSION
 
 
@@ -7416,6 +7429,55 @@ def _pro_wallet_stats():
 
 
 
+def _pro_wallet_manual_wallets():
+    """Return manually added wallets; these survive radar refreshes."""
+    if not _pro_wallet_db():
+        return []
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            rows = conn.execute(
+                "SELECT wallet_address FROM pro_wallet_manual_wallets ORDER BY added_at DESC"
+            ).fetchall()
+            conn.close()
+        return [str(r[0]) for r in rows if r and r[0]]
+    except Exception:
+        return []
+
+
+def _pro_wallet_is_valid_address(wallet):
+    """Conservative Solana wallet-address validation without external calls."""
+    wallet = str(wallet or "").strip()
+    if not (32 <= len(wallet) <= 44):
+        return False
+    # Base58 alphabet: no 0, O, I, l.
+    return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]+", wallet))
+
+
+def _pro_wallet_add_manual_wallet(wallet):
+    """Persist a manually supplied wallet permanently without touching radar candidates."""
+    wallet = str(wallet or "").strip()
+    if not _pro_wallet_is_valid_address(wallet):
+        raise ValueError("آدرس Wallet سولانا معتبر نیست. آدرس کامل Base58 را بفرست.")
+    if not _pro_wallet_db():
+        raise RuntimeError("پایگاه‌داده Professional Wallet در دسترس نیست.")
+    now = int(time.time())
+    with db_lock:
+        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+        conn.execute(
+            "INSERT OR IGNORE INTO pro_wallet_manual_wallets(wallet_address, added_at) VALUES(?,?)",
+            (wallet, now)
+        )
+        # ذخیره صریح Wallet منتخب نیز در bot_settings انجام می‌شود تا بعد از Restart باقی بماند.
+        conn.execute(
+            "INSERT OR REPLACE INTO bot_settings(key,value) VALUES(?,?)",
+            ("pro_wallet_selected_wallet", wallet)
+        )
+        conn.commit()
+        conn.close()
+    return wallet
+
+
 def _pro_wallet_keyboard():
     """
     # ------------------------------------------------------------
@@ -7454,6 +7516,20 @@ def _pro_wallet_keyboard():
             ))
         keyboard.append(row_buttons)
 
+    # 🧩 Walletهای دستی؛ مستقل از رفرش رادار و همیشه قابل انتخاب.
+    manual_wallets = _pro_wallet_manual_wallets()
+    for wallet in manual_wallets[:10]:
+        short = f"{wallet[:4]}…{wallet[-4:]}"
+        mark = "🎯" if wallet == selected else "🧩"
+        keyboard.append([InlineKeyboardButton(
+            f"{mark} دستی {short}",
+            callback_data=f"pro_wallet_select:{wallet}"
+        )])
+
+    keyboard.append([
+        InlineKeyboardButton("➕ افزودن Wallet دستی", callback_data="pro_wallet_add_manual")
+    ])
+
     # 🔄 بروزرسانی آمار و 🔙 بازگشت همیشه در انتهای پنل هستند.
     keyboard.extend([
         [InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="pro_wallet_refresh")],
@@ -7487,8 +7563,16 @@ def _pro_wallet_panel_text():
         f"🎯 شروط شکار: WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}% | P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}% | معاملات≥{PRO_WALLET_MIN_TRADES} | موفق≥{PRO_WALLET_MIN_WINS} | حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f}",
         f"🕒 آخرین بروزرسانی: `{last_text}`",
     ]
+    manual_wallets = _pro_wallet_manual_wallets()
     if PRO_WALLET_LAST_ERROR:
         lines.extend(["", f"⚠️ `{PRO_WALLET_LAST_ERROR}`"])
+    lines.extend(["", f"🧩 **Walletهای دستی:** `{len(manual_wallets)}`"])
+    if manual_wallets:
+        for i, wallet in enumerate(manual_wallets[:10], 1):
+            mark = "🎯" if wallet == selected else "🧩"
+            lines.append(f"{mark} دستی #{i}: `{wallet}`")
+    else:
+        lines.append("برای کپی یک Wallet دلخواه، «➕ افزودن Wallet دستی» را بزن.")
     lines.extend(["", "🏆 **Walletهای پیدا شده — انتخاب کاملاً دستی:**"])
     if not rows:
         lines.append("هیچ Walletی در رادار ذخیره نشده؛ «بروزرسانی آمار» را بزن.")
@@ -8044,6 +8128,7 @@ def start_telegram_bot():
         async def cancel_trade_limit_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("awaiting_trade_limit_sol", None)
             context.user_data.pop("awaiting_signal_glass_setting", None)
+            context.user_data.pop("awaiting_pro_wallet_manual_add", None)
             await update.message.reply_text(
                 f"↩️ لغو شد. سقف فعلی هر معامله: {MAX_TRADE_SOL:g} SOL",
                 reply_markup=_control_keyboard() if str(update.effective_user.id) == str(TELEGRAM_CHAT_ID) else _main_keyboard(False)
@@ -8053,6 +8138,37 @@ def start_telegram_bot():
             global MAX_TRADE_SOL
             cid = str(update.effective_user.id)
             if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
+                return
+
+            if context.user_data.get("awaiting_pro_wallet_manual_add"):
+                raw_wallet = (update.message.text or "").strip()
+                try:
+                    wallet = _pro_wallet_add_manual_wallet(raw_wallet)
+
+                    # همان رفتار انتخاب Wallet موجود: انتخاب دائمی + baseline تازه.
+                    global PRO_WALLET_SELECTED_WALLET, PRO_WALLET_LAST_COPY_SCAN_AT
+                    PRO_WALLET_SELECTED_WALLET = wallet
+                    now = int(time.time())
+                    PRO_WALLET_LAST_COPY_SCAN_AT = now
+                    _set_bot_setting("pro_wallet_selected_wallet", wallet)
+                    _set_bot_setting("pro_wallet_last_copy_scan_at", now)
+                    _set_bot_setting("pro_wallet_last_copy_wallet", wallet)
+                    context.user_data.pop("awaiting_pro_wallet_manual_add", None)
+
+                    await update.message.reply_text(
+                        "✅ **Wallet دستی اضافه و انتخاب شد**\n\n"
+                        f"🎯 Wallet: `{wallet}`\n"
+                        "📌 baseline همین لحظه ثبت شد؛ معاملات قبلی کپی نمی‌شوند.\n"
+                        "⚡ از این لحظه BUY/SELL جدید این Wallet با Professional Wallet کپی می‌شود.",
+                        parse_mode="Markdown",
+                        reply_markup=_pro_wallet_keyboard()
+                    )
+                except Exception as e:
+                    await update.message.reply_text(
+                        f"❌ **Wallet ثبت نشد**\n\n{e}\n\n"
+                        "آدرس کامل Wallet سولانا را دوباره بفرست یا `/cancel` بزن.",
+                        parse_mode="Markdown"
+                    )
                 return
 
             if context.user_data.get("awaiting_signal_glass_setting"):
@@ -9089,6 +9205,22 @@ def start_telegram_bot():
                         reply_markup=_pro_wallet_keyboard(),
                         parse_mode="Markdown"
                     )
+                return
+
+            elif data == "pro_wallet_add_manual":
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                    return
+                context.user_data["awaiting_pro_wallet_manual_add"] = True
+                await q.answer()
+                await q.edit_message_text(
+                    "➕ **افزودن Wallet دستی برای کپی واقعی**\n\n"
+                    "آدرس کامل Wallet سولانا را در پیام بعدی بفرست.\n"
+                    "بعد از ثبت، همان Wallet به‌صورت خودکار انتخاب می‌شود و baseline همان لحظه ثبت خواهد شد.\n\n"
+                    "❌ برای لغو: `/cancel`",
+                    reply_markup=_pro_wallet_keyboard(),
+                    parse_mode="Markdown"
+                )
                 return
 
             elif data.startswith("pro_wallet_select:"):
