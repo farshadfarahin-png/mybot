@@ -2354,7 +2354,13 @@ async def _security_panel_refresh_loop(bot,chat_id,message_id):
             await asyncio.sleep(_SECURITY_PANEL_REFRESH_INTERVAL)
             snap=_security_connections_snapshot(50)
             try:
-                await bot.edit_message_text(chat_id=chat_id,message_id=message_id,text=_security_connections_text(snap),reply_markup=_security_connections_keyboard(snap),parse_mode='Markdown')
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=_security_connections_text(snap).replace("**", "").replace("`", ""),
+                    reply_markup=_security_connections_keyboard(snap),
+                    parse_mode=None
+                )
             except Exception as exc:
                 if 'not modified' in str(exc).lower(): continue
                 raise
@@ -7690,9 +7696,21 @@ def _main_keyboard(is_admin=False):
 
 def _persistent_bottom_keyboard(is_admin=False):
     """
-    پنل پایین تلگرام به‌صورت Reply Keyboard.
-    پنل Inline فعلی حذف/جابجا نمی‌شود؛ این فقط یک نسخهٔ دوم و دائمی از
-    کنترل‌های اصلی است تا هنگام زیاد شدن سیگنال‌ها همچنان پایین چت در دسترس باشد.
+    حالت پیش‌فرض پنل پایین: فقط یک دکمه کوچک برای باز کردن کنترل‌های پایین.
+    پنل کامل به‌صورت پیش‌فرض باز نمی‌شود و فضای چت را اشغال نمی‌کند.
+    """
+    return ReplyKeyboardMarkup(
+        [["🎛 چهار کلید"]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        is_persistent=True,
+        selective=False,
+    )
+
+
+def _expanded_bottom_keyboard(is_admin=False):
+    """
+    پنل کامل پایین — همان کلیدهای موجود قبلی، فقط با یک کلید بستن در انتها.
     """
     rows = [
         ["/start"],
@@ -7718,6 +7736,7 @@ def _persistent_bottom_keyboard(is_admin=False):
             [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
             ["🎁 عضویت رایگان کاربر"],
         ]
+    rows.append(["🔽 بستن پنل پایین"])
     return ReplyKeyboardMarkup(
         rows,
         resize_keyboard=True,
@@ -7725,6 +7744,7 @@ def _persistent_bottom_keyboard(is_admin=False):
         is_persistent=True,
         selective=False,
     )
+
 
 ENGINE_SWITCHES = [
     ("Analysis", "ANALYSIS_ENGINE_ENABLED", "toggle_engine_analysis"),
@@ -7994,6 +8014,22 @@ def start_telegram_bot():
             cid = str(update.effective_user.id)
             is_admin = bool(TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID))
 
+            # پنل کامل پایین — پیش‌فرض فقط یک دکمه کوچک است.
+            if label == "🎛 چهار کلید":
+                await msg.reply_text(
+                    "🎛 **پنل چهارکلیده/مدیریتی باز شد**\n\nبرای بستن: «🔽 بستن پنل پایین» را بزن.",
+                    reply_markup=_expanded_bottom_keyboard(is_admin),
+                    parse_mode="Markdown"
+                )
+                return
+
+            if label == "🔽 بستن پنل پایین":
+                await msg.reply_text(
+                    "✅ پنل پایین بسته شد.",
+                    reply_markup=_persistent_bottom_keyboard(is_admin)
+                )
+                return
+
             # وضعیت موتورها
             if label == "📊 وضعیت موتورها":
                 await msg.reply_text(
@@ -8168,10 +8204,11 @@ def start_telegram_bot():
                     return
                 _security_panel_cancel_refresh(msg.chat_id)
                 snap = _security_connections_snapshot(limit=50)
+                security_text = _security_connections_text(snap).replace("**", "").replace("`", "")
                 sent = await msg.reply_text(
-                    _security_connections_text(snap),
+                    security_text,
                     reply_markup=_security_connections_keyboard(snap),
-                    parse_mode="Markdown"
+                    parse_mode=None
                 )
                 _security_panel_start_refresh(context, msg.chat_id, sent.message_id)
                 return
@@ -8513,13 +8550,23 @@ def start_telegram_bot():
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
                     return
-                snap = _security_connections_snapshot(limit=30)
-                await q.edit_message_text(
-                    _security_connections_text(snap),
-                    reply_markup=_security_connections_keyboard(snap),
-                    parse_mode="Markdown"
-                )
-                _security_panel_start_refresh(context,q.message.chat.id,q.message.message_id)
+                snap = _security_connections_snapshot(limit=50)
+                security_text = _security_connections_text(snap).replace("**", "").replace("`", "")
+                try:
+                    await q.edit_message_text(
+                        security_text,
+                        reply_markup=_security_connections_keyboard(snap),
+                        parse_mode=None
+                    )
+                    security_message_id = q.message.message_id
+                except Exception as exc:
+                    logger.warning("Security connections edit failed; sending fallback: %s", exc)
+                    sent = await q.message.reply_text(
+                        security_text,
+                        reply_markup=_security_connections_keyboard(snap)
+                    )
+                    security_message_id = sent.message_id
+                _security_panel_start_refresh(context, q.message.chat.id, security_message_id)
                 return
             elif data=="security":
                 if not is_admin: await q.edit_message_text("⛔ فقط ادمین.",reply_markup=_main_keyboard(False))
