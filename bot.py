@@ -7799,15 +7799,6 @@ def _persistent_bottom_keyboard(is_admin=False):
         selective=False,
     )
 
-def _expanded_bottom_keyboard(is_admin=False):
-    rows = [["🎛 چهار کلید"], ["/start"], ["📊 وضعیت موتورها", "💼 وضعیت ولت"], ["📈 آمار معاملات", "🎛 کنترل موتورها"]]
-    if WEBAPP_URL: rows.append(["📱 Mini App VIP"])
-    elif CHANNEL_INVITE_LINK: rows.append(["📢 کانال VIP"])
-    if is_admin:
-        rows += [[f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"], [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"], [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"], ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"], ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"], ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"], [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"], [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"], ["🧠 مرکز یادگیری"], [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"], [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"], ["🎁 عضویت رایگان کاربر"]]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False, is_persistent=True, selective=False)
-
-
 ENGINE_SWITCHES = [
     ("Analysis", "ANALYSIS_ENGINE_ENABLED", "toggle_engine_analysis"),
     ("Fire", "IS_RUNNING", "toggle_engine_fire"),
@@ -7897,12 +7888,10 @@ def start_telegram_bot():
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
-            # پنل فعلی بالا عمداً حفظ می‌شود.
-            # این پیام دوم فقط Reply Keyboard دائمی پایین تلگرام را فعال می‌کند.
+            # کنترل ثابت پنل پایین با callback انجام می‌شود؛ هیچ دستور متنی toggle ارسال نمی‌شود.
             await update.message.reply_text(
-                "🎛 **پنل کنترل پایین فعال است**\n"
-                "هر زمان سیگنال‌های جدید بیایند، این پنل پایین چت باقی می‌ماند.",
-                reply_markup=_persistent_bottom_keyboard(is_admin),
+                "🎛 **پنل کنترل**\n\nپنل در حالت بسته است.",
+                reply_markup=_bottom_panel_inline_keyboard(False, is_admin),
                 parse_mode="Markdown"
             )
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
