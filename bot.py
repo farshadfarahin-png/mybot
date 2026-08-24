@@ -9075,7 +9075,8 @@ def start_telegram_bot():
                 _set_bot_setting("pro_wallet_selected_wallet", wallet)
                 _set_bot_setting("pro_wallet_last_copy_scan_at", now)
                 _set_bot_setting("pro_wallet_last_copy_wallet", wallet)
-                await q.answer("Wallet برای کپی واقعی انتخاب شد.", show_alert=True)
+                # q.answer() یک‌بار در ابتدای button_handler انجام شده است؛
+                # پاسخ دوم باعث خطای Telegram و توقف قبل از edit_message_text می‌شد.
                 await q.edit_message_text(
                     _pro_wallet_panel_text(),
                     reply_markup=_pro_wallet_keyboard(),
