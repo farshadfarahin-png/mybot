@@ -8,6 +8,7 @@ import base64
 import base58
 import os
 import math
+import secrets
 from pathlib import Path
 
 VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "").strip()
@@ -18,7 +19,7 @@ from datetime import datetime, timedelta
 from threading import Thread, Lock, RLock
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, g
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from solders.keypair import Keypair
@@ -594,9 +595,36 @@ def init_db():
                     remote_ip TEXT NOT NULL DEFAULT '',
                     user_agent TEXT NOT NULL DEFAULT '',
                     details TEXT NOT NULL DEFAULT '',
-                    created_at REAL NOT NULL DEFAULT 0
+                    created_at REAL NOT NULL DEFAULT 0,
+                    request_id TEXT NOT NULL DEFAULT '',
+                    request_method TEXT NOT NULL DEFAULT '',
+                    endpoint TEXT NOT NULL DEFAULT '',
+                    status_code INTEGER NOT NULL DEFAULT 0,
+                    duration_ms REAL NOT NULL DEFAULT 0,
+                    forwarded_for TEXT NOT NULL DEFAULT '',
+                    referer TEXT NOT NULL DEFAULT '',
+                    suspicious INTEGER NOT NULL DEFAULT 0,
+                    suspicious_reason TEXT NOT NULL DEFAULT ''
                 )
             """)
+            # Additive migrations only: never remove or rewrite existing audit data.
+            audit_cols = {r[1] for r in cursor.execute("PRAGMA table_info(security_audit)").fetchall()}
+            for col, definition in {
+                "request_id": "TEXT NOT NULL DEFAULT ''",
+                "request_method": "TEXT NOT NULL DEFAULT ''",
+                "endpoint": "TEXT NOT NULL DEFAULT ''",
+                "status_code": "INTEGER NOT NULL DEFAULT 0",
+                "duration_ms": "REAL NOT NULL DEFAULT 0",
+                "forwarded_for": "TEXT NOT NULL DEFAULT ''",
+                "referer": "TEXT NOT NULL DEFAULT ''",
+                "suspicious": "INTEGER NOT NULL DEFAULT 0",
+                "suspicious_reason": "TEXT NOT NULL DEFAULT ''",
+            }.items():
+                if col not in audit_cols:
+                    try:
+                        cursor.execute(f"ALTER TABLE security_audit ADD COLUMN {col} {definition}")
+                    except sqlite3.OperationalError:
+                        pass
             conn.commit()
             conn.close()
             logger.info("✅ دیتابیس با موفقیت فعال و مقداردهی شد.")
@@ -1700,26 +1728,102 @@ def _set_channel_signal_enabled(value):
     CHANNEL_SIGNAL_ENABLED = new_value
     return True
 
+_SECURITY_RATE_LOCK = Lock()
+_SECURITY_RATE_BUCKETS = {}
+_SECURITY_RATE_WINDOW = 60.0
+_SECURITY_RATE_LIMIT = 120
+_SECURITY_SENSITIVE_QUERY_KEYS = {
+    "token", "access_token", "bot_token", "api_key", "apikey", "secret",
+    "password", "passwd", "authorization", "auth", "signature", "sig",
+}
+_SECURITY_SUSPICIOUS_MARKERS = (
+    "/.env", "/.git", "/wp-admin", "/wp-login", "/phpmyadmin", "/xmlrpc.php",
+    "/vendor/phpunit", "/cgi-bin/", "../", "%2e%2e", "%252e", "jndi:",
+)
+
+
+def _security_request_id():
+    try:
+        return secrets.token_hex(8)
+    except Exception:
+        return f"{int(time.time()*1000):x}"
+
+
+def _security_client_ip():
+    # Keep both the socket peer and proxy chain. X-Forwarded-For is only treated
+    # as the public client address when present; the raw peer is retained too.
+    peer = str(request.remote_addr or "") if request else ""
+    forwarded = str(request.headers.get("X-Forwarded-For", "") or "") if request else ""
+    public_ip = forwarded.split(",")[0].strip() if forwarded else peer
+    return public_ip, peer, forwarded
+
+
+def _security_safe_query():
+    try:
+        parts = []
+        for key in request.args.keys():
+            vals = request.args.getlist(key)
+            safe_vals = ["[REDACTED]" if str(key).lower() in _SECURITY_SENSITIVE_QUERY_KEYS else str(v)[:120] for v in vals]
+            parts.append(f"{key}=" + ",".join(safe_vals))
+        return "&".join(parts)[:500]
+    except Exception:
+        return ""
+
+
+def _security_classify_web(path, method, user_agent, status_code=0):
+    text = f"{path} {user_agent}".lower()
+    for marker in _SECURITY_SUSPICIOUS_MARKERS:
+        if marker.lower() in text:
+            return True, f"probe:{marker}"
+    if status_code in (401, 403) and method.upper() in ("POST", "PUT", "PATCH", "DELETE"):
+        return True, f"blocked_http_{status_code}"
+    return False, ""
+
+
+def _security_rate_count(ip):
+    if not ip:
+        return 0
+    now = time.time()
+    with _SECURITY_RATE_LOCK:
+        bucket = _SECURITY_RATE_BUCKETS.setdefault(ip, [])
+        cutoff = now - _SECURITY_RATE_WINDOW
+        bucket[:] = [t for t in bucket if t >= cutoff]
+        bucket.append(now)
+        # Bound memory even if a hostile number of IPs appears.
+        if len(_SECURITY_RATE_BUCKETS) > 2000:
+            oldest = sorted(_SECURITY_RATE_BUCKETS.items(), key=lambda kv: kv[1][-1] if kv[1] else 0)[:200]
+            for k, _ in oldest:
+                _SECURITY_RATE_BUCKETS.pop(k, None)
+        return len(bucket)
+
+
 def _security_audit_event(source="", event_type="", actor_id="", chat_id="", chat_type="",
                           username="", first_name="", last_name="", remote_ip="",
-                          user_agent="", details=""):
+                          user_agent="", details="", request_id="", request_method="",
+                          endpoint="", status_code=0, duration_ms=0.0, forwarded_for="",
+                          referer="", suspicious=False, suspicious_reason=""):
     try:
         with db_lock:
             conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
             conn.execute("""
                 INSERT INTO security_audit(
                     source,event_type,actor_id,chat_id,chat_type,username,first_name,last_name,
-                    remote_ip,user_agent,details,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                    remote_ip,user_agent,details,created_at,request_id,request_method,endpoint,
+                    status_code,duration_ms,forwarded_for,referer,suspicious,suspicious_reason
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 str(source or ""), str(event_type or ""), str(actor_id or ""), str(chat_id or ""),
                 str(chat_type or ""), str(username or ""), str(first_name or ""), str(last_name or ""),
-                str(remote_ip or ""), str(user_agent or "")[:300], str(details or "")[:300], time.time()
+                str(remote_ip or ""), str(user_agent or "")[:300], str(details or "")[:500], time.time(),
+                str(request_id or "")[:64], str(request_method or "")[:20], str(endpoint or "")[:200],
+                int(status_code or 0), float(duration_ms or 0.0), str(forwarded_for or "")[:500],
+                str(referer or "")[:300], 1 if suspicious else 0, str(suspicious_reason or "")[:200]
             ))
             conn.commit()
             conn.close()
     except Exception as exc:
         logger.debug("Security audit write failed: %s", exc)
+
 
 def _security_audit_telegram_update(update):
     try:
@@ -1731,14 +1835,18 @@ def _security_audit_telegram_update(update):
         msg = getattr(update, "message", None)
         if cb:
             event_type = "telegram_callback"
-            details = f"callback={str(cb.data or '')[:120]}"
+            data = str(cb.data or "")[:160]
+            details = f"callback={data}"
         elif msg:
             event_type = "telegram_message"
             text = str(getattr(msg, "text", "") or "")
-            details = f"command={text.split()[0][:80]}" if text.startswith("/") else "message"
+            details = f"command={text.split()[0][:80]}" if text.startswith("/") else f"message_type={type(msg).__name__}"
         else:
             event_type = "telegram_update"
-            details = "update"
+            details = f"update_type={type(update).__name__}"
+        msg_date = getattr(msg, "date", None) if msg else None
+        if msg_date:
+            details += f" | telegram_time={msg_date.isoformat()}"
         _security_audit_event(
             source="telegram", event_type=event_type,
             actor_id=getattr(user, "id", ""), chat_id=getattr(chat, "id", ""),
@@ -1748,6 +1856,124 @@ def _security_audit_telegram_update(update):
         )
     except Exception:
         pass
+
+
+def _security_connections_snapshot(limit=30):
+    out = {
+        "channel_signal_enabled": bool(CHANNEL_SIGNAL_ENABLED),
+        "channel_id": str(CHANNEL_ID or ""),
+        "channel_invite_configured": bool(CHANNEL_INVITE_LINK),
+        "telegram_users": [], "web_sources": [], "recent_events": [], "subscribers": [],
+    }
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT telegram_id, wallet_address, expiry_date, status, copy_enabled,
+                       trade_asset, trade_amount_sol, trade_amount_usdc
+                FROM subscribers ORDER BY telegram_id
+            """)
+            for r in cur.fetchall():
+                out["subscribers"].append({
+                    "telegram_id": str(r[0] or ""), "wallet": str(r[1] or ""),
+                    "expiry": str(r[2] or ""), "status": str(r[3] or ""),
+                    "copy_enabled": bool(r[4]), "asset": str(r[5] or ""),
+                    "amount_sol": float(r[6] or 0), "amount_usdc": float(r[7] or 0),
+                })
+            cur.execute("""
+                SELECT actor_id, chat_id, chat_type, username, first_name, last_name,
+                       MAX(created_at) AS last_seen, COUNT(*) AS events,
+                       MAX(event_type) AS last_event
+                FROM security_audit
+                WHERE source='telegram' AND actor_id!=''
+                GROUP BY actor_id, chat_id, chat_type, username, first_name, last_name
+                ORDER BY last_seen DESC LIMIT ?
+            """, (int(limit),))
+            for r in cur.fetchall():
+                out["telegram_users"].append({
+                    "actor_id": str(r[0] or ""), "chat_id": str(r[1] or ""),
+                    "chat_type": str(r[2] or ""), "username": str(r[3] or ""),
+                    "name": (" ".join(x for x in (r[4], r[5]) if x)).strip(),
+                    "last_seen": float(r[6] or 0), "events": int(r[7] or 0),
+                    "last_event": str(r[8] or ""),
+                })
+            cur.execute("""
+                SELECT remote_ip, user_agent, MAX(created_at) AS last_seen, COUNT(*) AS events,
+                       MAX(endpoint) AS last_endpoint, MAX(request_method) AS last_method,
+                       MAX(status_code) AS last_status, MAX(suspicious) AS suspicious,
+                       MAX(suspicious_reason) AS suspicious_reason
+                FROM security_audit
+                WHERE source='web' AND remote_ip!=''
+                GROUP BY remote_ip, user_agent
+                ORDER BY last_seen DESC LIMIT ?
+            """, (int(limit),))
+            for r in cur.fetchall():
+                out["web_sources"].append({
+                    "remote_ip": str(r[0] or ""), "user_agent": str(r[1] or ""),
+                    "last_seen": float(r[2] or 0), "events": int(r[3] or 0),
+                    "last_endpoint": str(r[4] or ""), "last_method": str(r[5] or ""),
+                    "last_status": int(r[6] or 0), "suspicious": bool(r[7]),
+                    "suspicious_reason": str(r[8] or ""),
+                })
+            cur.execute("""
+                SELECT source,event_type,actor_id,chat_id,remote_ip,details,created_at,
+                       request_id,request_method,endpoint,status_code,duration_ms,
+                       suspicious,suspicious_reason
+                FROM security_audit ORDER BY id DESC LIMIT 30
+            """)
+            out["recent_events"] = [
+                {"source":r[0],"event_type":r[1],"actor_id":r[2],"chat_id":r[3],
+                 "remote_ip":r[4],"details":r[5],"created_at":float(r[6] or 0),
+                 "request_id":r[7],"request_method":r[8],"endpoint":r[9],
+                 "status_code":int(r[10] or 0),"duration_ms":float(r[11] or 0),
+                 "suspicious":bool(r[12]),"suspicious_reason":r[13] or ""}
+                for r in cur.fetchall()
+            ]
+            conn.close()
+    except Exception as exc:
+        logger.debug("Security snapshot read failed: %s", exc)
+    return out
+
+
+def _security_connections_text():
+    snap = _security_connections_snapshot()
+    lines = [
+        "🛡 **اتصالات و دسترسی‌های مشاهده‌شده — مانیتور دقیق**", "",
+        f"📢 انتشار سیگنال به کانال: {'🟢 ON' if snap['channel_signal_enabled'] else '🔴 OFF'}",
+        f"📢 مقصد فعلی: `{snap['channel_id'] or 'تنظیم نشده'}`",
+        f"🔗 لینک دعوت ذخیره‌شده: {'🟢 بله' if snap['channel_invite_configured'] else '🔴 خیر'}", "",
+        f"👥 مشترک‌های ثبت‌شده در DB: `{len(snap['subscribers'])}`",
+        f"👁 کاربران/چت‌های Telegram دیده‌شده: `{len(snap['telegram_users'])}`",
+        f"🌐 مبداهای Web دیده‌شده: `{len(snap['web_sources'])}`", "", "👤 **Telegram:**"
+    ]
+    if snap["telegram_users"]:
+        for x in snap["telegram_users"][:15]:
+            user = f"@{x['username']}" if x['username'] else "-"
+            name = x["name"] or "-"
+            lines.append(f"• ID=`{x['actor_id']}` | {user} | {name} | chat={x['chat_type']} | events={x['events']} | آخرین={x['last_event']}")
+    else:
+        lines.append("• هنوز فعالیتی ثبت نشده است.")
+    lines += ["", "🌐 **Web:**"]
+    if snap["web_sources"]:
+        for x in snap["web_sources"][:10]:
+            flag = " 🚨 SUSPICIOUS" if x["suspicious"] else ""
+            lines.append(f"• `{x['remote_ip']}` | {x['last_method']} {x['last_endpoint']} | HTTP {x['last_status']} | events={x['events']}{flag}")
+            lines.append(f"  UA: {x['user_agent'][:100]}")
+            if x["suspicious_reason"]:
+                lines.append(f"  دلیل: `{x['suspicious_reason']}`")
+    else:
+        lines.append("• هنوز درخواست وبی ثبت نشده است.")
+    lines += ["", "🧾 **آخرین رویدادها:**"]
+    for e in snap["recent_events"][:12]:
+        when = datetime.fromtimestamp(e["created_at"]).strftime("%Y-%m-%d %H:%M:%S") if e["created_at"] else "-"
+        where = e["remote_ip"] or (f"TG:{e['actor_id']}" if e["actor_id"] else "-")
+        target = f"{e['request_method']} {e['endpoint']}" if e["endpoint"] else e["event_type"]
+        flag = " 🚨" if e["suspicious"] else ""
+        lines.append(f"• `{when}` | `{where}` | `{target}` | {e['details'][:90]}{flag}")
+    lines += ["", "⚠️ این گزارش فقط رویدادهایی را نشان می‌دهد که خود برنامه/سرور واقعاً دیده و ثبت کرده است.",
+              "⚠️ Bot API فهرست مخفیِ استفاده‌کنندگان از Bot Token را ارائه نمی‌کند؛ این داشبورد برای کشف رفتار و اتصال مشکوک است، نه اثبات قطعی سرقت Token."]
+    return "\n".join(lines)
 
 def _security_connections_snapshot(limit=30):
     out = {
@@ -5665,17 +5891,53 @@ web_app = Flask(__name__)
 @web_app.before_request
 def _security_audit_web_request():
     try:
-        forwarded = request.headers.get("X-Forwarded-For", "")
-        remote_ip = forwarded.split(",")[0].strip() if forwarded else (request.remote_addr or "")
+        started = time.perf_counter()
+        public_ip, peer_ip, forwarded = _security_client_ip()
+        request_id = _security_request_id()
+        rate = _security_rate_count(public_ip)
+        ua = str(request.headers.get("User-Agent", "") or "")[:300]
+        suspicious, reason = _security_classify_web(request.path, request.method, ua)
+        if rate > _SECURITY_RATE_LIMIT:
+            suspicious, reason = True, f"rate>{_SECURITY_RATE_LIMIT}/min"
+        g._security_audit = {
+            "started": started, "request_id": request_id, "public_ip": public_ip,
+            "peer_ip": peer_ip, "forwarded": forwarded, "ua": ua,
+            "rate": rate, "suspicious": suspicious, "reason": reason,
+        }
+    except Exception:
+        g._security_audit = None
+
+
+@web_app.after_request
+def _security_audit_web_response(response):
+    try:
+        meta = getattr(g, "_security_audit", None) or {}
+        started = float(meta.get("started", time.perf_counter()))
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        status = int(getattr(response, "status_code", 0) or 0)
+        suspicious, reason = _security_classify_web(request.path, request.method, meta.get("ua", ""), status)
+        if meta.get("suspicious"):
+            suspicious, reason = True, meta.get("reason") or reason
+        if meta.get("rate", 0) > _SECURITY_RATE_LIMIT:
+            suspicious, reason = True, f"rate>{_SECURITY_RATE_LIMIT}/min"
+        query = _security_safe_query()
+        details = f"{request.method} {request.path}"
+        if query:
+            details += f"?{query}"
+        details += f" | rate_1m={meta.get('rate', 0)} | peer={meta.get('peer_ip', '')}"
         _security_audit_event(
             source="web", event_type="http_request",
             actor_id=str(request.args.get("telegram_id", "") or ""),
-            remote_ip=remote_ip,
-            user_agent=str(request.headers.get("User-Agent", "") or "")[:300],
-            details=f"{request.method} {request.path}"[:200]
+            remote_ip=meta.get("public_ip", ""), user_agent=meta.get("ua", ""),
+            details=details, request_id=meta.get("request_id", ""),
+            request_method=request.method, endpoint=str(request.endpoint or request.path or ""),
+            status_code=status, duration_ms=duration_ms, forwarded_for=meta.get("forwarded", ""),
+            referer=str(request.headers.get("Referer", "") or "")[:300],
+            suspicious=suspicious, suspicious_reason=reason,
         )
     except Exception:
         pass
+    return response
 
 @web_app.route('/')
 def home():
