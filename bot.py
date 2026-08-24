@@ -7653,6 +7653,31 @@ def _pro_wallet_parse_rpc_swap(tx, wallet):
     return events
 
 
+def _pro_wallet_send_trade_notification(side, wallet, token_address, token_symbol, amount, tx_signature, source_tx="", status=""):
+    """ارسال اعلان کامل BUY/SELL واقعی Professional Wallet به چت ربات."""
+    try:
+        side = str(side or "").upper()
+        title = "🟢💎 Professional Wallet — BUY واقعی انجام شد" if side == "BUY" else "🔴💎 Professional Wallet — SELL واقعی انجام شد"
+        solscan_tx = f"https://solscan.io/tx/{tx_signature}" if tx_signature else f"https://solscan.io/token/{token_address}"
+        dex = f"https://dexscreener.com/solana/{token_address}"
+        source_line = f"\n🧾 تراکنش Wallet منتخب: {source_tx}" if source_tx else ""
+        msg = (
+            f"{title}\n\n"
+            f"👛 Wallet منتخب:\n`{wallet}`\n\n"
+            f"🪙 توکن: {token_symbol or 'TOKEN'}\n"
+            f"📍 آدرس قرارداد:\n`{token_address}`\n\n"
+            f"💰 مقدار کپی‌شده: {float(amount):g} SOL\n"
+            f"📌 وضعیت اجرا: {status or 'موفق'}\n"
+            f"🔗 تراکنش اجرای ربات: {solscan_tx}"
+            f"{source_line}\n"
+            f"📈 DexScreener: {dex}"
+        )
+        return bool(send_telegram_msg(msg))
+    except Exception:
+        logger.exception("Professional Wallet trade notification failed side=%s token=%s", side, token_address)
+        return False
+
+
 def _pro_wallet_copy_poll():
     """پایش واقعی Wallet منتخب با RPC؛ بدون مصرف CU از Birdeye."""
     global PRO_WALLET_LAST_COPY_SCAN_AT, PRO_WALLET_LAST_ERROR
@@ -7725,6 +7750,10 @@ def _pro_wallet_copy_poll():
                                     VALUES(?,?,?,?,?,?,?,?)
                                 """,(ev["token_address"],selected,ev["tx_hash"],ev["trade_time"],amount,token_amount,"OPEN",time.time()))
                                 conn.commit(); conn.close()
+                            _pro_wallet_send_trade_notification(
+                                "BUY", selected, ev["token_address"], ev.get("token_symbol", "TOKEN"),
+                                amount, str(result), source_tx=ev.get("tx_hash", ""), status="🟢 BUY واقعی روی بلاکچین تأیید شد"
+                            )
                 else:
                     with db_lock:
                         conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False)
@@ -7746,6 +7775,10 @@ def _pro_wallet_copy_poll():
                                     conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False)
                                     conn.execute("UPDATE pro_wallet_copy_positions SET status='CLOSED',sell_tx_hash=?,updated_at=? WHERE token_address=? AND wallet_address=?",(str(result),time.time(),ev["token_address"],selected))
                                     conn.commit(); conn.close()
+                                _pro_wallet_send_trade_notification(
+                                    "SELL", selected, ev["token_address"], ev.get("token_symbol", "TOKEN"),
+                                    sell_amount, str(result), source_tx=ev.get("tx_hash", ""), status="🔴 SELL واقعی روی بلاکچین تأیید شد"
+                                )
                 _pro_wallet_record_event(ev["tx_hash"],selected,ev["side"],ev["token_address"],ev["token_symbol"],ev["trade_time"],status,str(result))
                 logger.info("💎 Professional Wallet RPC copy %s wallet=%s token=%s tx=%s result=%s",ev["side"],selected,ev["token_address"],ev["tx_hash"],result)
             except Exception as exc:
