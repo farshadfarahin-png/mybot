@@ -8145,12 +8145,13 @@ def start_telegram_bot():
                 kind, value = data.split(":", 1)
                 block_type = "telegram" if kind == "security_confirm_block_tg" else "ip"
                 label = "Telegram ID" if block_type == "telegram" else "IP"
+                action_kind = "tg" if block_type == "telegram" else "ip"
                 await q.edit_message_text(
                     f"⚠️ **تأیید مسدودسازی**\n\n{label}: `{value}`\n\n"
                     "این عملیات دسترسی این مورد را قطع می‌کند و لاگ‌های قبلی را حذف نمی‌کند.\n"
                     "آیا مطمئن هستی؟",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🚫 بله، مسدود کن", callback_data=f"security_block_{"tg" if block_type == "telegram" else "ip"}:{value}"),
+                        [InlineKeyboardButton("🚫 بله، مسدود کن", callback_data=f"security_block_{action_kind}:{value}"),
                          InlineKeyboardButton("❌ لغو", callback_data="connections")],
                     ]),
                     parse_mode="Markdown"
@@ -8163,11 +8164,12 @@ def start_telegram_bot():
                 kind, value = data.split(":", 1)
                 block_type = "telegram" if kind == "security_confirm_unblock_tg" else "ip"
                 label = "Telegram ID" if block_type == "telegram" else "IP"
+                action_kind = "tg" if block_type == "telegram" else "ip"
                 await q.edit_message_text(
                     f"⚠️ **تأیید رفع مسدودی**\n\n{label}: `{value}`\n\n"
                     "دسترسی این مورد دوباره مجاز می‌شود. ادامه بدهم؟",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🟢 بله، رفع کن", callback_data=f"security_unblock_{"tg" if block_type == "telegram" else "ip"}:{value}"),
+                        [InlineKeyboardButton("🟢 بله، رفع کن", callback_data=f"security_unblock_{action_kind}:{value}"),
                          InlineKeyboardButton("❌ لغو", callback_data="connections")],
                     ]),
                     parse_mode="Markdown"
