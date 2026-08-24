@@ -1240,116 +1240,6 @@ def check_social_sentiment_and_hype(pair):
         logger.debug(f"Sentiment check exception: {e}")
         return True, "گذر از فیلتر سنتیمنت"
 
-# ==========================================================
-# RESILIENT MARKET DISCOVERY FALLBACK
-# DexScreener can occasionally time out from Render/free instances.
-# This fallback is additive: existing engines, filters and execution are untouched.
-# GeckoTerminal provides the same core market fields needed by the existing
-# signal pipeline and is used only when DexScreener discovery is unavailable.
-# ==========================================================
-GECKO_SOLANA_DISCOVERY_URL = "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools"
-GECKO_DISCOVERY_INTERVAL_SECONDS = 35.0
-_gecko_cache_lock = Lock()
-_gecko_pair_cache = {}
-_gecko_cache_time = 0.0
-
-
-def _normalize_gecko_pool_to_pair(item, included_tokens=None):
-    """Convert a GeckoTerminal pool to the minimal DexScreener-like pair shape."""
-    try:
-        attrs = (item or {}).get("attributes") or {}
-        rel = ((item or {}).get("relationships") or {}).get("base_token") or {}
-        rel_data = rel.get("data") or {}
-        token_id = str(rel_data.get("id") or "").strip()
-        token_addr = token_id.split("_", 1)[1] if "_" in token_id else ""
-        if not token_addr:
-            token_addr = str(attrs.get("base_token_address") or "").strip()
-        if not token_addr:
-            return None, None
-
-        token_meta = {}
-        for inc in (included_tokens or []):
-            if inc.get("id") == token_id:
-                token_meta = inc.get("attributes") or {}
-                break
-
-        name = str(attrs.get("name") or "TOKEN / SOL")
-        symbol = str(token_meta.get("symbol") or name.split("/", 1)[0].strip() or "TOKEN")
-        price = float(attrs.get("base_token_price_usd") or 0)
-        liq = float(attrs.get("reserve_in_usd") or 0)
-        vol = attrs.get("volume_usd") or {}
-        chg = attrs.get("price_change_percentage") or {}
-        tx = attrs.get("transactions") or {}
-        m5tx = tx.get("m5") or {}
-        if not price or price <= 0:
-            return None, None
-
-        pair = {
-            "chainId": "solana",
-            "dexId": "geckoterminal",
-            "url": f"https://www.geckoterminal.com/solana/pools/{attrs.get('address','')}",
-            "pairAddress": str(attrs.get("address") or ""),
-            "baseToken": {"address": token_addr, "name": symbol, "symbol": symbol},
-            "priceUsd": str(price),
-            "liquidity": {"usd": liq},
-            "volume": {"m5": float(vol.get("m5") or 0), "h1": float(vol.get("h1") or 0), "h24": float(vol.get("h24") or 0)},
-            "priceChange": {"m5": float(chg.get("m5") or 0), "h1": float(chg.get("h1") or 0), "h24": float(chg.get("h24") or 0)},
-            "txns": {"m5": {"buys": int(m5tx.get("buys") or 0), "sells": int(m5tx.get("sells") or 0)}},
-            "fdv": attrs.get("fdv_usd"),
-            "marketCap": attrs.get("market_cap_usd"),
-        }
-        return token_addr, pair
-    except Exception as exc:
-        logger.debug("GeckoTerminal pool normalization failed: %s", exc)
-        return None, None
-
-
-def _get_gecko_solana_discovery(force=False):
-    """Return real Solana token addresses + normalized pair snapshots."""
-    global _gecko_cache_time, _gecko_pair_cache
-    now = time.time()
-    with _gecko_cache_lock:
-        if not force and _gecko_pair_cache and now - _gecko_cache_time < GECKO_DISCOVERY_INTERVAL_SECONDS:
-            return list(_gecko_pair_cache.keys())
-
-    try:
-        headers = {"Accept": "application/json;version=20230203", "User-Agent": "SolanaSniperAI/1.0"}
-        url = GECKO_SOLANA_DISCOVERY_URL + "?include=base_token&duration=5m&page=1"
-        # One short request; this must never block the signal loop for long.
-        res = http_session.get(url, headers=headers, timeout=(2.5, 5.0))
-        if res.status_code != 200:
-            logger.warning("⚠️ GeckoTerminal fallback status=%s", res.status_code)
-            return []
-        payload = res.json() or {}
-        items = payload.get("data") or []
-        included = payload.get("included") or []
-        fresh = {}
-        for item in items:
-            addr, pair = _normalize_gecko_pool_to_pair(item, included)
-            if addr and pair:
-                # Keep the most liquid pool seen for each base token.
-                old = fresh.get(addr)
-                if old is None or float((pair.get("liquidity") or {}).get("usd", 0) or 0) > float((old.get("liquidity") or {}).get("usd", 0) or 0):
-                    fresh[addr] = pair
-        if fresh:
-            with _gecko_cache_lock:
-                _gecko_pair_cache = fresh
-                _gecko_cache_time = time.time()
-            logger.info("🦎 GeckoTerminal fallback discovered %d Solana token/pair(s).", len(fresh))
-            try:
-                V13_SIGNAL_DIAGNOSTICS["stages"]["GECKO_FALLBACK"] = V13_SIGNAL_DIAGNOSTICS["stages"].get("GECKO_FALLBACK", 0) + len(fresh)
-            except Exception:
-                pass
-            return list(fresh.keys())
-    except Exception as exc:
-        logger.warning("⚠️ GeckoTerminal fallback failed: %s", exc)
-    return []
-
-
-def _get_gecko_cached_pairs(token_addrs):
-    with _gecko_cache_lock:
-        return {a: [_gecko_pair_cache[a]] for a in token_addrs if a in _gecko_pair_cache}
-
 def get_real_market_trending_tokens():
     tokens = []
     endpoints = [
@@ -1404,13 +1294,6 @@ def get_real_market_trending_tokens():
             for addr in found:
                 if addr not in tokens:
                     tokens.append(addr)
-
-    # If DexScreener is temporarily unreachable (the exact failure seen in the
-    # Render logs), keep discovery alive through a second independent provider.
-    if not tokens:
-        tokens = _get_gecko_solana_discovery(force=False)
-        if tokens:
-            logger.warning("⚠️ DexScreener discovery unavailable؛ GeckoTerminal fallback is active.")
 
     return tokens
 
@@ -3856,13 +3739,10 @@ def technical_analysis_scanner_loop(app):
 # اجماع عمداً کمی سخت‌گیرتر شده تا فقط گزینه‌های باکیفیت‌تر منتشر شوند.
 # حداقل 82٪ موتورهای روشن باید رأی مثبت بدهند و در حالت معمول حداقل 7 رأی لازم است.
 def new_trade_system_enabled():
-    """Whether the live signal pipeline is allowed to look for new trades."""
-    if EMERGENCY_STOP:
-        return False
-    # Master is the global signal switch.  When it is ON, the scanner is alive
-    # and the currently selected top-level/independent engine modes decide what
-    # is evaluated.  When Master is OFF, no new signal may be generated.
-    return bool(MASTER_SIGNAL_ENABLED)
+    """Whether the unified signal pipeline is allowed to look for new trades."""
+    if MASTER_SIGNAL_ENABLED:
+        return True
+    return (SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED) and not EMERGENCY_STOP
 
 def advanced_filter_enabled():
     return ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED
@@ -5577,15 +5457,13 @@ def _elite_get_market_tokens():
 
 
 def _fetch_best_solana_pairs_batch(token_addrs):
-    """Robust Solana pair fetch: batch first, then per-token fallback for misses."""
+    """Fetch Solana pairs for up to 30 token addresses per DexScreener call."""
     global _dex_batch_cache, _dex_batch_cache_time, _dex_last_request_time
     clean = list(dict.fromkeys(str(x).strip() for x in token_addrs if x))
     if not clean:
         return {}
-
     result = {}
     now = time.time()
-
     with _dex_batch_lock:
         if now - _dex_batch_cache_time <= DEX_BATCH_CACHE_TTL_SECONDS:
             for addr in clean:
@@ -5593,32 +5471,10 @@ def _fetch_best_solana_pairs_batch(token_addrs):
                     result[addr] = _dex_batch_cache[addr]
         missing = [a for a in clean if a not in result]
 
-    def fetch_single(addr):
-        try:
-            url = f"https://api.dexscreener.com/latest/dex/tokens/{addr}"
-            res = http_session.get(url, timeout=4.0)
-            if res.status_code != 200:
-                return addr, []
-            data = res.json() or {}
-            pairs = []
-            for pair in data.get("pairs") or []:
-                if not isinstance(pair, dict) or pair.get("chainId") != "solana":
-                    continue
-                base = str(((pair.get("baseToken") or {}).get("address")) or "").strip()
-                if base == addr:
-                    pairs.append(pair)
-            pairs.sort(
-                key=lambda x: float(((x.get("liquidity") or {}).get("usd")) or 0),
-                reverse=True,
-            )
-            return addr, pairs[:3]
-        except Exception as exc:
-            logger.debug("DexScreener single-token fallback error %s: %s", addr, exc)
-            return addr, []
-
     for i in range(0, len(missing), DEX_BATCH_SIZE):
         chunk = missing[i:i + DEX_BATCH_SIZE]
         try:
+            # DexScreener accepts comma-separated token addresses on this endpoint.
             with _dex_rate_lock:
                 wait = DEX_MIN_REQUEST_INTERVAL_SECONDS - (time.time() - _dex_last_request_time)
                 if wait > 0:
@@ -5626,63 +5482,27 @@ def _fetch_best_solana_pairs_batch(token_addrs):
                 url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk)
                 res = http_session.get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
                 _dex_last_request_time = time.time()
-
             if res.status_code == 429:
                 retry_after = float(res.headers.get("Retry-After", "1") or 1)
                 logger.warning("⚠️ DexScreener HTTP 429؛ batch radar %.1fs مکث می‌کند.", retry_after)
                 time.sleep(min(max(retry_after, 0.5), 5.0))
-            elif res.status_code == 200:
-                data = res.json() or {}
-                grouped = {addr: [] for addr in chunk}
-                for pair in data.get("pairs") or []:
-                    if not isinstance(pair, dict) or pair.get("chainId") != "solana":
-                        continue
-                    base = ((pair.get("baseToken") or {}).get("address") or "").strip()
-                    if base in grouped:
-                        grouped[base].append(pair)
-                for addr, pairs in grouped.items():
-                    pairs.sort(
-                        key=lambda x: float(((x.get("liquidity") or {}).get("usd")) or 0),
-                        reverse=True,
-                    )
-                    result[addr] = pairs[:3]
-            else:
+                continue
+            if res.status_code != 200:
                 logger.debug("DexScreener batch status=%s", res.status_code)
-        except Exception as exc:
-            logger.debug("DexScreener batch fetch error: %s", exc)
-
-    # Critical recovery path: if DexScreener pair fetch timed out, use the
-    # already-fetched GeckoTerminal snapshots instead of turning Pair into 0.
-    if not result:
-        # Populate the independent cache on demand when discovery succeeded but
-        # DexScreener's pair endpoint itself is the component that timed out.
-        _get_gecko_solana_discovery(force=False)
-        gecko_pairs = _get_gecko_cached_pairs(clean)
-        if gecko_pairs:
-            result.update(gecko_pairs)
-            logger.warning("⚠️ Pair fetch recovered %d token(s) from GeckoTerminal cache.", len(gecko_pairs))
-
-    # Critical recovery path: some discovery sources can return valid token
-    # addresses for which the multi-token endpoint returns no rows.
-    misses = [addr for addr in clean if not result.get(addr)]
-    if misses:
-        from concurrent.futures import ThreadPoolExecutor
-        workers = min(6, len(misses))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="PairFallback") as ex:
-            for addr, pairs in ex.map(fetch_single, misses):
-                if pairs:
-                    result[addr] = pairs
-
-    # Diagnostics: Pair stage must reflect real pair attempts, not remain at 0.
-    try:
-        attempted = len(clean)
-        found = sum(1 for addr in clean if result.get(addr))
-        V13_SIGNAL_DIAGNOSTICS["stages"]["PAIR_FETCH"] = (
-            V13_SIGNAL_DIAGNOSTICS["stages"].get("PAIR_FETCH", 0) + attempted
-        )
-        V12_REAL_AUDIT["pairs_seen"] = int(V12_REAL_AUDIT.get("pairs_seen", 0) or 0) + found
-    except Exception:
-        pass
+                continue
+            data = res.json() or {}
+            grouped = {addr: [] for addr in chunk}
+            for pair in data.get("pairs") or []:
+                if not isinstance(pair, dict) or pair.get("chainId") != "solana":
+                    continue
+                base = ((pair.get("baseToken") or {}).get("address") or "").strip()
+                if base in grouped:
+                    grouped[base].append(pair)
+            for addr, pairs in grouped.items():
+                pairs.sort(key=lambda x: float(((x.get("liquidity") or {}).get("usd")) or 0), reverse=True)
+                result[addr] = pairs[:3]
+        except Exception as e:
+            logger.debug("DexScreener batch fetch error: %s", e)
 
     with _dex_batch_lock:
         _dex_batch_cache = dict(result)
@@ -6026,19 +5846,17 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
         pairs = pair_cache.get(token_addr) or []
     else:
         token_addr, pairs = _fetch_best_solana_pair(token_addr)
-
     result = {"analysis": [], "fusion": []}
-
     if not pairs:
-        _diag_reject("PAIR_FETCH", "NO_PAIR", token_addr)
+        _diag_reject("DISCOVERY", "NO_PAIR", token_addr)
         return token_addr, result
 
     active = _active_independent_engine_names()
+    analysis_enabled = ("Analysis" in active) and ANALYSIS_ENGINE_ENABLED
 
-    # Analysis is a truly independent lane and is evaluated whenever its own
-    # switch is ON, regardless of Union/Advanced/MAX state.
-    if ANALYSIS_ENGINE_ENABLED:
-        for pair in pairs:
+    for pair in pairs:
+        # ۱. موتور تحلیل مستقل
+        if analysis_enabled:
             try:
                 candidate = _analysis_engine_candidate(token_addr, pair)
                 if isinstance(candidate, dict):
@@ -6048,65 +5866,47 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                     candidate["engines"] = ["Analysis"]
                     candidate["votes"] = ["Analysis"]
                     candidate = _meta_attach(candidate)
-                    candidate["meta_rank_bonus"] = float(
-                        candidate.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0
-                    )
-                    candidate["rank_score"] = float(
-                        _candidate_rank_tuple((token_addr, candidate))[0]
-                    )
+                    candidate["meta_rank_bonus"] = float(candidate.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
+                    # Ranking is selection-only and can never invalidate the candidate.
+                    candidate["rank_score"] = float(_candidate_rank_tuple((token_addr, candidate))[0])
                     result["analysis"].append((token_addr, candidate))
                     _analysis_diag("candidate_accepted", token_addr=token_addr)
             except Exception as exc:
-                _diag_reject(
-                    "ANALYSIS",
-                    f"EVALUATOR_EXCEPTION:{type(exc).__name__}",
-                    token_addr,
-                )
+                _diag_reject("ANALYSIS", f"EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
                 logger.exception("Analysis evaluator failed for %s", token_addr)
 
-    # Top-level engines have explicit, non-overlapping routing:
-    # MAX > Advanced > Union. If neither family mode is ON, manual individual
-    # engine toggles are evaluated independently.
-    for pair in pairs:
+        # ۲. سایر موتورها یا حالت MAX Fusion
+        if not _candidate_prefilter(pair):
+            continue
         try:
-            if MAX_FUSION_ENABLED or ADVANCED_AI_ENABLED or SYNCHRONIZED_MODE:
+            if MAX_FUSION_ENABLED:
                 fusion = build_consensus_signal(token_addr, pair)
                 if fusion:
                     fusion = _meta_attach(fusion)
-                    fusion["meta_rank_bonus"] = float(
-                        fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0
-                    )
-                    fusion["rank_score"] = float(
-                        _candidate_rank_tuple((token_addr, fusion))[0]
-                    )
+                    fusion["meta_rank_bonus"] = float(fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
+                    fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
+                    fusion["rank_score"] = float(_candidate_rank_tuple((token_addr, fusion))[0])
                     result["fusion"].append((token_addr, fusion))
-                continue
-
-            # No top-level family selected: every individually enabled engine
-            # is allowed to act on its own. This makes each engine key real.
-            for engine_name in active:
-                if engine_name == "Analysis":
-                    continue
-                fusion = _independent_engine_candidate(
-                    token_addr, pair, engine_name
-                )
-                if fusion and fusion_quality_gate(fusion):
-                    fusion = _meta_attach(fusion)
-                    fusion["meta_rank_bonus"] = float(
-                        fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0
-                    )
-                    fusion["rank_score"] = float(
-                        _candidate_rank_tuple((token_addr, fusion))[0]
-                    )
-                    result["fusion"].append((token_addr, fusion))
+            else:
+                for engine_name in active:
+                    if engine_name == "Analysis":
+                        continue
+                    is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
+                    if is_adv and not ADVANCED_AI_ENABLED:
+                        continue
+                    if (not is_adv) and not SYNCHRONIZED_MODE:
+                        continue
+                    fusion = _independent_engine_candidate(token_addr, pair, engine_name)
+                    if fusion and fusion_quality_gate(fusion):
+                        fusion = _meta_attach(fusion)
+                        fusion["meta_rank_bonus"] = float(fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
+                        fusion["rank_score"] = float(_candidate_rank_tuple((token_addr, fusion))[0])
+                        result["fusion"].append((token_addr, fusion))
         except Exception as exc:
-            _diag_reject(
-                "FUSION",
-                f"EVALUATOR_EXCEPTION:{type(exc).__name__}",
-                token_addr,
-            )
+            _diag_reject("FUSION", f"EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
 
     return token_addr, result
+
 
 def _select_best_analysis(candidates):
     if not candidates:
