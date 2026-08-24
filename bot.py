@@ -85,39 +85,6 @@ ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY", "").strip()
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip() or VIP_CHANNEL_ID
 CHANNEL_INVITE_LINK = os.environ.get("CHANNEL_INVITE_LINK", "").strip()
 
-def ensure_channel_invite_link():
-    """Return the configured VIP invite link; create one only when needed.
-
-    This is intentionally isolated from signal generation. Failures are best-effort
-    and never stop the bot: Telegram must have admin/invite rights in the channel.
-    """
-    global CHANNEL_INVITE_LINK, CHANNEL_ID
-    if CHANNEL_INVITE_LINK:
-        return CHANNEL_INVITE_LINK
-    if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
-        return ""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink"
-        resp = http_session.post(
-            url,
-            json={"chat_id": CHANNEL_ID},
-            timeout=15,
-        )
-        data = resp.json()
-        link = str(((data.get("result") or {}).get("invite_link")) or "").strip()
-        if resp.ok and data.get("ok") and link:
-            CHANNEL_INVITE_LINK = link
-            try:
-                _set_bot_setting("vip_channel_invite", link)
-            except Exception:
-                pass
-            logger.info("📢 VIP channel invite link is available.")
-            return link
-        logger.warning("⚠️ Telegram could not create VIP invite link: %s", str(data.get("description") or "unknown error")[:200])
-    except Exception as e:
-        logger.warning("⚠️ VIP invite link check failed: %s", e)
-    return ""
-
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "").strip()
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()
 VIP_PRICE_SOL = 0.0  
@@ -1773,34 +1740,6 @@ def _set_channel_signal_enabled(value):
         return False
     CHANNEL_SIGNAL_ENABLED = new_value
     return True
-
-def _load_channel_config():
-    """Load persisted VIP channel settings without touching signal/master logic."""
-    global CHANNEL_ID, CHANNEL_INVITE_LINK, CHANNEL_SIGNAL_ENABLED
-
-    try:
-        saved_channel_id = str(_get_bot_setting("vip_channel_id", "") or "").strip()
-        saved_invite = str(_get_bot_setting("vip_channel_invite", "") or "").strip()
-
-        if saved_channel_id:
-            CHANNEL_ID = saved_channel_id
-        if saved_invite:
-            CHANNEL_INVITE_LINK = saved_invite
-
-        _get_channel_signal_enabled()
-        return {
-            "channel_id": CHANNEL_ID,
-            "invite_link": CHANNEL_INVITE_LINK,
-            "signal_enabled": CHANNEL_SIGNAL_ENABLED,
-        }
-    except Exception as e:
-        # Security/config loading must never terminate the bot.
-        logger.exception("❌ خطا در بارگذاری تنظیمات کانال: %s", e)
-        return {
-            "channel_id": CHANNEL_ID,
-            "invite_link": CHANNEL_INVITE_LINK,
-            "signal_enabled": CHANNEL_SIGNAL_ENABLED,
-        }
 
 _SECURITY_RATE_LOCK = Lock()
 _SECURITY_RATE_BUCKETS = {}
@@ -8206,13 +8145,12 @@ def start_telegram_bot():
                 kind, value = data.split(":", 1)
                 block_type = "telegram" if kind == "security_confirm_block_tg" else "ip"
                 label = "Telegram ID" if block_type == "telegram" else "IP"
-                action_kind = "tg" if block_type == "telegram" else "ip"
                 await q.edit_message_text(
                     f"⚠️ **تأیید مسدودسازی**\n\n{label}: `{value}`\n\n"
                     "این عملیات دسترسی این مورد را قطع می‌کند و لاگ‌های قبلی را حذف نمی‌کند.\n"
                     "آیا مطمئن هستی؟",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🚫 بله، مسدود کن", callback_data=f"security_block_{action_kind}:{value}"),
+                        [InlineKeyboardButton("🚫 بله، مسدود کن", callback_data=f"security_block_{"tg" if block_type == "telegram" else "ip"}:{value}"),
                          InlineKeyboardButton("❌ لغو", callback_data="connections")],
                     ]),
                     parse_mode="Markdown"
@@ -8225,12 +8163,11 @@ def start_telegram_bot():
                 kind, value = data.split(":", 1)
                 block_type = "telegram" if kind == "security_confirm_unblock_tg" else "ip"
                 label = "Telegram ID" if block_type == "telegram" else "IP"
-                action_kind = "tg" if block_type == "telegram" else "ip"
                 await q.edit_message_text(
                     f"⚠️ **تأیید رفع مسدودی**\n\n{label}: `{value}`\n\n"
                     "دسترسی این مورد دوباره مجاز می‌شود. ادامه بدهم؟",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🟢 بله، رفع کن", callback_data=f"security_unblock_{action_kind}:{value}"),
+                        [InlineKeyboardButton("🟢 بله، رفع کن", callback_data=f"security_unblock_{"tg" if block_type == "telegram" else "ip"}:{value}"),
                          InlineKeyboardButton("❌ لغو", callback_data="connections")],
                     ]),
                     parse_mode="Markdown"
