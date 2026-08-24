@@ -182,13 +182,14 @@ COPY_TRADING_ENABLED = True
 # Independent module: it does not alter existing signal/learning statistics or Neon logic.
 PRO_WALLET_RADAR_ENABLED = False
 PRO_WALLET_COPY_PERMISSION = False
-PRO_WALLET_RADAR_INTERVAL_SECONDS = 1200.0  # 20 minutes; sized for the free Birdeye quota.
-PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 1800.0  # 30 minutes when real-copy permission is ON.
+PRO_WALLET_RADAR_INTERVAL_SECONDS = 1200.0  # 20 minutes; keeps discovery/API usage bounded.
+PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 60.0  # 60s incremental copy scan when explicitly enabled.
 PRO_WALLET_MIN_TRADES = 10
 PRO_WALLET_MIN_WIN_RATE = 65.0
-PRO_WALLET_DISCOVERY_LIMIT = 10
-PRO_WALLET_PNL_CHECK_LIMIT = 5
+PRO_WALLET_DISCOVERY_LIMIT = 20
+PRO_WALLET_PNL_CHECK_LIMIT = 15
 PRO_WALLET_LOOKBACK = "30d"
+PRO_WALLET_COPY_SIZE_SOL = 0.01  # Fixed safe copy size; never exceeds MAX_TRADE_SOL.
 PRO_WALLET_STATE_LOCK = RLock()
 PRO_WALLET_LAST_RADAR_AT = 0.0
 PRO_WALLET_LAST_COPY_SCAN_AT = 0.0
@@ -7064,7 +7065,10 @@ def _pro_wallet_discover():
 
     # Primary: global trader leaderboard. We deliberately ask for more than the
     # final ranking count so the PnL verification stage has enough candidates.
-    for sort_by in ("realized_pnl", "total_pnl"):
+    # Birdeye currently accepts: PnL, realized_pnl, unrealized_pnl.
+    # "total_pnl" is not a valid sort_by for this endpoint and caused the
+    # previous discovery pass to return an avoidable 400 on the second query.
+    for sort_by in ("PnL", "realized_pnl", "unrealized_pnl"):
         data, err = _pro_wallet_api_get(
             "/trader/gainers-losers",
             params={
@@ -7072,7 +7076,7 @@ def _pro_wallet_discover():
                 "sort_by": sort_by,
                 "sort_type": "desc",
                 "offset": 0,
-                "limit": min(100, max(25, PRO_WALLET_DISCOVERY_LIMIT * 5)),
+                "limit": min(100, max(30, PRO_WALLET_DISCOVERY_LIMIT * 4)),
             },
             timeout=12,
         )
@@ -7103,7 +7107,9 @@ def _pro_wallet_discover():
                     "sort_by": "realized_pnl",
                     "sort_type": "desc",
                     "offset": 0,
-                    "limit": 10,
+                    "limit": 20,
+                    "min_trade": max(3, PRO_WALLET_MIN_TRADES // 2),
+                    "min_realized_pnl": 0,
                     "ui_amount_mode": "scaled",
                 },
                 timeout=12,
@@ -7344,6 +7350,27 @@ def _pro_wallet_stats():
         return []
 
 
+def _pro_wallet_panel_keyboard(rows=None):
+    """Inline wallet selector: selection is explicit and never silently changes."""
+    _pro_wallet_load_switches()
+    rows = rows if rows is not None else _pro_wallet_stats()
+    buttons = []
+    selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
+    for idx, row in enumerate(rows[:10], 1):
+        wallet = str(row[0] or "").strip()
+        if not wallet:
+            continue
+        label = f"{'🟢' if wallet == selected else '⚪'} Wallet {idx} | WR {float(row[1] or 0):.1f}% | {int(row[2] or 0)}T"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"pro_wallet_select:{wallet}")])
+    buttons.append([InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="pro_wallet_refresh")])
+    buttons.append([
+        InlineKeyboardButton(f"🔭 رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}", callback_data="pro_wallet_toggle_radar"),
+        InlineKeyboardButton(f"🛒 کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}", callback_data="pro_wallet_toggle_copy"),
+    ])
+    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
+    return InlineKeyboardMarkup(buttons)
+
+
 def _pro_wallet_panel_text():
     _pro_wallet_load_switches()
     rows = _pro_wallet_stats()
@@ -7413,7 +7440,9 @@ def _pro_wallet_panel_text():
     lines.extend([
         "",
         "📌 **قانون انتخاب:** Win Rate بالا + سود تحقق‌یافته غیرمنفی + تعداد معامله کافی.",
-        "📌 قبل از کپی واقعی، ربات اول رصد و آمار را جمع می‌کند؛ معاملات قبل از زمان فعال‌سازی کپی کپی نمی‌شوند.",
+        "👆 برای انتخاب Wallet، روی دکمه همان Wallet بزن؛ انتخاب خودکار در زمان کپی انجام نمی‌شود.",
+        "📌 قبل از کپی واقعی، ربات از لحظه فعال‌سازی یک baseline می‌سازد؛ معاملات قبل از آن دوباره اجرا نمی‌شوند.",
+        f"🧯 اندازه کپی فعلی: حداکثر `{min(float(PRO_WALLET_COPY_SIZE_SOL), float(MAX_TRADE_SOL or 0)):.4f} SOL` در هر BUY.",
         "ℹ️ این آمار در جداول مستقل Professional Wallet ذخیره می‌شود و به آمار قدیمی ربات دست نمی‌زند.",
     ])
     return "\n".join(lines)
@@ -7607,7 +7636,7 @@ def _pro_wallet_copy_poll():
                     0.0,
                     min(
                         float(MAX_TRADE_SOL),
-                        0.01 if float(MAX_TRADE_SOL) > 0 else 0.0
+                        float(PRO_WALLET_COPY_SIZE_SOL)
                     )
                 )
                 if amount <= 0:
@@ -7681,7 +7710,7 @@ def _pro_wallet_copy_poll():
 
 
 def professional_wallet_radar_loop():
-    """Independent 20m radar + optional 30m real-copy poll."""
+    """Independent radar + 60s incremental real-copy poll when explicitly enabled."""
     global PRO_WALLET_LAST_ERROR
     _pro_wallet_load_switches()
     while True:
@@ -7760,9 +7789,11 @@ def _persistent_bottom_keyboard(is_admin=False):
 
 def _expanded_bottom_keyboard(is_admin=False):
     """
-    پنل کامل پایین — همان کلیدهای موجود قبلی، فقط با یک کلید بستن در انتها.
+    پنل کامل پایین. همان کلید «🎛 چهار کلید» در اولین ردیف می‌ماند
+    و همان کلید پنل را باز/بسته می‌کند؛ هیچ /command برای بستن لازم نیست.
     """
     rows = [
+        ["🎛 چهار کلید"],
         ["/start"],
         ["📊 وضعیت موتورها", "💼 وضعیت ولت"],
         ["📈 آمار معاملات", "🎛 کنترل موتورها"],
@@ -7786,7 +7817,6 @@ def _expanded_bottom_keyboard(is_admin=False):
             [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
             ["🎁 عضویت رایگان کاربر"],
         ]
-    rows.append(["🔽 بستن پنل پایین"])
     return ReplyKeyboardMarkup(
         rows,
         resize_keyboard=True,
@@ -7882,6 +7912,7 @@ def start_telegram_bot():
         app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         _load_daily_signal_state()
         async def start_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+            context.user_data["bottom_panel_open"] = False
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
@@ -8064,21 +8095,15 @@ def start_telegram_bot():
             cid = str(update.effective_user.id)
             is_admin = bool(TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID))
 
-            # پنل کامل پایین — پیش‌فرض فقط یک دکمه کوچک است.
+            # یک کلید ثابت در نوار نوشتن: همان کلید باز/بسته می‌کند.
             if label == "🎛 چهار کلید":
-                # Only the keyboard state changes; the main bot panel/message stays intact.
-                await msg.reply_text(
-                    "🎛 پنل پایین باز شد — برای بستن، «🔽 بستن پنل پایین» را بزن.",
-                    reply_markup=_expanded_bottom_keyboard(is_admin)
-                )
-                return
-
-            if label == "🔽 بستن پنل پایین":
-                # Replace the expanded keyboard with the single permanent launcher.
-                await msg.reply_text(
-                    "⬇️ پنل پایین بسته شد.",
-                    reply_markup=_persistent_bottom_keyboard(is_admin)
-                )
+                panel_open = bool(context.user_data.get("bottom_panel_open", False))
+                if panel_open:
+                    context.user_data["bottom_panel_open"] = False
+                    await msg.reply_text("⬇️ پنل پایین بسته شد.", reply_markup=_persistent_bottom_keyboard(is_admin))
+                else:
+                    context.user_data["bottom_panel_open"] = True
+                    await msg.reply_text("🎛 پنل پایین باز شد.", reply_markup=_expanded_bottom_keyboard(is_admin))
                 return
 
             # وضعیت موتورها
@@ -9034,18 +9059,33 @@ def start_telegram_bot():
                     return
                 await q.edit_message_text(
                     _pro_wallet_panel_text(),
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton(
-                            f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
-                            callback_data="pro_wallet_toggle_radar"
-                        )],
-                        [InlineKeyboardButton(
-                            f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
-                            callback_data="pro_wallet_toggle_copy"
-                        )],
-                        [InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="pro_wallet_refresh")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
-                    ]),
+                    reply_markup=_pro_wallet_panel_keyboard(),
+                    parse_mode="Markdown"
+                )
+                return
+
+            elif data.startswith("pro_wallet_select:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                    return
+                wallet = str(data.split(":", 1)[1]).strip()
+                if len(wallet) < 20:
+                    await q.answer("Wallet نامعتبر است.", show_alert=True)
+                    return
+                # Require explicit re-approval after switching leaders.
+                PRO_WALLET_SELECTED_WALLET = wallet
+                PRO_WALLET_COPY_PERMISSION = False
+                PRO_WALLET_LAST_COPY_SCAN_AT = time.time()
+                _set_bot_setting("pro_wallet_selected_wallet", wallet)
+                _set_bot_setting("pro_wallet_last_copy_wallet", wallet)
+                _set_bot_setting("pro_wallet_last_copy_scan_at", int(PRO_WALLET_LAST_COPY_SCAN_AT))
+                _set_bot_setting("pro_wallet_copy_permission", False)
+                await q.edit_message_text(
+                    "✅ **Wallet انتخاب شد**\n\n"
+                    f"`{wallet}`\n\n"
+                    "🔴 کپی واقعی عمداً خاموش شد؛ اگر همین Wallet را می‌خواهی، "
+                    "ابتدا آمار را بررسی و سپس «اجازه کپی واقعی» را روشن کن.",
+                    reply_markup=_pro_wallet_panel_keyboard(),
                     parse_mode="Markdown"
                 )
                 return
