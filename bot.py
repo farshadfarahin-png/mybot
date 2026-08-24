@@ -7799,15 +7799,6 @@ def _persistent_bottom_keyboard(is_admin=False):
         selective=False,
     )
 
-def _expanded_bottom_keyboard(is_admin=False):
-    rows = [["🎛 چهار کلید"], ["/start"], ["📊 وضعیت موتورها", "💼 وضعیت ولت"], ["📈 آمار معاملات", "🎛 کنترل موتورها"]]
-    if WEBAPP_URL: rows.append(["📱 Mini App VIP"])
-    elif CHANNEL_INVITE_LINK: rows.append(["📢 کانال VIP"])
-    if is_admin:
-        rows += [[f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"], [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"], [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"], ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"], ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"], ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"], [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"], [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"], ["🧠 مرکز یادگیری"], [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"], [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"], ["🎁 عضویت رایگان کاربر"]]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False, is_persistent=True, selective=False)
-
-
 ENGINE_SWITCHES = [
     ("Analysis", "ANALYSIS_ENGINE_ENABLED", "toggle_engine_analysis"),
     ("Fire", "IS_RUNNING", "toggle_engine_fire"),
