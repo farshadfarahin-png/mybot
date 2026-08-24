@@ -187,7 +187,7 @@ COPY_TRADING_ENABLED = True
 # Independent module: it does not alter existing signal/learning statistics or Neon logic.
 PRO_WALLET_RADAR_ENABLED = False
 PRO_WALLET_COPY_PERMISSION = False
-PRO_WALLET_RADAR_INTERVAL_SECONDS = 1200.0  # 20 minutes; wallet discovery/statistics refresh
+PRO_WALLET_RADAR_INTERVAL_SECONDS = 21600.0  # 6 hours؛ برای حفظ سهمیه رایگان Birdeye
 PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 60.0  # 60 seconds for real-copy monitoring
 # 🎯 شرایط رسمی شکار Wallet — فقط Walletهایی که همه این شروط را داشته باشند
 # وارد لیست «قابل انتخاب» می‌شوند.
@@ -196,9 +196,9 @@ PRO_WALLET_MIN_WINS = 9             # حداقل معاملات موفق
 PRO_WALLET_MIN_WIN_RATE = 80.0      # حداقل Win Rate
 PRO_WALLET_MIN_PNL_PERCENT = 70.0   # حداقل P/L یا Realized PnL درصدی
 PRO_WALLET_MIN_VOLUME_USD = 5000.0  # حداقل حجم معاملات به دلار
-PRO_WALLET_DISCOVERY_LIMIT = 12
+PRO_WALLET_DISCOVERY_LIMIT = 100
 PRO_WALLET_PNL_CHECK_LIMIT = 10
-PRO_WALLET_LOOKBACK = "30d"
+PRO_WALLET_LOOKBACK = "90d"
 PRO_WALLET_STATE_LOCK = RLock()
 PRO_WALLET_LAST_RADAR_AT = 0.0
 PRO_WALLET_LAST_COPY_SCAN_AT = 0.0
@@ -6909,13 +6909,56 @@ def _pro_wallet_toggle_copy():
     return PRO_WALLET_COPY_PERMISSION
 
 
+def _pro_wallet_birdeye_remaining_cu():
+    """
+    🔋 اعتبار باقی‌مانده Birdeye را می‌خواند.
+    این درخواست فقط 1 CU مصرف می‌کند.
+    اگر اعتبار برای یک درخواست 30-CU شکار کافی نباشد، شکار اصلاً اجرا نمی‌شود.
+    """
+    if not BIRDEYE_API_KEY:
+        return None, "BIRDEYE_API_KEY تنظیم نشده"
+    try:
+        headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana", "accept": "application/json"}
+        res = http_session.get(f"{PRO_WALLET_BIRDEYE_BASE}/utils/v1/credits", headers=headers, timeout=10)
+        try:
+            payload = res.json()
+        except Exception:
+            payload = {}
+        if res.status_code != 200:
+            msg = str(payload.get("message") or payload.get("error") or res.text[:200]) if isinstance(payload, dict) else res.text[:200]
+            return None, f"Birdeye credits HTTP {res.status_code}: {msg}"
+        data = payload.get("data", payload) if isinstance(payload, dict) else {}
+        def find_remaining(obj):
+            if isinstance(obj, dict):
+                for k in ("remaining", "remaining_cu", "remainingCu", "credits_remaining"):
+                    v = obj.get(k)
+                    if isinstance(v, (int, float)):
+                        return float(v)
+                for v in obj.values():
+                    got = find_remaining(v)
+                    if got is not None:
+                        return got
+            elif isinstance(obj, list):
+                for v in obj:
+                    got = find_remaining(v)
+                    if got is not None:
+                        return got
+            return None
+        remaining = find_remaining(data)
+        if remaining is None:
+            return None, "Birdeye پاسخ Credits آمد ولی فیلد remaining پیدا نشد"
+        return remaining, ""
+    except Exception as exc:
+        return None, f"خطای بررسی اعتبار Birdeye: {type(exc).__name__}: {exc}"
+
+
 def _pro_wallet_api_get(path, params=None, timeout=10, force=False):
     """درخواست Birdeye با تشخیص خطای CU و Cooldown ضد اسپم."""
     global PRO_WALLET_BIRDEYE_COOLDOWN_UNTIL
     if not BIRDEYE_API_KEY:
         return None, "BIRDEYE_API_KEY تنظیم نشده"
     now = time.time()
-    if not force and now < float(PRO_WALLET_BIRDEYE_COOLDOWN_UNTIL or 0):
+    if now < float(PRO_WALLET_BIRDEYE_COOLDOWN_UNTIL or 0):
         remain = int(max(1, PRO_WALLET_BIRDEYE_COOLDOWN_UNTIL - now))
         return None, f"Birdeye موقتاً در Cooldown است؛ {remain} ثانیه دیگر دوباره تلاش می‌شود"
     try:
@@ -6944,7 +6987,7 @@ def _pro_wallet_api_get(path, params=None, timeout=10, force=False):
             message = message or body_text[:300]
             if "compute units" in message.lower() or "usage limit" in message.lower():
                 PRO_WALLET_BIRDEYE_COOLDOWN_UNTIL = time.time() + PRO_WALLET_BIRDEYE_COOLDOWN_SECONDS
-                return None, f"Birdeye HTTP {res.status_code} — {message} | درخواست خودکار تا ۱۵ دقیقه متوقف شد"
+                return None, f"Birdeye HTTP {res.status_code} — {message} | تا ریست/آزادشدن سهمیه درخواست جدید ارسال نمی‌شود"
             return None, f"Birdeye HTTP {res.status_code} — {message or 'پاسخ نامشخص'}"
 
         if not isinstance(payload, dict):
@@ -7051,12 +7094,13 @@ def _pro_wallet_item_metrics(item):
 
     total_buy = _pro_wallet_int(src, "total_buy", "totalBuy", "counts_total_buy")
     total_sell = _pro_wallet_int(src, "total_sell", "totalSell", "counts_total_sell")
-    total_trade = _pro_wallet_int(src, "total_trade", "totalTrade", "trade_count", "trades", "totalTrades", default=total_buy + total_sell)
-    total_win = _pro_wallet_int(src, "total_win", "totalWin", "wins", "winning_trades", "winningTrades", default=0)
-    total_loss = _pro_wallet_int(src, "total_loss", "totalLoss", "losses", "losing_trades", "losingTrades", default=0)
-    win_rate = _pro_wallet_number(src, "win_rate", "winRate", "winrate", default=0.0)
-    realized_usd = _pro_wallet_number(src, "realized_profit_usd", "realizedProfitUsd", "realizedPnlUsd", "realized_pnl", "realizedPnL", default=0.0)
-    realized_pct = _pro_wallet_number(src, "realized_profit_percent", "realizedProfitPercent", "realized_pnl_percent", "realizedPnlPercent", "roi", default=0.0)
+    total_trade = _pro_wallet_int(src, "total_trade", "totalTrade", "trade_count", "tradeCount", "trades", "totalTrades", "count", default=total_buy + total_sell)
+    total_win = _pro_wallet_int(src, "total_win", "totalWin", "wins", "winning_trades", "winningTrades", "profitable_trades", "profitableTrades", default=0)
+    total_loss = _pro_wallet_int(src, "total_loss", "totalLoss", "losses", "losing_trades", "losingTrades", "unprofitable_trades", "unprofitableTrades", default=0)
+    win_rate = _pro_wallet_number(src, "win_rate", "winRate", "winrate", "win_rate_percent", "winRatePercent", default=0.0)
+    realized_usd = _pro_wallet_number(src, "realized_profit_usd", "realizedProfitUsd", "realizedPnlUsd", "realized_pnl_usd", "realizedPnl", "realized_pnl", default=0.0)
+    # P/L درصدی در پاسخ‌های مختلف ممکن است با نام ROI/PnL% برگردد.
+    realized_pct = _pro_wallet_number(src, "realized_profit_percent", "realizedProfitPercent", "realized_pnl_percent", "realizedPnlPercent", "pnl_percent", "pnlPercent", "roi", "ROI", default=0.0)
     unrealized_usd = _pro_wallet_number(src, "unrealized_profit_usd", "unrealizedProfitUsd", "unrealizedPnlUsd", "unrealized_usd", default=0.0)
     unrealized_pct = _pro_wallet_number(src, "unrealized_profit_percent", "unrealizedProfitPercent", "unrealizedPnlPercent", default=0.0)
     total_usd = _pro_wallet_number(src, "total_usd", "totalUsd", "total_pnl_usd", "totalPnlUsd", "total_pnl", default=realized_usd + unrealized_usd)
@@ -7066,7 +7110,7 @@ def _pro_wallet_item_metrics(item):
     total_volume_usd = _pro_wallet_number(
         src, "total_volume_usd", "totalVolumeUsd", "volume_usd", "volumeUsd",
         "trading_volume_usd", "tradingVolumeUsd", "turnover_usd", "turnoverUsd",
-        "volume", "total_volume", "totalVolume", default=0.0
+        "volume", "volume_usd", "volumeUsd", "total_volume", "totalVolume", default=0.0
     )
     if total_volume_usd <= 0 and cashflow:
         invested = _pro_wallet_number(cashflow, "total_invested", "totalInvested", default=0.0)
@@ -7083,6 +7127,11 @@ def _pro_wallet_item_metrics(item):
         total_trade = total_win + total_loss
     if win_rate <= 0 and total_win + total_loss > 0:
         win_rate = total_win / max(1, total_win + total_loss) * 100.0
+    # اگر endpoint تعداد برد را مستقیم نداد ولی Win Rate و تعداد معامله را داد،
+    # تعداد برد را از همان آمار برآورد می‌کنیم تا شرط «حداقل 9 برد» بلااستفاده نشود.
+    if total_win <= 0 and win_rate > 0 and total_trade > 0:
+        total_win = int(round((win_rate / 100.0) * total_trade))
+        total_loss = max(0, total_trade - total_win)
 
     score = (
         max(0.0, min(100.0, win_rate)) * 0.40
@@ -7106,10 +7155,21 @@ def _pro_wallet_discover(force=False):
     # فقط یک درخواست Leaderboard می‌زنیم تا مصرف CU کنترل شود.
     # سپس همه شروط کاربر روی همان پاسخ اعمال می‌شوند.
     """
+    # 🔋 قبل از هر درخواست 30-CU، سهمیه رایگان را بررسی می‌کنیم.
+    # این کار جلوی تکرار خطای 400 و مصرف بیهوده اعتبار را می‌گیرد.
+    remaining, credit_err = _pro_wallet_birdeye_remaining_cu()
+    if remaining is not None and remaining < 31:
+        return [], (f"اعتبار رایگان Birdeye کافی نیست: {remaining:.0f} CU باقی مانده؛ "
+                     "برای شکار حداقل 30 CU لازم است. پس از شارژ/ریست سهمیه دوباره تلاش می‌کنیم.")
+    if remaining is None and credit_err:
+        # اگر endpoint اعتبار در دسترس نبود، فقط یک درخواست اصلی را امتحان می‌کنیم؛
+        # اما در صورت 400/CU فوراً Cooldown فعال می‌شود.
+        pass
+
     data, err = _pro_wallet_api_get(
         "/trader/gainers-losers",
-        params={"type": "1W", "sort_by": "PnL", "sort_type": "desc", "offset": 0,
-                "limit": min(100, max(20, int(PRO_WALLET_DISCOVERY_LIMIT or 20)))},
+        params={"type": PRO_WALLET_LOOKBACK, "sort_by": "realized_pnl", "sort_type": "desc", "offset": 0,
+                "limit": min(100, max(20, int(PRO_WALLET_DISCOVERY_LIMIT or 100)))},
         timeout=15, force=force,
     )
     if data is None:
@@ -7215,7 +7275,7 @@ def _pro_wallet_refresh(force=True):
                     item["total_loss"], item["total_buy"], item["total_sell"], item["realized_profit_usd"],
                     item["realized_profit_percent"], item["unrealized_profit_usd"], item["unrealized_profit_percent"],
                     item["total_pnl_usd"], item["cashflow_usd"], item["score"], idx,
-                    "Birdeye Trader Gainers/Losers (1W / PnL + شروط شکار)", item["last_trade_at"], now,
+                    "Birdeye Trader Gainers/Losers (90d / realized_pnl + شروط شکار)", item["last_trade_at"], now,
                     item["total_volume_usd"]
                 ))
             qualified = len(wallets)
