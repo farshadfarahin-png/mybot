@@ -7694,35 +7694,14 @@ def _persistent_bottom_keyboard(is_admin=False):
     پنل Inline فعلی حذف/جابجا نمی‌شود؛ این فقط یک نسخهٔ دوم و دائمی از
     کنترل‌های اصلی است تا هنگام زیاد شدن سیگنال‌ها همچنان پایین چت در دسترس باشد.
     """
-    rows = [
-        ["/start"],
-        ["📊 وضعیت موتورها", "💼 وضعیت ولت"],
-        ["📈 آمار معاملات", "🎛 کنترل موتورها"],
-    ]
-    if WEBAPP_URL:
-        rows.append(["📱 Mini App VIP"])
-    elif CHANNEL_INVITE_LINK:
-        rows.append(["📢 کانال VIP"])
-    if is_admin:
-        rows += [
-            [f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"],
-            [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"],
-            [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"],
-            ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"],
-            ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"],
-            ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"],
-            [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"],
-            [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
-            ["🧠 مرکز یادگیری"],
-            [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"],
-            [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
-            ["🎁 عضویت رایگان کاربر"],
-        ]
+    # فقط /start به‌صورت Reply Keyboard باقی می‌ماند؛
+    # پنل کنترل اصلی همان Inline Keyboard است و دیگر صفحه را اشغال نمی‌کند.
+    rows = [["/start"]]
     return ReplyKeyboardMarkup(
         rows,
         resize_keyboard=True,
         one_time_keyboard=False,
-        is_persistent=True,
+        is_persistent=False,
         selective=False,
     )
 
@@ -7818,10 +7797,8 @@ def start_telegram_bot():
             # پنل فعلی بالا عمداً حفظ می‌شود.
             # این پیام دوم فقط Reply Keyboard دائمی پایین تلگرام را فعال می‌کند.
             await update.message.reply_text(
-                "🎛 **پنل کنترل پایین فعال است**\n"
-                "هر زمان سیگنال‌های جدید بیایند، این پنل پایین چت باقی می‌ماند.",
+                "📌 /start برای دسترسی سریع در پایین چت فعال شد.",
                 reply_markup=_persistent_bottom_keyboard(is_admin),
-                parse_mode="Markdown"
             )
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             cid = str(update.effective_user.id)
@@ -8179,8 +8156,27 @@ def start_telegram_bot():
                     f"Private Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\n"
                     f"RPCها: `{len(RPC_ENDPOINTS)}`\n"
                     f"Admin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🛡 اتصالات و دسترسی‌های مشاهده‌شده", callback_data="connections")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
+                    ]),
                     parse_mode="Markdown"
                 )
+                return
+
+            # اتصالات و دسترسی‌ها: همان پنل امنیتی واقعی، با رفرش خودکار.
+            # این میانبر فقط callback موجود را صدا می‌زند و به موتور سیگنال دست نمی‌زند.
+            if label == "🛡 اتصالات و دسترسی‌های مشاهده‌شده":
+                if not is_admin:
+                    await msg.reply_text("⛔ فقط ادمین.")
+                    return
+                snap = _security_connections_snapshot(limit=50)
+                sent = await msg.reply_text(
+                    _security_connections_text(snap),
+                    reply_markup=_security_connections_keyboard(snap),
+                    parse_mode="Markdown"
+                )
+                _security_panel_start_refresh(context, msg.chat_id, sent.message_id)
                 return
 
             # Daily limit: existing manual-input handler will receive the number.
