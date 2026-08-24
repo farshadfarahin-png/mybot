@@ -7478,6 +7478,30 @@ def _pro_wallet_add_manual_wallet(wallet):
     return wallet
 
 
+def _pro_wallet_delete_manual_wallet(wallet):
+    """Delete only a manually added Professional Wallet."""
+    wallet = str(wallet or "").strip()
+    if not wallet or not _pro_wallet_db():
+        return False
+    with db_lock:
+        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+        cur = conn.execute(
+            "DELETE FROM pro_wallet_manual_wallets WHERE wallet_address = ?",
+            (wallet,)
+        )
+        deleted = cur.rowcount > 0
+        if deleted:
+            current = _get_bot_setting("pro_wallet_selected_wallet", "")
+            if str(current or "") == wallet:
+                conn.execute(
+                    "INSERT OR REPLACE INTO bot_settings(key,value) VALUES(?,?)",
+                    ("pro_wallet_selected_wallet", "")
+                )
+        conn.commit()
+        conn.close()
+    return deleted
+
+
 def _pro_wallet_keyboard():
     """
     # ------------------------------------------------------------
@@ -7528,7 +7552,7 @@ def _pro_wallet_keyboard():
             ),
             InlineKeyboardButton(
                 "🗑 حذف",
-                callback_data=f"pro_wallet_delete_manual:{wallet}"
+                callback_data=f"pro_wallet_delete:{wallet}"
             )
         ])
 
@@ -8564,7 +8588,6 @@ def start_telegram_bot():
             return
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global PRO_WALLET_SELECTED_WALLET, PRO_WALLET_LAST_COPY_SCAN_AT
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
             _security_audit_telegram_update(update)
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
@@ -9230,42 +9253,27 @@ def start_telegram_bot():
                 )
                 return
 
-            elif data.startswith("pro_wallet_delete_manual:"):
+            elif data.startswith("pro_wallet_delete:"):
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
                     return
                 wallet = str(data.split(":", 1)[1]).strip()
-                if not _pro_wallet_is_valid_address(wallet):
-                    await q.answer("Wallet نامعتبر است.", show_alert=True)
-                    return
-                try:
-                    with db_lock:
-                        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-                        conn.execute(
-                            "DELETE FROM pro_wallet_manual_wallets WHERE wallet_address=?",
-                            (wallet,)
-                        )
-                        conn.commit()
-                        conn.close()
-
-                    global PRO_WALLET_SELECTED_WALLET, PRO_WALLET_LAST_COPY_SCAN_AT
-                    selected_now = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
-                    if selected_now == wallet:
-                        PRO_WALLET_SELECTED_WALLET = ""
-                        PRO_WALLET_LAST_COPY_SCAN_AT = 0
-                        _set_bot_setting("pro_wallet_selected_wallet", "")
-                        _set_bot_setting("pro_wallet_last_copy_scan_at", 0)
+                deleted = _pro_wallet_delete_manual_wallet(wallet)
+                if deleted:
+                    if str(globals().get("PRO_WALLET_SELECTED_WALLET", "") or "") == wallet:
+                        globals()["PRO_WALLET_SELECTED_WALLET"] = ""
+                        globals()["PRO_WALLET_LAST_COPY_SCAN_AT"] = int(time.time())
                         _set_bot_setting("pro_wallet_last_copy_wallet", "")
-
-                    await q.answer("Wallet دستی حذف شد.", show_alert=True)
+                        _set_bot_setting("pro_wallet_last_copy_scan_at", int(time.time()))
                     await q.edit_message_text(
-                        _pro_wallet_panel_text(),
+                        "🗑 **Wallet دستی حذف شد**\n\n"
+                        f"`{wallet}`\n\n"
+                        "این Wallet دیگر در لیست Walletهای دستی نیست.",
                         reply_markup=_pro_wallet_keyboard(),
                         parse_mode="Markdown"
                     )
-                except Exception as exc:
-                    logger.exception("Professional Wallet manual wallet delete error: %s", exc)
-                    await q.answer("حذف Wallet انجام نشد.", show_alert=True)
+                else:
+                    await q.answer("این Wallet دستی پیدا نشد.", show_alert=True)
                 return
 
             elif data.startswith("pro_wallet_select:"):
@@ -9278,6 +9286,7 @@ def start_telegram_bot():
                     return
                 # Selection is manual and persistent. Establish a fresh baseline
                 # so historical transactions are never replayed after selection.
+                global PRO_WALLET_SELECTED_WALLET, PRO_WALLET_LAST_COPY_SCAN_AT
                 PRO_WALLET_SELECTED_WALLET = wallet
                 now = int(time.time())
                 PRO_WALLET_LAST_COPY_SCAN_AT = now
