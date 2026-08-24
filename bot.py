@@ -1774,6 +1774,34 @@ def _set_channel_signal_enabled(value):
     CHANNEL_SIGNAL_ENABLED = new_value
     return True
 
+def _load_channel_config():
+    """Load persisted VIP channel settings without touching signal/master logic."""
+    global CHANNEL_ID, CHANNEL_INVITE_LINK, CHANNEL_SIGNAL_ENABLED
+
+    try:
+        saved_channel_id = str(_get_bot_setting("vip_channel_id", "") or "").strip()
+        saved_invite = str(_get_bot_setting("vip_channel_invite", "") or "").strip()
+
+        if saved_channel_id:
+            CHANNEL_ID = saved_channel_id
+        if saved_invite:
+            CHANNEL_INVITE_LINK = saved_invite
+
+        _get_channel_signal_enabled()
+        return {
+            "channel_id": CHANNEL_ID,
+            "invite_link": CHANNEL_INVITE_LINK,
+            "signal_enabled": CHANNEL_SIGNAL_ENABLED,
+        }
+    except Exception as e:
+        # Security/config loading must never terminate the bot.
+        logger.exception("❌ خطا در بارگذاری تنظیمات کانال: %s", e)
+        return {
+            "channel_id": CHANNEL_ID,
+            "invite_link": CHANNEL_INVITE_LINK,
+            "signal_enabled": CHANNEL_SIGNAL_ENABLED,
+        }
+
 _SECURITY_RATE_LOCK = Lock()
 _SECURITY_RATE_BUCKETS = {}
 _SECURITY_RATE_WINDOW = 60.0
