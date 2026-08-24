@@ -21,7 +21,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from flask import Flask, render_template_string, request, jsonify, g
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update, WebAppInfo
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ApplicationHandlerStop
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
@@ -2142,6 +2142,171 @@ def ensure_channel_invite_link():
     except Exception as e:
         logger.error(f"❌ خطای ساخت لینک VIP: {e}")
     return ""
+
+
+# === SECURITY BLOCK CONTROL (additive / isolated) ===
+def _security_ensure_block_table():
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS security_blocks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    block_type TEXT NOT NULL,
+                    block_value TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0,
+                    created_by TEXT NOT NULL DEFAULT '',
+                    active INTEGER NOT NULL DEFAULT 1,
+                    prev_status TEXT NOT NULL DEFAULT '',
+                    prev_copy_enabled INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(block_type, block_value)
+                )
+            """)
+            cols={r[1] for r in conn.execute("PRAGMA table_info(security_blocks)").fetchall()}
+            if "prev_status" not in cols:
+                conn.execute("ALTER TABLE security_blocks ADD COLUMN prev_status TEXT NOT NULL DEFAULT ''")
+            if "prev_copy_enabled" not in cols:
+                conn.execute("ALTER TABLE security_blocks ADD COLUMN prev_copy_enabled INTEGER NOT NULL DEFAULT 1")
+            conn.commit(); conn.close()
+        return True
+    except Exception as exc:
+        logger.error("Security block table initialization failed: %s", exc)
+        return False
+
+def _security_block_exists(block_type, block_value):
+    block_type=str(block_type or '').strip().lower(); block_value=str(block_value or '').strip()
+    if block_type not in ('telegram','ip') or not block_value or not _security_ensure_block_table(): return False
+    try:
+        with db_lock:
+            conn=sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            row=conn.execute("SELECT 1 FROM security_blocks WHERE block_type=? AND block_value=? AND active=1 LIMIT 1",(block_type,block_value)).fetchone(); conn.close()
+        return bool(row)
+    except Exception as exc:
+        logger.error("Security block lookup failed: %s", exc); return False
+
+def _security_block_entity(block_type, block_value, reason, created_by):
+    block_type=str(block_type or '').strip().lower(); block_value=str(block_value or '').strip()
+    reason=str(reason or 'manual_admin_block')[:300]; created_by=str(created_by or '')[:64]
+    if block_type not in ('telegram','ip') or not block_value: return False, "مقدار مسدودی نامعتبر است."
+    if block_type=='telegram' and TELEGRAM_CHAT_ID and block_value==str(TELEGRAM_CHAT_ID): return False, "⛔ ادمین اصلی قابل مسدودسازی نیست."
+    if block_type=='ip' and block_value in ('127.0.0.1','::1','localhost'): return False, "⛔ localhost قابل مسدودسازی نیست."
+    if not _security_ensure_block_table(): return False, "خطا در آماده‌سازی جدول امنیتی."
+    try:
+        now=time.time()
+        with db_lock:
+            conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False)
+            prev_status=''; prev_copy=1
+            if block_type=='telegram':
+                row=conn.execute("SELECT status,copy_enabled FROM subscribers WHERE telegram_id=?",(block_value,)).fetchone()
+                if row:
+                    prev_status=str(row[0] or '')
+                    prev_copy=int(row[1] if row[1] is not None else 1)
+            existing=conn.execute("SELECT prev_status,prev_copy_enabled FROM security_blocks WHERE block_type=? AND block_value=?",(block_type,block_value)).fetchone()
+            if existing and (existing[0] or existing[1] is not None):
+                prev_status=str(existing[0] or prev_status)
+                prev_copy=int(existing[1] if existing[1] is not None else prev_copy)
+            conn.execute("""INSERT INTO security_blocks(block_type,block_value,reason,created_at,created_by,active,prev_status,prev_copy_enabled) VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(block_type,block_value) DO UPDATE SET reason=excluded.reason,created_at=excluded.created_at,created_by=excluded.created_by,active=1""",(block_type,block_value,reason,now,created_by,1,prev_status,prev_copy))
+            if block_type=='telegram': conn.execute("UPDATE subscribers SET status='BLOCKED', copy_enabled=0 WHERE telegram_id=?",(block_value,))
+            conn.commit(); conn.close()
+        _security_audit_event(source='security',event_type='block_added',actor_id=block_value if block_type=='telegram' else '',remote_ip=block_value if block_type=='ip' else '',details=f'type={block_type} reason={reason}',suspicious=True,suspicious_reason='manual_admin_block')
+        if block_type=='telegram' and CHANNEL_ID and TELEGRAM_BOT_TOKEN:
+            try:
+                res=http_session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/banChatMember",json={"chat_id":CHANNEL_ID,"user_id":int(block_value)},timeout=8)
+                if not res.ok: logger.warning("Telegram banChatMember failed for %s: %s",block_value,res.text[:300])
+            except Exception as exc: logger.warning("Telegram ban attempt failed for %s: %s",block_value,exc)
+        return True, f"{block_type}:{block_value} مسدود شد."
+    except Exception as exc:
+        logger.exception("Security block operation failed: %s",exc); return False, f"خطای مسدودسازی: {exc}"
+
+def _security_unblock_entity(block_type, block_value, actor_id=''):
+    block_type=str(block_type or '').strip().lower(); block_value=str(block_value or '').strip()
+    if block_type not in ('telegram','ip') or not block_value or not _security_ensure_block_table(): return False
+    try:
+        with db_lock:
+            conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False)
+            prev=conn.execute("SELECT prev_status,prev_copy_enabled FROM security_blocks WHERE block_type=? AND block_value=?",(block_type,block_value)).fetchone()
+            conn.execute("UPDATE security_blocks SET active=0 WHERE block_type=? AND block_value=?",(block_type,block_value))
+            if block_type=='telegram' and prev is not None:
+                restore_status=str(prev[0] or '')
+                restore_copy=int(prev[1] if prev[1] is not None else 1)
+                if restore_status:
+                    conn.execute("UPDATE subscribers SET status=?, copy_enabled=? WHERE telegram_id=?",(restore_status,restore_copy,block_value))
+            conn.commit(); conn.close()
+        if block_type=='telegram' and CHANNEL_ID and TELEGRAM_BOT_TOKEN:
+            try:
+                res=http_session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/unbanChatMember",json={"chat_id":CHANNEL_ID,"user_id":int(block_value),"only_if_banned":True},timeout=8)
+                if not res.ok: logger.warning("Telegram unbanChatMember failed for %s: %s",block_value,res.text[:300])
+            except Exception as exc: logger.warning("Telegram unban attempt failed for %s: %s",block_value,exc)
+        _security_audit_event(source='security',event_type='block_removed',actor_id=block_value if block_type=='telegram' else '',remote_ip=block_value if block_type=='ip' else '',details=f'type={block_type} actor={actor_id}')
+        return True
+    except Exception as exc:
+        logger.exception("Security unblock operation failed: %s",exc); return False
+
+def _security_is_blocked_request_ip(public_ip, peer_ip=''):
+    return bool(_security_block_exists('ip',public_ip) or (peer_ip and _security_block_exists('ip',peer_ip)))
+
+def _security_blocked_telegram_update(update):
+    try:
+        user=getattr(update,'effective_user',None); uid=str(getattr(user,'id','') or '')
+        return bool(uid and _security_block_exists('telegram',uid))
+    except Exception: return False
+
+_security_connections_snapshot_base=_security_connections_snapshot
+def _security_connections_snapshot(limit=30):
+    out=_security_connections_snapshot_base(limit); _security_ensure_block_table()
+    try:
+        with db_lock:
+            conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
+            rows=cur.execute("SELECT block_type,block_value,reason,created_at,created_by FROM security_blocks WHERE active=1 ORDER BY created_at DESC").fetchall(); conn.close()
+        out['blocks']=[{'type':str(r[0] or ''),'value':str(r[1] or ''),'reason':str(r[2] or ''),'created_at':float(r[3] or 0),'created_by':str(r[4] or '')} for r in rows]
+    except Exception: out['blocks']=[]
+    for x in out.get('telegram_users',[]): x['blocked']=_security_block_exists('telegram',str(x.get('actor_id') or ''))
+    for x in out.get('web_sources',[]): x['blocked']=_security_block_exists('ip',str(x.get('remote_ip') or ''))
+    return out
+
+def _security_connections_text():
+    snap=_security_connections_snapshot(); lines=["🛡 **اتصالات و دسترسی‌های مشاهده‌شده — کنترل امنیتی**","",f"📢 انتشار سیگنال به کانال: {'🟢 ON' if snap['channel_signal_enabled'] else '🔴 OFF'}",f"📢 مقصد فعلی: `{snap['channel_id'] or 'تنظیم نشده'}`",f"🔗 لینک دعوت ذخیره‌شده: {'🟢 بله' if snap['channel_invite_configured'] else '🔴 خیر'}","",f"👥 مشترک‌های ثبت‌شده DB: `{len(snap['subscribers'])}`",f"👁 Telegram دیده‌شده: `{len(snap['telegram_users'])}`",f"🌐 Web دیده‌شده: `{len(snap['web_sources'])}`","","👤 **Telegram:**"]
+    for x in (snap.get('telegram_users') or [])[:10]:
+        user=f"@{x['username']}" if x.get('username') else '-'; state='🚫 BLOCKED' if x.get('blocked') else '🟢 ACTIVE'; lines.append(f"• ID=`{x['actor_id']}` | {user} | chat={x.get('chat_type') or '-'} | events={x.get('events',0)} | {state}")
+    if not snap.get('telegram_users'): lines.append('• هنوز فعالیتی ثبت نشده است.')
+    lines += ["","🌐 **Web:**"]
+    for x in (snap.get('web_sources') or [])[:10]:
+        state='🚫 BLOCKED' if x.get('blocked') else '🟢 ACTIVE'; lines.append(f"• `{x['remote_ip']}` | events={x.get('events',0)} | {state} | {x.get('user_agent','')[:70]}")
+    if not snap.get('web_sources'): lines.append('• هنوز درخواست وبی ثبت نشده است.')
+    lines += ["","🚫 **مسدودی‌های فعال:**"]
+    if snap.get('blocks'):
+        for b in snap['blocks'][:20]: lines.append(f"• `{b['type']}`=`{b['value']}` | {b['reason'][:80]}")
+    else: lines.append('• هیچ موردی مسدود نیست.')
+    lines += ["","⚠️ مسدودسازی واقعی است؛ دسترسی جدید رد می‌شود و لاگ‌های قبلی حذف نمی‌شوند.","⚠️ Bot API فهرست مخفی استفاده‌کنندگان از Bot Token را ارائه نمی‌کند."]
+    return '\n'.join(lines)
+
+def _security_connections_keyboard(snap=None,max_entities=8):
+    snap=snap if isinstance(snap,dict) else _security_connections_snapshot(30); rows=[]
+    represented=set()
+    for x in (snap.get('telegram_users') or [])[:max_entities]:
+        uid=str(x.get('actor_id') or '').strip()
+        if not uid or (TELEGRAM_CHAT_ID and uid==str(TELEGRAM_CHAT_ID)): continue
+        represented.add(('telegram',uid))
+        action='security_confirm_unblock_tg' if x.get('blocked') else 'security_confirm_block_tg'; label=f"🟢 رفع مسدودی TG {uid}" if x.get('blocked') else f"🚫 مسدود TG {uid}"
+        rows.append([InlineKeyboardButton(label,callback_data=f"{action}:{uid}")])
+    for x in (snap.get('web_sources') or [])[:max_entities]:
+        ip=str(x.get('remote_ip') or '').strip()
+        if not ip or ip in ('127.0.0.1','::1','localhost'): continue
+        represented.add(('ip',ip))
+        action='security_confirm_unblock_ip' if x.get('blocked') else 'security_confirm_block_ip'; label=f"🟢 رفع مسدودی IP {ip}" if x.get('blocked') else f"🚫 مسدود IP {ip}"
+        rows.append([InlineKeyboardButton(label,callback_data=f"{action}:{ip}")])
+    for b in (snap.get('blocks') or []):
+        bt=str(b.get('type') or ''); bv=str(b.get('value') or '')
+        if bt not in ('telegram','ip') or not bv or (bt,bv) in represented: continue
+        if bt=='telegram':
+            if TELEGRAM_CHAT_ID and bv==str(TELEGRAM_CHAT_ID): continue
+            rows.append([InlineKeyboardButton(f"🟢 رفع مسدودی TG {bv}",callback_data=f"security_confirm_unblock_tg:{bv}")])
+        elif bv not in ('127.0.0.1','::1','localhost'):
+            rows.append([InlineKeyboardButton(f"🟢 رفع مسدودی IP {bv}",callback_data=f"security_confirm_unblock_ip:{bv}")])
+    rows.append([InlineKeyboardButton('🔄 بروزرسانی',callback_data='connections')]); rows.append([InlineKeyboardButton('🔙 بازگشت',callback_data='home')])
+    return InlineKeyboardMarkup(rows)
 
 def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_amt, volume, liquidity, p_change, solscan_link, signal_title="🚀 سیگنال ویژه VIP", side="BUY", execution_status="", execution_tx="", pnl_percent=None):
     # کانال باید تمام سیگنال‌های معتبر BUY و SELL را که از مسیر اصلی آمده‌اند منتشر کند.
@@ -5897,6 +6062,9 @@ def _security_audit_web_request():
         rate = _security_rate_count(public_ip)
         ua = str(request.headers.get("User-Agent", "") or "")[:300]
         suspicious, reason = _security_classify_web(request.path, request.method, ua)
+        blocked_ip = _security_is_blocked_request_ip(public_ip, peer_ip)
+        if blocked_ip:
+            suspicious, reason = True, "manual_blocked_ip"
         if rate > _SECURITY_RATE_LIMIT:
             suspicious, reason = True, f"rate>{_SECURITY_RATE_LIMIT}/min"
         g._security_audit = {
@@ -5904,6 +6072,8 @@ def _security_audit_web_request():
             "peer_ip": peer_ip, "forwarded": forwarded, "ua": ua,
             "rate": rate, "suspicious": suspicious, "reason": reason,
         }
+        if blocked_ip:
+            return ("⛔ Forbidden", 403)
     except Exception:
         g._security_audit = None
 
@@ -8215,16 +8385,50 @@ def start_telegram_bot():
                     f"🤖 واقعی بسته‌شده: `{a['real_closed']}` | 📡 سیگنال‌محور: `{a['signal_closed']}`",
                     reply_markup=_main_keyboard(is_admin),parse_mode="Markdown"
                 )
+            elif data.startswith("security_confirm_block_tg:") or data.startswith("security_confirm_block_ip:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False)); return
+                if data.startswith("security_confirm_block_tg:"):
+                    block_type, prefix, action = "telegram", "security_confirm_block_tg:", "tg"
+                else:
+                    block_type, prefix, action = "ip", "security_confirm_block_ip:", "ip"
+                value=data[len(prefix):]; label="Telegram ID" if block_type=="telegram" else "IP"
+                await q.edit_message_text(f"⚠️ **تأیید مسدودسازی**\n\n{label}: `{value}`\n\nاین عملیات دسترسی بعدی این مورد را قطع می‌کند و لاگ‌های قبلی را حذف نمی‌کند.\nمطمئنی؟",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚫 بله، مسدود کن",callback_data=f"security_apply_block_{action}:{value}"),InlineKeyboardButton("❌ لغو",callback_data="connections")]]),parse_mode="Markdown"); return
+            elif data.startswith("security_confirm_unblock_tg:") or data.startswith("security_confirm_unblock_ip:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False)); return
+                if data.startswith("security_confirm_unblock_tg:"):
+                    block_type, prefix, action = "telegram", "security_confirm_unblock_tg:", "tg"
+                else:
+                    block_type, prefix, action = "ip", "security_confirm_unblock_ip:", "ip"
+                value=data[len(prefix):]; label="Telegram ID" if block_type=="telegram" else "IP"
+                await q.edit_message_text(f"⚠️ **تأیید رفع مسدودی**\n\n{label}: `{value}`\n\nدسترسی این مورد دوباره مجاز می‌شود. ادامه بدهم؟",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🟢 بله، رفع کن",callback_data=f"security_apply_unblock_{action}:{value}"),InlineKeyboardButton("❌ لغو",callback_data="connections")]]),parse_mode="Markdown"); return
+            elif data.startswith("security_apply_block_tg:") or data.startswith("security_apply_block_ip:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False)); return
+                if data.startswith("security_apply_block_tg:"):
+                    block_type, prefix = "telegram", "security_apply_block_tg:"
+                else:
+                    block_type, prefix = "ip", "security_apply_block_ip:"
+                value=data[len(prefix):]; ok,msg=_security_block_entity(block_type,value,"manual_admin_block",str(cid)); snap=_security_connections_snapshot(30)
+                await q.edit_message_text(("✅ **دسترسی مسدود شد.**\n\n" if ok else "⚠️ **مسدودسازی انجام نشد.**\n\n")+msg,reply_markup=_security_connections_keyboard(snap),parse_mode="Markdown"); return
+            elif data.startswith("security_apply_unblock_tg:") or data.startswith("security_apply_unblock_ip:"):
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False)); return
+                if data.startswith("security_apply_unblock_tg:"):
+                    block_type, prefix = "telegram", "security_apply_unblock_tg:"
+                else:
+                    block_type, prefix = "ip", "security_apply_unblock_ip:"
+                value=data[len(prefix):]; ok=_security_unblock_entity(block_type,value,str(cid)); snap=_security_connections_snapshot(30)
+                await q.edit_message_text("✅ **رفع مسدودی انجام شد.**" if ok else "⚠️ **رفع مسدودی انجام نشد.**",reply_markup=_security_connections_keyboard(snap),parse_mode="Markdown"); return
             elif data=="connections":
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
                     return
+                snap = _security_connections_snapshot(limit=30)
                 await q.edit_message_text(
                     _security_connections_text(),
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="connections")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
-                    ]),
+                    reply_markup=_security_connections_keyboard(snap),
                     parse_mode="Markdown"
                 )
                 return
@@ -8847,6 +9051,12 @@ def start_telegram_bot():
         app.add_handler(CommandHandler("setvipchannel",setvipchannel_cmd))
         app.add_handler(CommandHandler("settradesol",settradesol_cmd))
         app.add_handler(CommandHandler("cancel",cancel_trade_limit_cmd))
+        async def security_block_guard_handler(update, context):
+            if _security_blocked_telegram_update(update):
+                _security_audit_event(source="telegram",event_type="blocked_update",actor_id=str(getattr(getattr(update,"effective_user",None),"id","") or ""),details="blocked Telegram user attempted interaction",suspicious=True,suspicious_reason="manual_block")
+                raise ApplicationHandlerStop
+        app.add_handler(CallbackQueryHandler(security_block_guard_handler,block=True),group=-3)
+        app.add_handler(MessageHandler(filters.ALL,security_block_guard_handler,block=True),group=-2)
         async def security_audit_message_handler(update, context):
             _security_audit_telegram_update(update)
         app.add_handler(MessageHandler(filters.ALL, security_audit_message_handler, block=False), group=-1)
