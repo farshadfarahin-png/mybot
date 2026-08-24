@@ -327,6 +327,8 @@ NEON_SNAPSHOT_INTERVAL_SECONDS = 30
 NEON_SNAPSHOT_TABLE = "bot_sqlite_snapshots"
 NEON_SNAPSHOT_LOCK = Lock()
 NEON_SNAPSHOT_RUNNING = False
+NEON_LAST_SUCCESS_AT = 0.0
+NEON_LAST_ERROR = ""
 
 try:
     import psycopg2
@@ -389,7 +391,9 @@ def _make_consistent_sqlite_backup():
 
 
 def _upload_sqlite_snapshot_to_neon():
+    global NEON_LAST_SUCCESS_AT, NEON_LAST_ERROR
     if not _ensure_neon_snapshot_table():
+        NEON_LAST_ERROR = "Neon is not configured or psycopg2 is unavailable."
         return False
     backup_path = _make_consistent_sqlite_backup()
     if backup_path is None:
@@ -415,9 +419,12 @@ def _upload_sqlite_snapshot_to_neon():
                         updated_at = EXCLUDED.updated_at
                 """, (next_id, psycopg2.Binary(data)))
         conn.close()
+        NEON_LAST_SUCCESS_AT = time.time()
+        NEON_LAST_ERROR = ""
         logger.info("☁️ Neon: snapshot دیتابیس SQLite با موفقیت ذخیره شد.")
         return True
     except Exception as e:
+        NEON_LAST_ERROR = f"{type(e).__name__}: {e}"[:300]
         logger.warning(f"⚠️ Neon snapshot upload failed; SQLite remains active: {e}")
         return False
     finally:
@@ -1734,7 +1741,8 @@ _SECURITY_PANEL_REFRESH_TASKS = {}
 _SECURITY_PANEL_MAX_TELEGRAM = 50
 _SECURITY_PANEL_MAX_WEB = 50
 _SECURITY_PANEL_MAX_BLOCKS = 50
-_SECURITY_PANEL_MAX_TEXT = 3900
+# Telegram hard limit is 4096 chars. Keep a safety margin for formatting/edit operations.
+_SECURITY_PANEL_MAX_TEXT = 4000
 
 _SECURITY_RATE_LOCK = Lock()
 _SECURITY_RATE_BUCKETS = {}
@@ -1748,6 +1756,16 @@ _SECURITY_SUSPICIOUS_MARKERS = (
     "/.env", "/.git", "/wp-admin", "/wp-login", "/phpmyadmin", "/xmlrpc.php",
     "/vendor/phpunit", "/cgi-bin/", "../", "%2e%2e", "%252e", "jndi:",
 )
+_SECURITY_MONITOR_UA_MARKERS = ("uptimerobot", "uptime robot")
+
+
+def _security_is_monitoring_probe(user_agent="", remote_ip=""):
+    """Hide known uptime/health-check traffic from the human security panel.
+    The raw audit record is still retained; this is display filtering only.
+    """
+    ua = str(user_agent or "").lower()
+    ip = str(remote_ip or "").strip().lower()
+    return any(marker in ua for marker in _SECURITY_MONITOR_UA_MARKERS)
 
 
 def _security_request_id():
@@ -2024,27 +2042,42 @@ def _security_connections_snapshot(limit=30):
                     "name": (" ".join(x for x in (r[4], r[5]) if x)).strip(),
                     "last_seen": float(r[6] or 0), "events": int(r[7] or 0),
                 })
+            # Fetch extra rows because benign monitoring probes are filtered from the UI.
+            web_limit = max(int(limit) * 5, 50)
             cur.execute("""
                 SELECT remote_ip, user_agent, MAX(created_at) AS last_seen, COUNT(*) AS events
                 FROM security_audit
                 WHERE source='web' AND remote_ip!=''
                 GROUP BY remote_ip, user_agent
                 ORDER BY last_seen DESC LIMIT ?
-            """, (int(limit),))
+            """, (web_limit,))
             for r in cur.fetchall():
+                remote_ip = str(r[0] or "")
+                user_agent = str(r[1] or "")
+                if _security_is_monitoring_probe(user_agent, remote_ip):
+                    continue
                 out["web_sources"].append({
-                    "remote_ip": str(r[0] or ""), "user_agent": str(r[1] or ""),
+                    "remote_ip": remote_ip, "user_agent": user_agent,
                     "last_seen": float(r[2] or 0), "events": int(r[3] or 0),
                 })
+                if len(out["web_sources"]) >= int(limit):
+                    break
             cur.execute("""
-                SELECT source,event_type,actor_id,chat_id,remote_ip,details,created_at
-                FROM security_audit ORDER BY id DESC LIMIT 20
+                SELECT source,event_type,actor_id,chat_id,remote_ip,details,created_at,user_agent
+                FROM security_audit ORDER BY id DESC LIMIT 100
             """)
-            out["recent_events"] = [
-                {"source":r[0],"event_type":r[1],"actor_id":r[2],"chat_id":r[3],
-                 "remote_ip":r[4],"details":r[5],"created_at":float(r[6] or 0)}
-                for r in cur.fetchall()
-            ]
+            for r in cur.fetchall():
+                remote_ip = str(r[4] or "")
+                user_agent = str(r[7] or "")
+                if str(r[0] or "") == "web" and _security_is_monitoring_probe(user_agent, remote_ip):
+                    continue
+                out["recent_events"].append({
+                    "source":r[0],"event_type":r[1],"actor_id":r[2],"chat_id":r[3],
+                    "remote_ip":remote_ip,"details":r[5],"created_at":float(r[6] or 0),
+                    "user_agent":user_agent,
+                })
+                if len(out["recent_events"]) >= 20:
+                    break
             conn.close()
     except Exception as exc:
         logger.debug("Security snapshot read failed: %s", exc)
@@ -2265,6 +2298,20 @@ _security_connections_snapshot_base=_security_connections_snapshot
 def _security_connections_snapshot(limit=30):
     limit=max(1,min(int(limit or 30),_SECURITY_PANEL_MAX_TELEGRAM,_SECURITY_PANEL_MAX_WEB))
     out=_security_connections_snapshot_base(limit); _security_ensure_block_table()
+    # Neon status is read-only here; it never blocks or alters the security panel.
+    if NEON_DATABASE_URL and psycopg2 is not None:
+        neon_state = "🟢 فعال"
+        if NEON_LAST_SUCCESS_AT:
+            neon_last = datetime.fromtimestamp(NEON_LAST_SUCCESS_AT).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            neon_last = "هنوز snapshot موفقی ثبت نشده"
+    elif NEON_DATABASE_URL:
+        neon_state = "🟠 DATABASE_URL هست ولی psycopg2 در دسترس نیست"
+        neon_last = "-"
+    else:
+        neon_state = "🔴 تنظیم نشده"
+        neon_last = "-"
+    out["neon_status"] = {"state": neon_state, "last_success": neon_last, "last_error": NEON_LAST_ERROR[:180]}
     try:
         with db_lock:
             conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
@@ -2282,7 +2329,9 @@ def _security_connections_text(snap=None):
         "🛡 **اتصالات و دسترسی‌های مشاهده‌شده — کنترل امنیتی**","",
         f"📢 انتشار سیگنال به کانال: {'🟢 ON' if snap['channel_signal_enabled'] else '🔴 OFF'}",
         f"📢 مقصد فعلی: `{snap['channel_id'] or 'تنظیم نشده'}`",
-        f"🔗 لینک دعوت ذخیره‌شده: {'🟢 بله' if snap['channel_invite_configured'] else '🔴 خیر'}","",
+        f"🔗 لینک دعوت ذخیره‌شده: {'🟢 بله' if snap['channel_invite_configured'] else '🔴 خیر'}",
+        f"☁️ Neon SQLite Mirror: {snap.get('neon_status', {}).get('state', '🔴 نامشخص')}",
+        f"   آخرین snapshot موفق: `{snap.get('neon_status', {}).get('last_success', '-')}`",
         f"👥 مشترک‌های ثبت‌شده DB: `{len(snap['subscribers'])}`",
         f"👁 Telegram دیده‌شده: `{len(snap.get('telegram_users') or [])}`",
         f"🌐 Web دیده‌شده: `{len(snap.get('web_sources') or [])}",
@@ -2354,7 +2403,13 @@ async def _security_panel_refresh_loop(bot,chat_id,message_id):
             await asyncio.sleep(_SECURITY_PANEL_REFRESH_INTERVAL)
             snap=_security_connections_snapshot(50)
             try:
-                await bot.edit_message_text(chat_id=chat_id,message_id=message_id,text=_security_connections_text(snap),reply_markup=_security_connections_keyboard(snap),parse_mode='Markdown')
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=_security_connections_text(snap).replace("**", "").replace("`", ""),
+                    reply_markup=_security_connections_keyboard(snap),
+                    parse_mode=None
+                )
             except Exception as exc:
                 if 'not modified' in str(exc).lower(): continue
                 raise
@@ -7688,15 +7743,54 @@ def _main_keyboard(is_admin=False):
         rows.append([InlineKeyboardButton("💎 آمار Professional Wallet", callback_data="pro_wallet_panel")])
     return InlineKeyboardMarkup(rows)
 
+def _bottom_panel_inline_keyboard(is_open=False, is_admin=False):
+    """Inline callback control: no toggle command is sent to the chat."""
+    if not is_open:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("🎛 چهار کلید", callback_data="bottom_panel_open")
+        ]])
+    rows = [
+        [InlineKeyboardButton("🎛 چهار کلید", callback_data="bottom_panel_close")],
+        [InlineKeyboardButton("📊 وضعیت موتورها", callback_data="bottom_status_engines"),
+         InlineKeyboardButton("💼 وضعیت ولت", callback_data="bottom_status_wallet")],
+        [InlineKeyboardButton("📈 آمار معاملات", callback_data="bottom_status_trades"),
+         InlineKeyboardButton("💎 آمار Wallet", callback_data="pro_wallet_panel")],
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton("👑 پنل مدیریت", callback_data="admin"),
+                     InlineKeyboardButton("🔐 امنیت/وضعیت", callback_data="security")])
+        rows.append([InlineKeyboardButton("🛡 اتصالات و دسترسی‌ها", callback_data="connections")])
+    return InlineKeyboardMarkup(rows)
+
 def _persistent_bottom_keyboard(is_admin=False):
     """
     پنل پایین تلگرام به‌صورت Reply Keyboard.
     پنل Inline فعلی حذف/جابجا نمی‌شود؛ این فقط یک نسخهٔ دوم و دائمی از
     کنترل‌های اصلی است تا هنگام زیاد شدن سیگنال‌ها همچنان پایین چت در دسترس باشد.
     """
-    # فقط /start به‌صورت Reply Keyboard باقی می‌ماند؛
-    # پنل کنترل اصلی همان Inline Keyboard است و دیگر صفحه را اشغال نمی‌کند.
-    rows = [["/start"]]
+    rows = [
+        ["📊 وضعیت موتورها", "💼 وضعیت ولت"],
+        ["📈 آمار معاملات", "🎛 کنترل موتورها"],
+    ]
+    if WEBAPP_URL:
+        rows.append(["📱 Mini App VIP"])
+    elif CHANNEL_INVITE_LINK:
+        rows.append(["📢 کانال VIP"])
+    if is_admin:
+        rows += [
+            [f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"],
+            [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"],
+            [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"],
+            ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"],
+            ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"],
+            ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"],
+            [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"],
+            [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"],
+            ["🧠 مرکز یادگیری"],
+            [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"],
+            [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"],
+            ["🎁 عضویت رایگان کاربر"],
+        ]
     return ReplyKeyboardMarkup(
         rows,
         resize_keyboard=True,
@@ -7704,6 +7798,15 @@ def _persistent_bottom_keyboard(is_admin=False):
         is_persistent=False,
         selective=False,
     )
+
+def _expanded_bottom_keyboard(is_admin=False):
+    rows = [["🎛 چهار کلید"], ["/start"], ["📊 وضعیت موتورها", "💼 وضعیت ولت"], ["📈 آمار معاملات", "🎛 کنترل موتورها"]]
+    if WEBAPP_URL: rows.append(["📱 Mini App VIP"])
+    elif CHANNEL_INVITE_LINK: rows.append(["📢 کانال VIP"])
+    if is_admin:
+        rows += [[f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}"], [f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}"], [f"📢 ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}"], ["🪟🔮 کنترل شیشه‌ای کامل سیگنال"], ["👑 پنل مدیریت", "🔐 امنیت/وضعیت"], ["🛡 اتصالات و دسترسی‌های مشاهده‌شده"], [f"🎯 سقف روزانه (بودجه سیگنال): {daily_signal_status_text()}"], [f"📈 موتور تحلیل: {'🟢 ON' if ANALYSIS_ENGINE_ENABLED else '🔴 OFF'}"], ["🧠 مرکز یادگیری"], [f"🧠 یادگیری خودکار: {'🟢 ON' if AUTO_LEARNING_ENABLED else '🔴 OFF'}"], [f"🛠️ بهبود خودکار: {'🟢 ON' if AUTO_IMPROVEMENT_ENABLED else '🔴 OFF'}"], ["🎁 عضویت رایگان کاربر"]]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False, is_persistent=True, selective=False)
+
 
 ENGINE_SWITCHES = [
     ("Analysis", "ANALYSIS_ENGINE_ENABLED", "toggle_engine_analysis"),
@@ -7794,11 +7897,11 @@ def start_telegram_bot():
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
-            # پنل فعلی بالا عمداً حفظ می‌شود.
-            # این پیام دوم فقط Reply Keyboard دائمی پایین تلگرام را فعال می‌کند.
+            # کنترل ثابت پنل پایین با callback انجام می‌شود؛ هیچ دستور متنی toggle ارسال نمی‌شود.
             await update.message.reply_text(
-                "📌 /start برای دسترسی سریع در پایین چت فعال شد.",
-                reply_markup=_persistent_bottom_keyboard(is_admin),
+                "🎛 **پنل کنترل**\n\nپنل در حالت بسته است.",
+                reply_markup=_bottom_panel_inline_keyboard(False, is_admin),
+                parse_mode="Markdown"
             )
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             cid = str(update.effective_user.id)
@@ -7964,8 +8067,19 @@ def start_telegram_bot():
                 return
 
             label = msg.text.strip()
+            # If the user leaves the security panel via a Reply Keyboard action,
+            # stop editing the old security message. The connections action above
+            # starts a fresh refresh task for its new message.
+            _security_panel_cancel_refresh(msg.chat_id)
             cid = str(update.effective_user.id)
             is_admin = bool(TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID))
+
+            # یک کلید ثابت پایین: همان کلید هم باز می‌کند و هم می‌بندد.
+            # وضعیت فقط در context کاربر نگه‌داری می‌شود؛ پنل اصلی ربات دست‌نخورده می‌ماند.
+            if label == "🎛 چهار کلید":
+                # Toggle واقعی فقط با InlineKeyboard callback انجام می‌شود.
+                # این مسیر قدیمی عمداً هیچ پیام یا دستور جدیدی تولید نمی‌کند.
+                return
 
             # وضعیت موتورها
             if label == "📊 وضعیت موتورها":
@@ -8135,6 +8249,21 @@ def start_telegram_bot():
                 return
 
             # Admin / security
+            if label == "🛡 اتصالات و دسترسی‌های مشاهده‌شده":
+                if not is_admin:
+                    await msg.reply_text("⛔ فقط ادمین.")
+                    return
+                _security_panel_cancel_refresh(msg.chat_id)
+                snap = _security_connections_snapshot(limit=50)
+                security_text = _security_connections_text(snap).replace("**", "").replace("`", "")
+                sent = await msg.reply_text(
+                    security_text,
+                    reply_markup=_security_connections_keyboard(snap),
+                    parse_mode=None
+                )
+                _security_panel_start_refresh(context, msg.chat_id, sent.message_id)
+                return
+
             if label == "👑 پنل مدیریت":
                 if not is_admin:
                     await msg.reply_text("⛔ دسترسی غیرمجاز.")
@@ -8156,27 +8285,8 @@ def start_telegram_bot():
                     f"Private Key: {'🟢 Environment' if PRIVATE_KEY_BASE58 else '🔴 تنظیم نشده'}\n"
                     f"RPCها: `{len(RPC_ENDPOINTS)}`\n"
                     f"Admin Secret: {'🟢 تنظیم شده' if ADMIN_SECRET_KEY else '🔴 تنظیم نشده'}",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🛡 اتصالات و دسترسی‌های مشاهده‌شده", callback_data="connections")],
-                        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
-                    ]),
                     parse_mode="Markdown"
                 )
-                return
-
-            # اتصالات و دسترسی‌ها: همان پنل امنیتی واقعی، با رفرش خودکار.
-            # این میانبر فقط callback موجود را صدا می‌زند و به موتور سیگنال دست نمی‌زند.
-            if label == "🛡 اتصالات و دسترسی‌های مشاهده‌شده":
-                if not is_admin:
-                    await msg.reply_text("⛔ فقط ادمین.")
-                    return
-                snap = _security_connections_snapshot(limit=50)
-                sent = await msg.reply_text(
-                    _security_connections_text(snap),
-                    reply_markup=_security_connections_keyboard(snap),
-                    parse_mode="Markdown"
-                )
-                _security_panel_start_refresh(context, msg.chat_id, sent.message_id)
                 return
 
             # Daily limit: existing manual-input handler will receive the number.
@@ -8280,6 +8390,27 @@ def start_telegram_bot():
             global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
             _security_audit_telegram_update(update)
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
+            if data == "bottom_panel_open":
+                await q.edit_message_text("🎛 **پنل کنترل**\n\nپنل باز است.", reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
+                return
+            if data == "bottom_panel_close":
+                await q.edit_message_text("🎛 **پنل کنترل**\n\nپنل بسته است.", reply_markup=_bottom_panel_inline_keyboard(False, is_admin), parse_mode="Markdown")
+                return
+            if data == "bottom_status_engines":
+                await q.edit_message_text("🎛 **وضعیت موتورهای هوشمند**\n\n" + _engine_status_lines(), reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
+                return
+            if data == "bottom_status_wallet":
+                if not is_admin:
+                    await q.answer("⛔ فقط ادمین.", show_alert=True)
+                    return
+                sol_balance = await _tg_bg(get_sol_balance)
+                state = "🟢 ON — BUY/SELL واقعی مجاز است" if WALLET_TRADE_PERMISSION else "🔴 OFF — معامله واقعی ممنوع است"
+                await q.edit_message_text(f"💼 **ولت اصلی**\n\n💰 موجودی SOL: `{sol_balance:.6f}`\n🔐 مجوز معامله: {state}", reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
+                return
+            if data == "bottom_status_trades":
+                stats = await _tg_bg(get_advanced_trade_analytics)
+                await q.edit_message_text("📈 **آمار معاملات**\n\n" + str(stats), reply_markup=_bottom_panel_inline_keyboard(True, is_admin), parse_mode="Markdown")
+                return
             if data != "connections":
                 _security_panel_cancel_refresh(cid)
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 سیگنال اصلی: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
@@ -8491,13 +8622,23 @@ def start_telegram_bot():
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
                     return
-                snap = _security_connections_snapshot(limit=30)
-                await q.edit_message_text(
-                    _security_connections_text(snap),
-                    reply_markup=_security_connections_keyboard(snap),
-                    parse_mode="Markdown"
-                )
-                _security_panel_start_refresh(context,q.message.chat.id,q.message.message_id)
+                snap = _security_connections_snapshot(limit=50)
+                security_text = _security_connections_text(snap).replace("**", "").replace("`", "")
+                try:
+                    await q.edit_message_text(
+                        security_text,
+                        reply_markup=_security_connections_keyboard(snap),
+                        parse_mode=None
+                    )
+                    security_message_id = q.message.message_id
+                except Exception as exc:
+                    logger.warning("Security connections edit failed; sending fallback: %s", exc)
+                    sent = await q.message.reply_text(
+                        security_text,
+                        reply_markup=_security_connections_keyboard(snap)
+                    )
+                    security_message_id = sent.message_id
+                _security_panel_start_refresh(context, q.message.chat.id, security_message_id)
                 return
             elif data=="security":
                 if not is_admin: await q.edit_message_text("⛔ فقط ادمین.",reply_markup=_main_keyboard(False))
@@ -8967,6 +9108,31 @@ def start_telegram_bot():
                 if not PRO_WALLET_RADAR_ENABLED:
                     await q.answer("اول اجازه رصد را روشن کن.", show_alert=True)
                     return
+
+                # کپی واقعی فقط برای Wallet منتخب و واجد شرایط فعال می‌شود.
+                selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
+                if not selected:
+                    await q.answer("اول از لیست، یک Wallet را انتخاب کن.", show_alert=True)
+                    return
+                try:
+                    with db_lock:
+                        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                        selected_row = conn.execute(
+                            "SELECT win_rate,total_trade,realized_profit_usd FROM pro_wallet_candidates WHERE wallet_address=?",
+                            (selected,)
+                        ).fetchone()
+                        conn.close()
+                except Exception:
+                    selected_row = None
+                if (
+                    not selected_row
+                    or int(selected_row[1] or 0) < PRO_WALLET_MIN_TRADES
+                    or float(selected_row[0] or 0) < PRO_WALLET_MIN_WIN_RATE
+                    or float(selected_row[2] or 0) < 0
+                ):
+                    await q.answer("Wallet منتخب حداقل شرایط کپی واقعی را ندارد.", show_alert=True)
+                    return
+
                 state = _pro_wallet_toggle_copy()
                 if state and not WALLET_TRADE_PERMISSION:
                     text = (
@@ -8978,8 +9144,8 @@ def start_telegram_bot():
                     _set_bot_setting("pro_wallet_last_copy_scan_at", "0")
                     text = (
                         "🟢 **اجازه کپی واقعی Wallet روشن شد.**\n\n"
-                        "کپی فقط از بهترین Wallet رتبه‌بندی‌شده انجام می‌شود.\n"
-                        "خرید/فروش از همین لحظه فقط با مجوز اصلی ولت انجام خواهد شد."
+                        f"Wallet منتخب: `{selected}`\n"
+                        "از این لحظه فقط معاملات جدید همین Wallet پایش و در صورت داشتن مجوز اصلی، BUY/SELL واقعی اجرا می‌شوند."
                     )
                 else:
                     text = "🔴 **اجازه کپی واقعی Wallet خاموش شد.**\n\n✅ رصد و آمار می‌توانند مستقل ادامه داشته باشند."
