@@ -85,6 +85,39 @@ ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY", "").strip()
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip() or VIP_CHANNEL_ID
 CHANNEL_INVITE_LINK = os.environ.get("CHANNEL_INVITE_LINK", "").strip()
 
+def ensure_channel_invite_link():
+    """Return the configured VIP invite link; create one only when needed.
+
+    This is intentionally isolated from signal generation. Failures are best-effort
+    and never stop the bot: Telegram must have admin/invite rights in the channel.
+    """
+    global CHANNEL_INVITE_LINK, CHANNEL_ID
+    if CHANNEL_INVITE_LINK:
+        return CHANNEL_INVITE_LINK
+    if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
+        return ""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink"
+        resp = http_session.post(
+            url,
+            json={"chat_id": CHANNEL_ID},
+            timeout=15,
+        )
+        data = resp.json()
+        link = str(((data.get("result") or {}).get("invite_link")) or "").strip()
+        if resp.ok and data.get("ok") and link:
+            CHANNEL_INVITE_LINK = link
+            try:
+                _set_bot_setting("vip_channel_invite", link)
+            except Exception:
+                pass
+            logger.info("📢 VIP channel invite link is available.")
+            return link
+        logger.warning("⚠️ Telegram could not create VIP invite link: %s", str(data.get("description") or "unknown error")[:200])
+    except Exception as e:
+        logger.warning("⚠️ VIP invite link check failed: %s", e)
+    return ""
+
 PRIVATE_KEY_BASE58 = os.environ.get("PRIVATE_KEY_BASE58", "").strip()
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()
 VIP_PRICE_SOL = 0.0  
