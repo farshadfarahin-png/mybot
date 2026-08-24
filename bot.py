@@ -189,8 +189,13 @@ PRO_WALLET_RADAR_ENABLED = False
 PRO_WALLET_COPY_PERMISSION = False
 PRO_WALLET_RADAR_INTERVAL_SECONDS = 1200.0  # 20 minutes; wallet discovery/statistics refresh
 PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 60.0  # 60 seconds for real-copy monitoring
-PRO_WALLET_MIN_TRADES = 10
-PRO_WALLET_MIN_WIN_RATE = 65.0
+# 🎯 شرایط رسمی شکار Wallet — فقط Walletهایی که همه این شروط را داشته باشند
+# وارد لیست «قابل انتخاب» می‌شوند.
+PRO_WALLET_MIN_TRADES = 12          # حداقل کل معاملات
+PRO_WALLET_MIN_WINS = 9             # حداقل معاملات موفق
+PRO_WALLET_MIN_WIN_RATE = 80.0      # حداقل Win Rate
+PRO_WALLET_MIN_PNL_PERCENT = 70.0   # حداقل P/L یا Realized PnL درصدی
+PRO_WALLET_MIN_VOLUME_USD = 5000.0  # حداقل حجم معاملات به دلار
 PRO_WALLET_DISCOVERY_LIMIT = 12
 PRO_WALLET_PNL_CHECK_LIMIT = 10
 PRO_WALLET_LOOKBACK = "30d"
@@ -6763,6 +6768,9 @@ def _signal_glass_summary():
 PRO_WALLET_DB_READY = False
 PRO_WALLET_BIRDEYE_BASE = "https://public-api.birdeye.so"
 
+# 🧾 این نسخه فقط Walletهایی را قابل انتخاب می‌کند که همه شروط شکار را همزمان داشته باشند.
+# دکمه‌ها و منطق کپی واقعی عمداً در این تغییر دست‌نخورده باقی مانده‌اند.
+
 
 def _pro_wallet_db():
     """ساخت جدول‌های مستقل رادار بدون دست‌زدن به داده‌های قبلی ربات."""
@@ -6792,7 +6800,8 @@ def _pro_wallet_db():
                     rank_position INTEGER NOT NULL DEFAULT 0,
                     source TEXT NOT NULL DEFAULT '',
                     last_trade_at REAL NOT NULL DEFAULT 0,
-                    last_seen REAL NOT NULL DEFAULT 0
+                    last_seen REAL NOT NULL DEFAULT 0,
+                    total_volume_usd REAL NOT NULL DEFAULT 0
                 )
             """)
             cols = {r[1] for r in cur.execute("PRAGMA table_info(pro_wallet_candidates)").fetchall()}
@@ -6803,6 +6812,7 @@ def _pro_wallet_db():
                 "unrealized_profit_percent": "REAL NOT NULL DEFAULT 0",
                 "cashflow_usd": "REAL NOT NULL DEFAULT 0",
                 "last_trade_at": "REAL NOT NULL DEFAULT 0",
+                "total_volume_usd": "REAL NOT NULL DEFAULT 0",
             }
             for col, definition in migrations.items():
                 if col not in cols:
@@ -7026,26 +7036,46 @@ def _pro_wallet_wallet_from_item(item):
 
 
 def _pro_wallet_item_metrics(item):
-    """خواندن آمار خود leaderboard؛ بدون زدن endpoint PnL جداگانه."""
+    """
+    # 📊 استخراج معیارهای لازم برای شکار Wallet از همان پاسخ Birdeye.
+    # هیچ endpoint جداگانه PnL برای هر Wallet صدا زده نمی‌شود.
+    # شروط نهایی: WR>=80%، P/L>=70%، معاملات>=12، موفق>=9، حجم>=5000$.
+    """
     counts = item.get("counts") if isinstance(item.get("counts"), dict) else {}
     pnl = item.get("pnl") if isinstance(item.get("pnl"), dict) else {}
+    cashflow = item.get("cashflow_usd") if isinstance(item.get("cashflow_usd"), dict) else {}
     src = dict(item)
     src.update({f"counts_{k}": v for k, v in counts.items()})
     src.update({f"pnl_{k}": v for k, v in pnl.items()})
+    src.update({f"cashflow_{k}": v for k, v in cashflow.items()})
 
     total_buy = _pro_wallet_int(src, "total_buy", "totalBuy", "counts_total_buy")
     total_sell = _pro_wallet_int(src, "total_sell", "totalSell", "counts_total_sell")
     total_trade = _pro_wallet_int(src, "total_trade", "totalTrade", "trade_count", "trades", "totalTrades", default=total_buy + total_sell)
-    total_win = _pro_wallet_int(src, "total_win", "totalWin", "wins", "winning_trades", default=0)
-    total_loss = _pro_wallet_int(src, "total_loss", "totalLoss", "losses", "losing_trades", default=0)
+    total_win = _pro_wallet_int(src, "total_win", "totalWin", "wins", "winning_trades", "winningTrades", default=0)
+    total_loss = _pro_wallet_int(src, "total_loss", "totalLoss", "losses", "losing_trades", "losingTrades", default=0)
     win_rate = _pro_wallet_number(src, "win_rate", "winRate", "winrate", default=0.0)
-    realized_usd = _pro_wallet_number(src, "realized_profit_usd", "realizedProfitUsd", "realizedPnlUsd", "realized_pnl", "realizedPnL", "pnl", default=0.0)
-    realized_pct = _pro_wallet_number(src, "realized_profit_percent", "realizedProfitPercent", "realized_pnl_percent", "roi", default=0.0)
-    unrealized_usd = _pro_wallet_number(src, "unrealized_profit_usd", "unrealizedProfitUsd", "unrealizedPnlUsd", default=0.0)
-    unrealized_pct = _pro_wallet_number(src, "unrealized_profit_percent", "unrealizedProfitPercent", default=0.0)
+    realized_usd = _pro_wallet_number(src, "realized_profit_usd", "realizedProfitUsd", "realizedPnlUsd", "realized_pnl", "realizedPnL", default=0.0)
+    realized_pct = _pro_wallet_number(src, "realized_profit_percent", "realizedProfitPercent", "realized_pnl_percent", "realizedPnlPercent", "roi", default=0.0)
+    unrealized_usd = _pro_wallet_number(src, "unrealized_profit_usd", "unrealizedProfitUsd", "unrealizedPnlUsd", "unrealized_usd", default=0.0)
+    unrealized_pct = _pro_wallet_number(src, "unrealized_profit_percent", "unrealizedProfitPercent", "unrealizedPnlPercent", default=0.0)
     total_usd = _pro_wallet_number(src, "total_usd", "totalUsd", "total_pnl_usd", "totalPnlUsd", "total_pnl", default=realized_usd + unrealized_usd)
-    cashflow_usd = _pro_wallet_number(src, "cashflow_usd", "cashflowUsd", "cashFlowUsd", default=0.0)
     last_trade_at = _pro_wallet_number(src, "last_trade_time", "lastTradeTime", "last_trade_unix_time", "lastTradeUnixTime", default=0)
+
+    # 💰 حجم معاملات: اول فیلدهای صریح volume/turnover، سپس cashflow.
+    total_volume_usd = _pro_wallet_number(
+        src, "total_volume_usd", "totalVolumeUsd", "volume_usd", "volumeUsd",
+        "trading_volume_usd", "tradingVolumeUsd", "turnover_usd", "turnoverUsd",
+        "volume", "total_volume", "totalVolume", default=0.0
+    )
+    if total_volume_usd <= 0 and cashflow:
+        invested = _pro_wallet_number(cashflow, "total_invested", "totalInvested", default=0.0)
+        sold = _pro_wallet_number(cashflow, "total_sold", "totalSold", default=0.0)
+        total_volume_usd = max(0.0, invested) + max(0.0, sold)
+    if total_volume_usd <= 0:
+        invested = _pro_wallet_number(src, "cashflow_total_invested", "total_invested", "totalInvested", default=0.0)
+        sold = _pro_wallet_number(src, "cashflow_total_sold", "total_sold", "totalSold", default=0.0)
+        total_volume_usd = max(0.0, invested) + max(0.0, sold)
 
     if total_trade <= 0:
         total_trade = total_buy + total_sell
@@ -7054,84 +7084,81 @@ def _pro_wallet_item_metrics(item):
     if win_rate <= 0 and total_win + total_loss > 0:
         win_rate = total_win / max(1, total_win + total_loss) * 100.0
 
-    # اگر leaderboard فقط PnL را دارد، Wallet باز هم قابل انتخاب است.
     score = (
-        max(0.0, min(100.0, win_rate)) * 0.55
+        max(0.0, min(100.0, win_rate)) * 0.40
         + max(-50.0, min(150.0, realized_pct)) * 0.30
         + min(100.0, float(total_trade)) * 0.15
+        + min(100.0, math.log10(max(1.0, total_volume_usd)) * 12.0) * 0.15
     )
     return {
-        "win_rate": win_rate,
-        "total_trade": total_trade,
-        "total_win": total_win,
-        "total_loss": total_loss,
-        "total_buy": total_buy,
-        "total_sell": total_sell,
-        "realized_profit_usd": realized_usd,
-        "realized_profit_percent": realized_pct,
-        "unrealized_profit_usd": unrealized_usd,
-        "unrealized_profit_percent": unrealized_pct,
-        "total_pnl_usd": total_usd,
-        "cashflow_usd": cashflow_usd,
-        "last_trade_at": last_trade_at,
-        "score": score,
+        "win_rate": win_rate, "total_trade": total_trade, "total_win": total_win, "total_loss": total_loss,
+        "total_buy": total_buy, "total_sell": total_sell, "realized_profit_usd": realized_usd,
+        "realized_profit_percent": realized_pct, "unrealized_profit_usd": unrealized_usd,
+        "unrealized_profit_percent": unrealized_pct, "total_pnl_usd": total_usd,
+        "cashflow_usd": total_volume_usd, "total_volume_usd": total_volume_usd,
+        "last_trade_at": last_trade_at, "score": score,
     }
 
 
 def _pro_wallet_discover(force=False):
     """
-    # 🔎 کشف واقعی چند Wallet حرفه‌ای از Birdeye.
-    # طبق مستندات فعلی Birdeye:
-    #   endpoint = /trader/gainers-losers
-    #   type = yesterday | today | 1W | 30d | 90d
-    #   sort_by = PnL | realized_pnl | unrealized_pnl
-    #   limit تا 100
-    # بنابراین فقط یک درخواست می‌زنیم تا CU بی‌جهت مصرف نشود.
-    # این تابع هیچ دکمه، انتخاب Wallet یا منطق کپی را تغییر نمی‌دهد.
+    # 🔎 شکار Walletهای واجد شرایط از Birdeye.
+    # فقط یک درخواست Leaderboard می‌زنیم تا مصرف CU کنترل شود.
+    # سپس همه شروط کاربر روی همان پاسخ اعمال می‌شوند.
     """
-    # برای پیدا کردن Walletهای فعال و سودده، PnL هفتگی انتخاب شده است.
-    # یک درخواست 30-CU بیشتر نمی‌زنیم؛ اگر CU تمام باشد باید همان خطا شفاف نمایش داده شود.
     data, err = _pro_wallet_api_get(
         "/trader/gainers-losers",
-        params={
-            "type": "1W",
-            "sort_by": "PnL",
-            "sort_type": "desc",
-            "offset": 0,
-            "limit": min(100, max(20, int(PRO_WALLET_DISCOVERY_LIMIT or 20))),
-        },
-        timeout=15,
-        force=force,
+        params={"type": "1W", "sort_by": "PnL", "sort_type": "desc", "offset": 0,
+                "limit": min(100, max(20, int(PRO_WALLET_DISCOVERY_LIMIT or 20)))},
+        timeout=15, force=force,
     )
     if data is None:
         return [], err
 
-    # پاسخ رسمی این endpoint به‌صورت data.items است؛ extractor فعلی هر دو حالت
-    # list و dict را پوشش می‌دهد.
     items = _pro_wallet_extract_items(data)
-    candidates = []
-    seen = set()
+    candidates, seen = [], set()
+    rejected = {"trades": 0, "wins": 0, "wr": 0, "pnl": 0, "volume": 0, "wallet": 0}
 
     for item in items:
         wallet = _pro_wallet_wallet_from_item(item)
         if not wallet or wallet in seen:
+            rejected["wallet"] += 1
             continue
         seen.add(wallet)
         metrics = _pro_wallet_item_metrics(item)
         metrics["wallet_address"] = wallet
+
+        if int(metrics["total_trade"]) < PRO_WALLET_MIN_TRADES:
+            rejected["trades"] += 1; continue
+        if int(metrics["total_win"]) < PRO_WALLET_MIN_WINS:
+            rejected["wins"] += 1; continue
+        if float(metrics["win_rate"]) < PRO_WALLET_MIN_WIN_RATE:
+            rejected["wr"] += 1; continue
+        if float(metrics["realized_profit_percent"]) < PRO_WALLET_MIN_PNL_PERCENT:
+            rejected["pnl"] += 1; continue
+        if float(metrics["total_volume_usd"]) < PRO_WALLET_MIN_VOLUME_USD:
+            rejected["volume"] += 1; continue
+
         candidates.append(metrics)
 
-    if not candidates:
-        # اگر پاسخ موفق بود ولی آدرس استخراج نشد، نمونه کلیدهای پاسخ را در خطا ثبت کن
-        # تا دفعه بعد بدون دست‌زدن به پنل بدانیم Birdeye دقیقاً چه ساختاری فرستاده است.
-        sample_keys = []
-        for item in items[:3]:
-            if isinstance(item, dict):
-                sample_keys.append(sorted(str(k) for k in item.keys())[:30])
-        detail = json.dumps(sample_keys, ensure_ascii=False)[:900]
-        return [], f"Birdeye پاسخ داد اما هیچ Wallet قابل استخراج نبود. کلیدهای نمونه پاسخ: {detail}"
+    if not items:
+        return [], "Birdeye پاسخ موفق داد ولی لیست Walletها خالی بود."
 
-    return candidates, ""
+    if not candidates:
+        return [], (
+            f"از {len(items)} کاندیدا هیچ Walletی همه شروط را نداشت. "
+            f"شرایط: WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}% | P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}% | "
+            f"معاملات≥{PRO_WALLET_MIN_TRADES} | موفق≥{PRO_WALLET_MIN_WINS} | حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f}. "
+            f"ردشدن‌ها: trades={rejected['trades']}, wins={rejected['wins']}, WR={rejected['wr']}, "
+            f"P/L={rejected['pnl']}, volume={rejected['volume']}."
+        )
+
+    candidates.sort(key=lambda x: (float(x["score"]), float(x["realized_profit_percent"]), float(x["win_rate"])), reverse=True)
+    return candidates[:25], (
+        f"{len(candidates)} Wallet واجد شرایط از {len(items)} کاندیدا پیدا شد "
+        f"(WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}%، P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}%، "
+        f"معاملات≥{PRO_WALLET_MIN_TRADES}، موفق≥{PRO_WALLET_MIN_WINS}، حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f})."
+    )
 
 
 def _pro_wallet_refresh(force=True):
@@ -7169,8 +7196,8 @@ def _pro_wallet_refresh(force=True):
                         wallet_address,win_rate,total_trade,total_win,total_loss,total_buy,total_sell,
                         realized_profit_usd,realized_profit_percent,unrealized_profit_usd,
                         unrealized_profit_percent,total_pnl_usd,cashflow_usd,score,rank_position,
-                        source,last_trade_at,last_seen
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        source,last_trade_at,last_seen,total_volume_usd
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(wallet_address) DO UPDATE SET
                         win_rate=excluded.win_rate,total_trade=excluded.total_trade,
                         total_win=excluded.total_win,total_loss=excluded.total_loss,
@@ -7180,6 +7207,7 @@ def _pro_wallet_refresh(force=True):
                         unrealized_profit_usd=excluded.unrealized_profit_usd,
                         unrealized_profit_percent=excluded.unrealized_profit_percent,
                         total_pnl_usd=excluded.total_pnl_usd,cashflow_usd=excluded.cashflow_usd,
+                        total_volume_usd=excluded.total_volume_usd,
                         score=excluded.score,rank_position=excluded.rank_position,
                         source=excluded.source,last_trade_at=excluded.last_trade_at,last_seen=excluded.last_seen
                 """, (
@@ -7187,14 +7215,10 @@ def _pro_wallet_refresh(force=True):
                     item["total_loss"], item["total_buy"], item["total_sell"], item["realized_profit_usd"],
                     item["realized_profit_percent"], item["unrealized_profit_usd"], item["unrealized_profit_percent"],
                     item["total_pnl_usd"], item["cashflow_usd"], item["score"], idx,
-                    "Birdeye Trader Gainers/Losers (1W / PnL)", item["last_trade_at"], now
+                    "Birdeye Trader Gainers/Losers (1W / PnL + شروط شکار)", item["last_trade_at"], now,
+                    item["total_volume_usd"]
                 ))
-            qualified = sum(
-                1 for x in wallets
-                if x["total_trade"] >= PRO_WALLET_MIN_TRADES
-                and x["win_rate"] >= PRO_WALLET_MIN_WIN_RATE
-                and x["realized_profit_usd"] >= 0
-            )
+            qualified = len(wallets)
             cur.execute(
                 "INSERT INTO pro_wallet_radar_events(event_type,wallet_address,details,created_at) VALUES(?,?,?,?)",
                 ("RADAR_REFRESH", PRO_WALLET_SELECTED_WALLET or "", json.dumps({"wallets": len(wallets), "qualified": qualified, "error": err or ""}, ensure_ascii=False), now),
@@ -7210,7 +7234,12 @@ def _pro_wallet_refresh(force=True):
         PRO_WALLET_SELECTED_WALLET = selected
     _set_bot_setting("pro_wallet_selected_wallet", PRO_WALLET_SELECTED_WALLET or "")
     PRO_WALLET_LAST_ERROR = err or ""
-    return True, f"{len(wallets)} Wallet واقعی از Birdeye دریافت شد؛ انتخاب Wallet کاملاً دستی است و رفرش انتخاب قبلی را عوض نمی‌کند."
+    return True, (
+        f"{len(wallets)} Wallet واجد شرایط پیدا شد؛ شروط: WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}% | "
+        f"P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}% | معاملات≥{PRO_WALLET_MIN_TRADES} | "
+        f"موفق≥{PRO_WALLET_MIN_WINS} | حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f}. "
+        "انتخاب Wallet کاملاً دستی است و رفرش انتخاب قبلی را عوض نمی‌کند."
+    )
 
 
 def _pro_wallet_stats():
@@ -7223,7 +7252,7 @@ def _pro_wallet_stats():
                 SELECT wallet_address,win_rate,total_trade,total_win,total_loss,total_buy,total_sell,
                        realized_profit_usd,realized_profit_percent,unrealized_profit_usd,
                        unrealized_profit_percent,total_pnl_usd,cashflow_usd,score,rank_position,
-                       source,last_trade_at,last_seen
+                       source,last_trade_at,last_seen,total_volume_usd
                 FROM pro_wallet_candidates
                 WHERE rank_position > 0
                 ORDER BY rank_position ASC
@@ -7293,7 +7322,8 @@ def _pro_wallet_panel_text():
         except Exception:
             last_at = 0.0
     last_text = datetime.fromtimestamp(last_at).strftime("%Y-%m-%d %H:%M:%S") if last_at else "-"
-    qualified = [r for r in rows if int(r[2] or 0) >= PRO_WALLET_MIN_TRADES and float(r[1] or 0) >= PRO_WALLET_MIN_WIN_RATE and float(r[7] or 0) >= 0]
+    # چون DB فقط Walletهای واجد شرایط را نگه می‌دارد، همه rows اینجا قابل انتخاب‌اند.
+    qualified = rows
     lines = [
         "💎 **Professional Wallet Radar**",
         "",
@@ -7302,7 +7332,8 @@ def _pro_wallet_panel_text():
         f"🔐 مجوز اصلی معامله از ولت: {'🟢 ON' if WALLET_TRADE_PERMISSION else '🔴 OFF'}",
         f"🔑 Birdeye API: {'🟢 تنظیم شده' if BIRDEYE_API_KEY else '🔴 تنظیم نشده'}",
         f"👛 Wallet منتخب: `{selected or '-'}`",
-        f"📊 Walletهای پیدا شده: `{len(rows)}` | واجد شرایط آماری: `{len(qualified)}`",
+        f"📊 Walletهای پیدا شده: `{len(rows)}` | واجد شرایط: `{len(qualified)}`",
+        f"🎯 شروط شکار: WR≥{PRO_WALLET_MIN_WIN_RATE:.0f}% | P/L≥{PRO_WALLET_MIN_PNL_PERCENT:.0f}% | معاملات≥{PRO_WALLET_MIN_TRADES} | موفق≥{PRO_WALLET_MIN_WINS} | حجم≥${PRO_WALLET_MIN_VOLUME_USD:,.0f}",
         f"🕒 آخرین بروزرسانی: `{last_text}`",
     ]
     if PRO_WALLET_LAST_ERROR:
@@ -7312,14 +7343,15 @@ def _pro_wallet_panel_text():
         lines.append("هیچ Walletی در رادار ذخیره نشده؛ «بروزرسانی آمار» را بزن.")
     else:
         for idx, r in enumerate(rows, 1):
-            wallet, wr, trades, wins, losses, buys, sells, r_usd, r_pct, u_usd, u_pct, total_usd, cashflow, score, rank, source, last_trade_at, seen = r
+            wallet, wr, trades, wins, losses, buys, sells, r_usd, r_pct, u_usd, u_pct, total_usd, cashflow, score, rank, source, last_trade_at, seen, total_volume_usd = r
             short = f"{wallet[:6]}…{wallet[-6:]}"
             flag = "🎯 منتخب" if wallet == selected else "👛 آماده انتخاب"
             lines.extend([
                 f"{idx}) `{short}` — {flag}",
                 f"   WR `{float(wr):.1f}%` | معاملات `{int(trades)}` | برد/باخت `{int(wins)}/{int(losses)}`",
-                f"   BUY `{int(buys)}` | SELL `{int(sells)}` | Realized `${float(r_usd):+,.2f}` (`{float(r_pct):+.2f}%`)",
-                f"   Score `{float(score):.2f}` | آخرین معامله `{datetime.fromtimestamp(float(last_trade_at)).strftime('%m-%d %H:%M') if float(last_trade_at or 0) > 0 else '-'} `",
+                f"   BUY `{int(buys)}` | SELL `{int(sells)}` | Volume `${float(total_volume_usd):,.2f}`",
+                f"   Realized `${float(r_usd):+,.2f}` (`{float(r_pct):+.2f}%`) | Score `{float(score):.2f}`",
+                f"   آخرین معامله `{datetime.fromtimestamp(float(last_trade_at)).strftime('%m-%d %H:%M') if float(last_trade_at or 0) > 0 else '-'} `",
             ])
     lines.extend([
         "",
