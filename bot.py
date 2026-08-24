@@ -327,8 +327,6 @@ NEON_SNAPSHOT_INTERVAL_SECONDS = 30
 NEON_SNAPSHOT_TABLE = "bot_sqlite_snapshots"
 NEON_SNAPSHOT_LOCK = Lock()
 NEON_SNAPSHOT_RUNNING = False
-NEON_LAST_SUCCESS_AT = 0.0
-NEON_LAST_ERROR = ""
 
 try:
     import psycopg2
@@ -391,9 +389,7 @@ def _make_consistent_sqlite_backup():
 
 
 def _upload_sqlite_snapshot_to_neon():
-    global NEON_LAST_SUCCESS_AT, NEON_LAST_ERROR
     if not _ensure_neon_snapshot_table():
-        NEON_LAST_ERROR = "Neon is not configured or psycopg2 is unavailable."
         return False
     backup_path = _make_consistent_sqlite_backup()
     if backup_path is None:
@@ -419,12 +415,9 @@ def _upload_sqlite_snapshot_to_neon():
                         updated_at = EXCLUDED.updated_at
                 """, (next_id, psycopg2.Binary(data)))
         conn.close()
-        NEON_LAST_SUCCESS_AT = time.time()
-        NEON_LAST_ERROR = ""
         logger.info("☁️ Neon: snapshot دیتابیس SQLite با موفقیت ذخیره شد.")
         return True
     except Exception as e:
-        NEON_LAST_ERROR = f"{type(e).__name__}: {e}"[:300]
         logger.warning(f"⚠️ Neon snapshot upload failed; SQLite remains active: {e}")
         return False
     finally:
@@ -1741,8 +1734,7 @@ _SECURITY_PANEL_REFRESH_TASKS = {}
 _SECURITY_PANEL_MAX_TELEGRAM = 50
 _SECURITY_PANEL_MAX_WEB = 50
 _SECURITY_PANEL_MAX_BLOCKS = 50
-# Telegram hard limit is 4096 chars. Keep a safety margin for formatting/edit operations.
-_SECURITY_PANEL_MAX_TEXT = 4000
+_SECURITY_PANEL_MAX_TEXT = 3900
 
 _SECURITY_RATE_LOCK = Lock()
 _SECURITY_RATE_BUCKETS = {}
@@ -1756,16 +1748,6 @@ _SECURITY_SUSPICIOUS_MARKERS = (
     "/.env", "/.git", "/wp-admin", "/wp-login", "/phpmyadmin", "/xmlrpc.php",
     "/vendor/phpunit", "/cgi-bin/", "../", "%2e%2e", "%252e", "jndi:",
 )
-_SECURITY_MONITOR_UA_MARKERS = ("uptimerobot", "uptime robot")
-
-
-def _security_is_monitoring_probe(user_agent="", remote_ip=""):
-    """Hide known uptime/health-check traffic from the human security panel.
-    The raw audit record is still retained; this is display filtering only.
-    """
-    ua = str(user_agent or "").lower()
-    ip = str(remote_ip or "").strip().lower()
-    return any(marker in ua for marker in _SECURITY_MONITOR_UA_MARKERS)
 
 
 def _security_request_id():
@@ -2042,42 +2024,27 @@ def _security_connections_snapshot(limit=30):
                     "name": (" ".join(x for x in (r[4], r[5]) if x)).strip(),
                     "last_seen": float(r[6] or 0), "events": int(r[7] or 0),
                 })
-            # Fetch extra rows because benign monitoring probes are filtered from the UI.
-            web_limit = max(int(limit) * 5, 50)
             cur.execute("""
                 SELECT remote_ip, user_agent, MAX(created_at) AS last_seen, COUNT(*) AS events
                 FROM security_audit
                 WHERE source='web' AND remote_ip!=''
                 GROUP BY remote_ip, user_agent
                 ORDER BY last_seen DESC LIMIT ?
-            """, (web_limit,))
+            """, (int(limit),))
             for r in cur.fetchall():
-                remote_ip = str(r[0] or "")
-                user_agent = str(r[1] or "")
-                if _security_is_monitoring_probe(user_agent, remote_ip):
-                    continue
                 out["web_sources"].append({
-                    "remote_ip": remote_ip, "user_agent": user_agent,
+                    "remote_ip": str(r[0] or ""), "user_agent": str(r[1] or ""),
                     "last_seen": float(r[2] or 0), "events": int(r[3] or 0),
                 })
-                if len(out["web_sources"]) >= int(limit):
-                    break
             cur.execute("""
-                SELECT source,event_type,actor_id,chat_id,remote_ip,details,created_at,user_agent
-                FROM security_audit ORDER BY id DESC LIMIT 100
+                SELECT source,event_type,actor_id,chat_id,remote_ip,details,created_at
+                FROM security_audit ORDER BY id DESC LIMIT 20
             """)
-            for r in cur.fetchall():
-                remote_ip = str(r[4] or "")
-                user_agent = str(r[7] or "")
-                if str(r[0] or "") == "web" and _security_is_monitoring_probe(user_agent, remote_ip):
-                    continue
-                out["recent_events"].append({
-                    "source":r[0],"event_type":r[1],"actor_id":r[2],"chat_id":r[3],
-                    "remote_ip":remote_ip,"details":r[5],"created_at":float(r[6] or 0),
-                    "user_agent":user_agent,
-                })
-                if len(out["recent_events"]) >= 20:
-                    break
+            out["recent_events"] = [
+                {"source":r[0],"event_type":r[1],"actor_id":r[2],"chat_id":r[3],
+                 "remote_ip":r[4],"details":r[5],"created_at":float(r[6] or 0)}
+                for r in cur.fetchall()
+            ]
             conn.close()
     except Exception as exc:
         logger.debug("Security snapshot read failed: %s", exc)
@@ -2298,20 +2265,6 @@ _security_connections_snapshot_base=_security_connections_snapshot
 def _security_connections_snapshot(limit=30):
     limit=max(1,min(int(limit or 30),_SECURITY_PANEL_MAX_TELEGRAM,_SECURITY_PANEL_MAX_WEB))
     out=_security_connections_snapshot_base(limit); _security_ensure_block_table()
-    # Neon status is read-only here; it never blocks or alters the security panel.
-    if NEON_DATABASE_URL and psycopg2 is not None:
-        neon_state = "🟢 فعال"
-        if NEON_LAST_SUCCESS_AT:
-            neon_last = datetime.fromtimestamp(NEON_LAST_SUCCESS_AT).strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            neon_last = "هنوز snapshot موفقی ثبت نشده"
-    elif NEON_DATABASE_URL:
-        neon_state = "🟠 DATABASE_URL هست ولی psycopg2 در دسترس نیست"
-        neon_last = "-"
-    else:
-        neon_state = "🔴 تنظیم نشده"
-        neon_last = "-"
-    out["neon_status"] = {"state": neon_state, "last_success": neon_last, "last_error": NEON_LAST_ERROR[:180]}
     try:
         with db_lock:
             conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
@@ -2329,9 +2282,7 @@ def _security_connections_text(snap=None):
         "🛡 **اتصالات و دسترسی‌های مشاهده‌شده — کنترل امنیتی**","",
         f"📢 انتشار سیگنال به کانال: {'🟢 ON' if snap['channel_signal_enabled'] else '🔴 OFF'}",
         f"📢 مقصد فعلی: `{snap['channel_id'] or 'تنظیم نشده'}`",
-        f"🔗 لینک دعوت ذخیره‌شده: {'🟢 بله' if snap['channel_invite_configured'] else '🔴 خیر'}",
-        f"☁️ Neon SQLite Mirror: {snap.get('neon_status', {}).get('state', '🔴 نامشخص')}",
-        f"   آخرین snapshot موفق: `{snap.get('neon_status', {}).get('last_success', '-')}`",
+        f"🔗 لینک دعوت ذخیره‌شده: {'🟢 بله' if snap['channel_invite_configured'] else '🔴 خیر'}","",
         f"👥 مشترک‌های ثبت‌شده DB: `{len(snap['subscribers'])}`",
         f"👁 Telegram دیده‌شده: `{len(snap.get('telegram_users') or [])}`",
         f"🌐 Web دیده‌شده: `{len(snap.get('web_sources') or [])}",
@@ -7745,9 +7696,8 @@ def _main_keyboard(is_admin=False):
 
 def _persistent_bottom_keyboard(is_admin=False):
     """
-    حالت پایدار/پیش‌فرض: فقط کلید «🎛 چهار کلید» در نوار پایین.
-    این تابع عمداً همان ReplyKeyboard را برمی‌گرداند تا کلید همیشه در پایین
-    بماند؛ پنل بزرگ فقط با لمس همین کلید باز می‌شود.
+    حالت پیش‌فرض پنل پایین: فقط یک دکمه کوچک برای باز کردن کنترل‌های پایین.
+    پنل کامل به‌صورت پیش‌فرض باز نمی‌شود و فضای چت را اشغال نمی‌کند.
     """
     return ReplyKeyboardMarkup(
         [["🎛 چهار کلید"]],
@@ -8066,17 +8016,16 @@ def start_telegram_bot():
 
             # پنل کامل پایین — پیش‌فرض فقط یک دکمه کوچک است.
             if label == "🎛 چهار کلید":
-                # Only the keyboard state changes; the main bot panel/message stays intact.
                 await msg.reply_text(
-                    "🎛 پنل پایین باز شد — برای بستن، «🔽 بستن پنل پایین» را بزن.",
-                    reply_markup=_expanded_bottom_keyboard(is_admin)
+                    "🎛 **پنل چهارکلیده/مدیریتی باز شد**\n\nبرای بستن: «🔽 بستن پنل پایین» را بزن.",
+                    reply_markup=_expanded_bottom_keyboard(is_admin),
+                    parse_mode="Markdown"
                 )
                 return
 
             if label == "🔽 بستن پنل پایین":
-                # Replace the expanded keyboard with the single permanent launcher.
                 await msg.reply_text(
-                    "⬇️ پنل پایین بسته شد.",
+                    "✅ پنل پایین بسته شد.",
                     reply_markup=_persistent_bottom_keyboard(is_admin)
                 )
                 return
