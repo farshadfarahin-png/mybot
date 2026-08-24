@@ -182,14 +182,13 @@ COPY_TRADING_ENABLED = True
 # Independent module: it does not alter existing signal/learning statistics or Neon logic.
 PRO_WALLET_RADAR_ENABLED = False
 PRO_WALLET_COPY_PERMISSION = False
-PRO_WALLET_RADAR_INTERVAL_SECONDS = 900.0  # 15 minutes; avoids excessive Birdeye CU use.
-PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 60.0  # 60s incremental copy scan when explicitly enabled.
+PRO_WALLET_RADAR_INTERVAL_SECONDS = 1200.0  # 20 minutes; sized for the free Birdeye quota.
+PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 1800.0  # 30 minutes when real-copy permission is ON.
 PRO_WALLET_MIN_TRADES = 10
 PRO_WALLET_MIN_WIN_RATE = 65.0
-PRO_WALLET_DISCOVERY_LIMIT = 30
-PRO_WALLET_PNL_CHECK_LIMIT = 20
-PRO_WALLET_LOOKBACK = "90d"
-PRO_WALLET_COPY_SIZE_SOL = 0.01  # Fixed safe copy size; never exceeds MAX_TRADE_SOL.
+PRO_WALLET_DISCOVERY_LIMIT = 10
+PRO_WALLET_PNL_CHECK_LIMIT = 5
+PRO_WALLET_LOOKBACK = "30d"
 PRO_WALLET_STATE_LOCK = RLock()
 PRO_WALLET_LAST_RADAR_AT = 0.0
 PRO_WALLET_LAST_COPY_SCAN_AT = 0.0
@@ -6996,19 +6995,11 @@ def _pro_wallet_api_get(path, params=None, timeout=10):
             timeout=timeout,
         )
         if res.status_code != 200:
-            detail = ""
-            try:
-                body = res.json()
-                detail = str(body.get("message") or body.get("error") or "")[:220]
-            except Exception:
-                detail = res.text[:220].replace("\n", " ")
-            return None, f"Birdeye HTTP {res.status_code}" + (f": {detail}" if detail else "")
+            return None, f"Birdeye HTTP {res.status_code}"
         payload = res.json()
-        if not isinstance(payload, dict):
-            return None, "Birdeye پاسخ نامعتبر برگرداند"
-        if payload.get("success") is False:
-            return None, str(payload.get("message") or payload.get("error") or "Birdeye request failed")[:220]
-        return payload.get("data"), ""
+        if not payload.get("success", True):
+            return None, str(payload.get("message") or "Birdeye request failed")
+        return payload.get("data") if isinstance(payload, dict) else None, ""
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"
 
@@ -7031,11 +7022,10 @@ def _pro_wallet_int(obj, *keys, default=0):
         return int(default)
 
 def _pro_wallet_extract_items(data):
-    """Normalize Birdeye list responses, including dicts keyed by wallet address."""
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        for key in ("items", "list", "traders", "rows", "results"):
+        for key in ("items", "list", "traders", "data", "rows"):
             value = data.get(key)
             if isinstance(value, list):
                 return value
@@ -7043,83 +7033,92 @@ def _pro_wallet_extract_items(data):
                 nested = _pro_wallet_extract_items(value)
                 if nested:
                     return nested
-        # Some wallet/leaderboard payloads can be mappings keyed by address.
-        mapped = []
-        for k, v in data.items():
-            if isinstance(v, dict) and isinstance(k, str) and len(k) >= 20:
-                item = dict(v)
-                item.setdefault("address", k)
-                mapped.append(item)
-        if mapped:
-            return mapped
-        # A single trader object can arrive without an outer list.
-        if any(k in data for k in ("address", "wallet", "walletAddress", "owner", "trader", "account")):
-            return [data]
     return []
 
 def _pro_wallet_discover():
-    """Discover real Solana trader wallets with bounded, documented Birdeye calls."""
-    candidates=[]
-    seen=set()
-    errors=[]
+    """
+    Discover many trader wallets from Birdeye and fall back to token-top-trader
+    discovery when the global trader board is empty/unavailable.
+    This function only reads external data and never touches the main bot DB.
+    """
+    candidates = []
+    seen = set()
+    errors = []
 
     def add_wallets(items):
         for item in items or []:
             if not isinstance(item, dict):
                 continue
-            wallet=str(
-                item.get("address") or item.get("wallet") or item.get("walletAddress")
-                or item.get("owner") or item.get("trader") or item.get("account") or ""
+            wallet = str(
+                item.get("address")
+                or item.get("wallet")
+                or item.get("walletAddress")
+                or item.get("owner")
+                or item.get("trader")
+                or item.get("account")
+                or ""
             ).strip()
-            if wallet and len(wallet)>=20 and wallet not in seen:
+            if wallet and len(wallet) >= 20 and wallet not in seen:
                 seen.add(wallet)
                 candidates.append(wallet)
 
-    # Primary discovery: current + 90d leaderboard, using all documented PnL sorts.
-    for lookback in (PRO_WALLET_LOOKBACK, "30d", "1W"):
-        if lookback == PRO_WALLET_LOOKBACK and lookback != "90d":
-            pass
-        for sort_by in ("PnL", "realized_pnl", "unrealized_pnl"):
-            data,err=_pro_wallet_api_get(
-                "/trader/gainers-losers",
-                params={"type":lookback,"sort_by":sort_by,"sort_type":"desc","offset":0,"limit":100},
-                timeout=15,
-            )
-            if data is not None:
-                add_wallets(_pro_wallet_extract_items(data))
-            elif err:
-                errors.append(f"leaderboard/{lookback}/{sort_by}: {err}")
-            if len(candidates)>=40:
-                return candidates[:40], ""
+    # Primary: global trader leaderboard. We deliberately ask for more than the
+    # final ranking count so the PnL verification stage has enough candidates.
+    for sort_by in ("realized_pnl", "total_pnl"):
+        data, err = _pro_wallet_api_get(
+            "/trader/gainers-losers",
+            params={
+                "type": PRO_WALLET_LOOKBACK,
+                "sort_by": sort_by,
+                "sort_type": "desc",
+                "offset": 0,
+                "limit": min(100, max(25, PRO_WALLET_DISCOVERY_LIMIT * 5)),
+            },
+            timeout=12,
+        )
+        if data is not None:
+            add_wallets(_pro_wallet_extract_items(data))
+            if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
+                break
+        elif err:
+            errors.append(f"leaderboard/{sort_by}: {err}")
 
-    # Secondary discovery: token-level top traders from several REAL trending Solana tokens.
-    try:
-        market_tokens=list(dict.fromkeys(get_real_market_trending_tokens()[:5]))
-    except Exception as exc:
-        market_tokens=[]
-        errors.append(f"market-token fallback: {exc}")
-
-    for token_addr in market_tokens:
-        if len(candidates)>=40:
-            break
-        for sort_by in ("realized_pnl","total_pnl","trade"):
-            data,err=_pro_wallet_api_get(
+    # Fallback: discover traders from several currently active Solana tokens.
+    # This fixes the common case where the global trader board returns no items
+    # for a Standard/free key while token-level top traders remain available.
+    if len(candidates) < max(5, PRO_WALLET_PNL_CHECK_LIMIT):
+        try:
+            market_tokens = get_real_market_trending_tokens()[:3]
+        except Exception as exc:
+            market_tokens = []
+            errors.append(f"market-token fallback: {exc}")
+        for token_addr in market_tokens:
+            if len(candidates) >= PRO_WALLET_DISCOVERY_LIMIT:
+                break
+            data, err = _pro_wallet_api_get(
                 "/defi/v2/tokens/top_traders",
                 params={
-                    "address":token_addr,"time_frame":"90d","sort_by":sort_by,
-                    "sort_type":"desc","offset":0,"limit":10,"ui_amount_mode":"scaled",
-                }, timeout=15,
+                    "address": token_addr,
+                    "time_frame": PRO_WALLET_LOOKBACK,
+                    "sort_by": "realized_pnl",
+                    "sort_type": "desc",
+                    "offset": 0,
+                    "limit": 10,
+                    "ui_amount_mode": "scaled",
+                },
+                timeout=12,
             )
             if data is not None:
                 add_wallets(_pro_wallet_extract_items(data))
             elif err:
-                errors.append(f"top_traders/{str(token_addr)[:8]}/{sort_by}: {err}")
-            if len(candidates)>=40:
-                break
+                errors.append(f"top_traders/{token_addr[:8]}: {err}")
 
     if not candidates:
-        return [], " | ".join(errors[-6:]) if errors else "هنوز Wallet واقعی از Birdeye دریافت نشد"
-    return candidates[:40], ""
+        if errors:
+            return [], " | ".join(errors[-3:])
+        return [], "هنوز Wallet مناسب از Birdeye دریافت نشد"
+    return candidates[:max(25, PRO_WALLET_DISCOVERY_LIMIT * 3)], ""
+
 
 def _pro_wallet_refresh():
     global PRO_WALLET_LAST_RADAR_AT, PRO_WALLET_LAST_ERROR, PRO_WALLET_SELECTED_WALLET
@@ -7144,22 +7143,16 @@ def _pro_wallet_refresh():
     for wallet in wallets:
         if checked >= max(5, PRO_WALLET_PNL_CHECK_LIMIT):
             break
+        data, pnl_err = _pro_wallet_api_get(
+            "/wallet/v2/pnl/summary",
+            params={
+                "wallet": wallet,
+                "duration": PRO_WALLET_LOOKBACK,
+                "position_scope": "duration_only",
+            },
+            timeout=12,
+        )
         checked += 1
-        data = None
-        pnl_err = ""
-        # Retry the same wallet over documented durations when a recent window has no usable stats.
-        for duration in (PRO_WALLET_LOOKBACK, "30d", "all"):
-            data, pnl_err = _pro_wallet_api_get(
-                "/wallet/v2/pnl/summary",
-                params={
-                    "wallet": wallet,
-                    "duration": duration,
-                    "position_scope": "duration_only",
-                },
-                timeout=12,
-            )
-            if data is not None:
-                break
         if data is None:
             logger.debug("Wallet PnL lookup failed %s: %s", wallet, pnl_err)
             continue
@@ -7182,7 +7175,7 @@ def _pro_wallet_refresh():
             pnl, "realized_profit_percent", "realizedProfitPercent", "roi"
         )
         unrealized_usd = _pro_wallet_number(
-            pnl, "unrealized_usd", "unrealizedUsd", "unrealized_profit_usd", "unrealizedProfitUsd", "unrealizedPnlUsd"
+            pnl, "unrealized_profit_usd", "unrealizedProfitUsd", "unrealizedPnlUsd"
         )
         unrealized_pct = _pro_wallet_number(
             pnl, "unrealized_profit_percent", "unrealizedProfitPercent"
@@ -7190,13 +7183,8 @@ def _pro_wallet_refresh():
         total_usd = _pro_wallet_number(
             pnl, "total_usd", "totalUsd", "total_pnl_usd", "totalPnlUsd"
         )
-        cashflow_block = data.get("cashflow_usd") if isinstance(data, dict) else {}
-        if not isinstance(cashflow_block, dict):
-            cashflow_block = {}
-        cashflow_usd = (
-            _pro_wallet_number(pnl, "cashflow_usd", "cashflowUsd", "cashFlowUsd")
-            if not isinstance(pnl.get("cashflow_usd") if isinstance(pnl, dict) else None, dict)
-            else _pro_wallet_number(cashflow_block, "current_value", "currentValue")
+        cashflow_usd = _pro_wallet_number(
+            pnl, "cashflow_usd", "cashflowUsd", "cashFlowUsd"
         )
         last_trade_at = _pro_wallet_number(
             pnl, "last_trade_time", "lastTradeTime", "last_trade_unix_time", "lastTradeUnixTime", default=0
@@ -7323,10 +7311,15 @@ def _pro_wallet_refresh():
         and x["realized_profit_usd"] >= 0
     ]
     with PRO_WALLET_STATE_LOCK:
-        # Radar never silently selects a wallet. Manual selection is required.
+        new_selected = qualified[0]["wallet_address"] if qualified else ""
+        if new_selected != PRO_WALLET_SELECTED_WALLET:
+            # Reset copy baseline whenever the leader changes; do not copy old trades.
+            _set_bot_setting("pro_wallet_last_copy_scan_at", int(time.time()))
+        PRO_WALLET_SELECTED_WALLET = new_selected
         PRO_WALLET_LAST_RADAR_AT = time.time()
         PRO_WALLET_LAST_ERROR = err or ""
-    return True, f"{len(ranked)} Wallet بررسی شد | {len(qualified)} Wallet واجد شرایط"
+    _set_bot_setting("pro_wallet_selected_wallet", PRO_WALLET_SELECTED_WALLET)
+    return True, f"{len(ranked)} Wallet بررسی شد | {len(qualified)} Wallet واجد شرایط کپی"
 
 
 def _pro_wallet_stats():
@@ -7351,39 +7344,18 @@ def _pro_wallet_stats():
         return []
 
 
-def _pro_wallet_panel_keyboard(rows=None):
-    """Compact, explicit wallet selector; never silently selects a wallet for copying."""
-    _pro_wallet_load_switches()
-    rows = rows if rows is not None else _pro_wallet_stats()
-    buttons = []
-    selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
-    for idx, row in enumerate(rows[:10], 1):
-        wallet = str(row[0] or "").strip()
-        if not wallet:
-            continue
-        short = f"{wallet[:6]}…{wallet[-5:]}" if len(wallet) > 14 else wallet
-        wr = float(row[1] or 0)
-        pnl = float(row[7] or 0)
-        mark = "🟢" if wallet == selected else "⚪"
-        buttons.append([InlineKeyboardButton(
-            f"{mark} {idx}. {short} | WR {wr:.1f}% | PnL ${pnl:+,.0f}",
-            callback_data=f"pro_wallet_select:{wallet}"
-        )])
-    buttons.append([InlineKeyboardButton("🔄 بروزرسانی و جستجوی دوباره", callback_data="pro_wallet_refresh")])
-    buttons.append([
-        InlineKeyboardButton(f"🔭 رصد {'🟢' if PRO_WALLET_RADAR_ENABLED else '🔴'}", callback_data="pro_wallet_toggle_radar"),
-        InlineKeyboardButton(f"🛒 کپی {'🟢' if PRO_WALLET_COPY_PERMISSION else '🔴'}", callback_data="pro_wallet_toggle_copy"),
-    ])
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
-    return InlineKeyboardMarkup(buttons)
-
-
 def _pro_wallet_panel_text():
     _pro_wallet_load_switches()
     rows = _pro_wallet_stats()
     selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
     last_at = PRO_WALLET_LAST_RADAR_AT
+    if not last_at:
+        try:
+            last_at = max([float(r[-1] or 0) for r in rows] or [0.0])
+        except Exception:
+            last_at = 0.0
     last_text = datetime.fromtimestamp(last_at).strftime("%Y-%m-%d %H:%M:%S") if last_at else "-"
+
     qualified = [
         r for r in rows
         if int(r[2] or 0) >= PRO_WALLET_MIN_TRADES
@@ -7394,36 +7366,58 @@ def _pro_wallet_panel_text():
     lines = [
         "💎 **Professional Wallet Radar**",
         "",
-        f"🔭 رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}  |  🛒 کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
-        f"🔑 Birdeye: {'🟢 آماده' if BIRDEYE_API_KEY else '🔴 API Key تنظیم نشده'}",
-        f"📅 بازه تحلیل: `{PRO_WALLET_LOOKBACK}`  |  ⏱ آخرین اسکن: `{last_text}`",
+        f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
+        f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+        f"🔑 Birdeye API: {'🟢 آماده' if BIRDEYE_API_KEY else '🔴 تنظیم نشده'}",
         f"👛 Wallet منتخب: `{selected or '-'}`",
-        f"✅ واجد شرایط فعلی: `{len(qualified)}`",
+        f"✅ واجد شرایط کپی: `{len(qualified)}`",
+        f"🕒 آخرین بروزرسانی: `{last_text}`",
     ]
+
     if PRO_WALLET_LAST_ERROR:
-        lines.extend(["", f"⚠️ {PRO_WALLET_LAST_ERROR}"])
-    lines.extend(["", "🏆 **Walletهای برتر تأییدشده:**"])
+        lines.extend(["", f"⚠️ `{PRO_WALLET_LAST_ERROR}`"])
+
+    lines.extend(["", "🏆 **جزئیات بهترین Walletها:**"])
     if not rows:
-        lines.append("هیچ Wallet معتبر از Birdeye برنگشته است.")
-        lines.append("ابتدا رصد را ON کن و «بروزرسانی و جستجوی دوباره» را بزن.")
+        lines.append("هیچ دادهٔ قابل‌اعتباری از Birdeye دریافت نشده.")
+        lines.append("رصد را روشن نگه دار و «بروزرسانی آمار» را بزن.")
     else:
-        for idx, r in enumerate(rows[:10], 1):
-            wallet, wr, trades, wins, losses, buys, sells, r_usd, r_pct, u_usd, u_pct, total_usd, cashflow, score, rank, source, last_trade_at, seen = r
-            short = f"{wallet[:6]}…{wallet[-5:]}" if len(wallet) > 14 else wallet
-            is_qualified = int(trades or 0) >= PRO_WALLET_MIN_TRADES and float(wr or 0) >= PRO_WALLET_MIN_WIN_RATE and float(r_usd or 0) >= 0
-            flag = "🟢 آماده انتخاب" if is_qualified else "🟡 داده/شرایط ناکافی"
+        for idx, r in enumerate(rows, 1):
+            (
+                wallet, wr, trades, wins, losses, buys, sells,
+                r_usd, r_pct, u_usd, u_pct, total_usd, cashflow,
+                score, rank, source, last_trade_at, seen
+            ) = r
+            short = f"{wallet[:6]}…{wallet[-6:]}" if len(wallet) > 14 else wallet
+            qualified_flag = (
+                "✅ کاندید کپی"
+                if int(trades or 0) >= PRO_WALLET_MIN_TRADES
+                and float(wr or 0) >= PRO_WALLET_MIN_WIN_RATE
+                and float(r_usd or 0) >= 0
+                else "⏳ نیاز به داده بیشتر"
+            )
+            last_trade_text = (
+                datetime.fromtimestamp(float(last_trade_at)).strftime("%m-%d %H:%M")
+                if float(last_trade_at or 0) > 0 else "-"
+            )
             lines.extend([
-                f"{idx}. `{short}` — {flag}",
-                f"   WR `{float(wr or 0):.1f}%` | معاملات `{int(trades or 0)}` | برد/باخت `{int(wins or 0)}/{int(losses or 0)}`",
-                f"   Realized PnL `${float(r_usd or 0):+,.2f}` | Total PnL `${float(total_usd or 0):+,.2f}`",
+                f"{idx}) `{short}` — {qualified_flag}",
+                f"   🏆 WR `{float(wr):.1f}%` | معاملات `{int(trades)}` | برد/باخت `{int(wins)}/{int(losses)}`",
+                f"   🟢 BUY `{int(buys)}` | 🔴 SELL `{int(sells)}`",
+                f"   💵 Realized `${float(r_usd):+,.2f}` (`{float(r_pct):+.2f}%`)",
+                f"   📈 Unrealized `${float(u_usd):+,.2f}` (`{float(u_pct):+.2f}%`)",
+                f"   💰 Total PnL `${float(total_usd):+,.2f}` | Cashflow `${float(cashflow):+,.2f}`",
+                f"   🧠 Score `{float(score):.2f}` | آخرین معامله `{last_trade_text}`",
             ])
+
     lines.extend([
         "",
-        "📌 انتخاب Wallet دستی است؛ با تغییر Wallet، مجوز کپی خودکار خاموش می‌شود.",
-        "📌 کپی واقعی فقط بعد از انتخاب Wallet + روشن‌کردن کپی + مجوز اصلی معامله انجام می‌شود.",
-        f"🧯 سقف BUY کپی: `{min(float(PRO_WALLET_COPY_SIZE_SOL), float(MAX_TRADE_SOL or 0)):.4f} SOL`.",
+        "📌 **قانون انتخاب:** Win Rate بالا + سود تحقق‌یافته غیرمنفی + تعداد معامله کافی.",
+        "📌 قبل از کپی واقعی، ربات اول رصد و آمار را جمع می‌کند؛ معاملات قبل از زمان فعال‌سازی کپی کپی نمی‌شوند.",
+        "ℹ️ این آمار در جداول مستقل Professional Wallet ذخیره می‌شود و به آمار قدیمی ربات دست نمی‌زند.",
     ])
     return "\n".join(lines)
+
 
 def _pro_wallet_record_event(tx_hash, wallet, side, token_address, token_symbol, trade_time, status, result):
     try:
@@ -7523,9 +7517,11 @@ def _pro_wallet_copy_poll():
         return
 
     selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
-    # Copy is always explicit: never auto-select a wallet for real trading.
     if not selected:
-        PRO_WALLET_LAST_ERROR = "هیچ Wallet انتخاب‌شده‌ای برای کپی وجود ندارد؛ ابتدا یک Wallet را انتخاب کن"
+        rows = _pro_wallet_stats()
+        selected = str(rows[0][0]) if rows else ""
+    if not selected:
+        PRO_WALLET_LAST_ERROR = "هیچ Wallet واجد شرایط برای کپی انتخاب نشده"
         return
 
     # Real-copy requires the currently selected wallet to remain qualified.
@@ -7611,7 +7607,7 @@ def _pro_wallet_copy_poll():
                     0.0,
                     min(
                         float(MAX_TRADE_SOL),
-                        float(PRO_WALLET_COPY_SIZE_SOL)
+                        0.01 if float(MAX_TRADE_SOL) > 0 else 0.0
                     )
                 )
                 if amount <= 0:
@@ -7685,7 +7681,7 @@ def _pro_wallet_copy_poll():
 
 
 def professional_wallet_radar_loop():
-    """Independent radar + 60s incremental real-copy poll when explicitly enabled."""
+    """Independent 20m radar + optional 30m real-copy poll."""
     global PRO_WALLET_LAST_ERROR
     _pro_wallet_load_switches()
     while True:
@@ -7749,10 +7745,9 @@ def _main_keyboard(is_admin=False):
 
 def _persistent_bottom_keyboard(is_admin=False):
     """
-    حالت پایدار/پیش‌فرض: فقط کلید «🎛 چهار کلید» در Reply Keyboard تلگرام.
-    Bot API اجازه قرار دادن یک دکمه سفارشی داخل خود نوار نوشتن را نمی‌دهد؛
-    بنابراین نزدیک‌ترین رفتار واقعی این است که فقط همین یک کلید در کیبورد پایین
-    باقی بماند و با همان کلید پنل باز/بسته شود.
+    حالت پایدار/پیش‌فرض: فقط کلید «🎛 چهار کلید» در نوار پایین.
+    این تابع عمداً همان ReplyKeyboard را برمی‌گرداند تا کلید همیشه در پایین
+    بماند؛ پنل بزرگ فقط با لمس همین کلید باز می‌شود.
     """
     return ReplyKeyboardMarkup(
         [["🎛 چهار کلید"]],
@@ -7765,8 +7760,8 @@ def _persistent_bottom_keyboard(is_admin=False):
 
 def _expanded_bottom_keyboard(is_admin=False):
     """
-    پنل کامل پایین. همان کلید «🎛 چهار کلید» در اولین ردیف می‌ماند
-    و همان کلید پنل را باز/بسته می‌کند؛ هیچ /command برای بستن لازم نیست.
+    پنل بازشده پایین. همان «🎛 چهار کلید» در خود Reply Keyboard می‌ماند
+    و با همان کلید، پنل دوباره بسته می‌شود؛ کلید جداگانه برای بستن وجود ندارد.
     """
     rows = [
         ["🎛 چهار کلید"],
@@ -7888,16 +7883,16 @@ def start_telegram_bot():
         app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         _load_daily_signal_state()
         async def start_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            context.user_data["bottom_panel_open"] = False
             chat_id=update.effective_chat.id; is_admin=bool(TELEGRAM_CHAT_ID and str(chat_id)==str(TELEGRAM_CHAT_ID)); active,exp_date=check_user_subscription(chat_id)
             text=(f"🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n👑 MAX FUSION: {'🟢 ON' if MAX_FUSION_ENABLED else '🔴 OFF'}\n⚡ اتحاد هالک: {'🟢 ON' if SYNCHRONIZED_MODE else '🔴 OFF'}\n🧠 سیستم پیشرفته: {'🟢 ON' if ADVANCED_AI_ENABLED else '🔴 OFF'}\n🛑 توقف اضطراری: {'🔴 فعال' if EMERGENCY_STOP else '🟢 آماده'}" if active else "🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n📡 سیستم آماده رصد بازار است.")
             await update.message.reply_text(text,reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
             # پنل فعلی بالا عمداً حفظ می‌شود.
             # این پیام دوم فقط Reply Keyboard دائمی پایین تلگرام را فعال می‌کند.
-            # Silent persistent keyboard anchor; the toggle itself is the only visible control.
             await update.message.reply_text(
-                "\u2063",
+                "🎛 **پنل کنترل پایین فعال است**\n"
+                "هر زمان سیگنال‌های جدید بیایند، این پنل پایین چت باقی می‌ماند.",
                 reply_markup=_persistent_bottom_keyboard(is_admin),
+                parse_mode="Markdown"
             )
         async def free_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
             cid = str(update.effective_user.id)
@@ -8070,28 +8065,22 @@ def start_telegram_bot():
             cid = str(update.effective_user.id)
             is_admin = bool(TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID))
 
-            # یک کلید ثابت در نوار نوشتن: همان کلید باز/بسته می‌کند.
+            # یک کلید ثابت پایین: همان کلید هم باز می‌کند و هم می‌بندد.
+            # وضعیت فقط در context کاربر نگه‌داری می‌شود؛ پنل اصلی ربات دست‌نخورده می‌ماند.
             if label == "🎛 چهار کلید":
                 panel_open = bool(context.user_data.get("bottom_panel_open", False))
-                context.user_data["bottom_panel_open"] = not panel_open
-                markup = _persistent_bottom_keyboard(is_admin) if panel_open else _expanded_bottom_keyboard(is_admin)
-                # A ReplyKeyboard button necessarily sends its text as a user message.
-                # In private chats the Bot API allows the bot to delete that incoming message,
-                # so this toggle behaves like a control instead of cluttering the chat.
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                # Keep a tiny invisible anchor carrying the current keyboard; no visible command/reply.
-                try:
-                    await context.bot.send_message(
-                        chat_id=msg.chat_id,
-                        text="\u2063",
-                        reply_markup=markup,
-                        disable_notification=True,
+                if panel_open:
+                    context.user_data["bottom_panel_open"] = False
+                    await msg.reply_text(
+                        "⬇️ پنل پایین بسته شد.",
+                        reply_markup=_persistent_bottom_keyboard(is_admin)
                     )
-                except Exception as exc:
-                    logger.debug("Bottom panel keyboard refresh failed: %s", exc)
+                else:
+                    context.user_data["bottom_panel_open"] = True
+                    await msg.reply_text(
+                        "🎛 پنل پایین باز شد.",
+                        reply_markup=_expanded_bottom_keyboard(is_admin)
+                    )
                 return
 
             # وضعیت موتورها
@@ -8400,7 +8389,7 @@ def start_telegram_bot():
             return
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT,PRO_WALLET_SELECTED_WALLET
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
             _security_audit_telegram_update(update)
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
             if data != "connections":
@@ -9047,33 +9036,18 @@ def start_telegram_bot():
                     return
                 await q.edit_message_text(
                     _pro_wallet_panel_text(),
-                    reply_markup=_pro_wallet_panel_keyboard(),
-                    parse_mode="Markdown"
-                )
-                return
-
-            elif data.startswith("pro_wallet_select:"):
-                if not is_admin:
-                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
-                    return
-                wallet = str(data.split(":", 1)[1]).strip()
-                if len(wallet) < 20:
-                    await q.answer("Wallet نامعتبر است.", show_alert=True)
-                    return
-                # Require explicit re-approval after switching leaders.
-                PRO_WALLET_SELECTED_WALLET = wallet
-                PRO_WALLET_COPY_PERMISSION = False
-                PRO_WALLET_LAST_COPY_SCAN_AT = time.time()
-                _set_bot_setting("pro_wallet_selected_wallet", wallet)
-                _set_bot_setting("pro_wallet_last_copy_wallet", wallet)
-                _set_bot_setting("pro_wallet_last_copy_scan_at", int(PRO_WALLET_LAST_COPY_SCAN_AT))
-                _set_bot_setting("pro_wallet_copy_permission", False)
-                await q.edit_message_text(
-                    "✅ **Wallet انتخاب شد**\n\n"
-                    f"`{wallet}`\n\n"
-                    "🔴 کپی واقعی عمداً خاموش شد؛ اگر همین Wallet را می‌خواهی، "
-                    "ابتدا آمار را بررسی و سپس «اجازه کپی واقعی» را روشن کن.",
-                    reply_markup=_pro_wallet_panel_keyboard(),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            f"🔭 اجازه رصد: {'🟢 ON' if PRO_WALLET_RADAR_ENABLED else '🔴 OFF'}",
+                            callback_data="pro_wallet_toggle_radar"
+                        )],
+                        [InlineKeyboardButton(
+                            f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
+                            callback_data="pro_wallet_toggle_copy"
+                        )],
+                        [InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="pro_wallet_refresh")],
+                        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+                    ]),
                     parse_mode="Markdown"
                 )
                 return
@@ -9084,7 +9058,7 @@ def start_telegram_bot():
                     return
                 state = _pro_wallet_toggle_radar()
                 if state:
-                    ok, message = await _tg_bg(_pro_wallet_refresh)
+                    ok, message = _pro_wallet_refresh()
                     status = f"✅ {message}" if ok else f"⚠️ {message}"
                     text = (
                         f"🔭 **رصد Professional Wallet روشن شد**\n\n"
@@ -9115,33 +9089,44 @@ def start_telegram_bot():
                 if not PRO_WALLET_RADAR_ENABLED:
                     await q.answer("اول اجازه رصد را روشن کن.", show_alert=True)
                     return
+
+                # کپی واقعی فقط برای Wallet منتخب و واجد شرایط فعال می‌شود.
                 selected = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
                 if not selected:
-                    await q.answer("اول یک Wallet را انتخاب کن.", show_alert=True)
+                    await q.answer("اول از لیست، یک Wallet را انتخاب کن.", show_alert=True)
                     return
                 try:
                     with db_lock:
-                        conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False)
-                        selected_row=conn.execute("SELECT win_rate,total_trade,realized_profit_usd FROM pro_wallet_candidates WHERE wallet_address=?",(selected,)).fetchone()
+                        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                        selected_row = conn.execute(
+                            "SELECT win_rate,total_trade,realized_profit_usd FROM pro_wallet_candidates WHERE wallet_address=?",
+                            (selected,)
+                        ).fetchone()
                         conn.close()
                 except Exception:
-                    selected_row=None
-                if not selected_row or int(selected_row[1] or 0)<PRO_WALLET_MIN_TRADES or float(selected_row[0] or 0)<PRO_WALLET_MIN_WIN_RATE or float(selected_row[2] or 0)<0:
-                    await q.answer("Wallet منتخب حداقل شرایط رصد را ندارد.", show_alert=True)
+                    selected_row = None
+                if (
+                    not selected_row
+                    or int(selected_row[1] or 0) < PRO_WALLET_MIN_TRADES
+                    or float(selected_row[0] or 0) < PRO_WALLET_MIN_WIN_RATE
+                    or float(selected_row[2] or 0) < 0
+                ):
+                    await q.answer("Wallet منتخب حداقل شرایط کپی واقعی را ندارد.", show_alert=True)
                     return
-                if not WALLET_TRADE_PERMISSION:
-                    PRO_WALLET_COPY_PERMISSION = False
-                    _pro_wallet_set_setting_bool("pro_wallet_copy_permission", False)
-                    await q.answer("ابتدا «مجوز معامله واقعی از ولت» را ON کن؛ کپی در حالت OFF فعال نمی‌شود.", show_alert=True)
-                    return
+
                 state = _pro_wallet_toggle_copy()
-                if state:
+                if state and not WALLET_TRADE_PERMISSION:
+                    text = (
+                        "⚠️ **کپی واقعی درخواست شد ولی مجوز اصلی ولت خاموش است.**\n\n"
+                        "کلید اصلی `مجوز معامله واقعی از ولت` هنوز OFF است؛ بنابراین هیچ خرید/فروش واقعی اجرا نمی‌شود."
+                    )
+                elif state:
                     PRO_WALLET_LAST_COPY_SCAN_AT = 0.0
                     _set_bot_setting("pro_wallet_last_copy_scan_at", "0")
                     text = (
                         "🟢 **اجازه کپی واقعی Wallet روشن شد.**\n\n"
-                        "کپی فقط از Wallet منتخب شما انجام می‌شود.\n"
-                        "خرید/فروش از همین لحظه فقط با مجوز اصلی ولت انجام خواهد شد."
+                        f"Wallet منتخب: `{selected}`\n"
+                        "از این لحظه فقط معاملات جدید همین Wallet پایش و در صورت داشتن مجوز اصلی، BUY/SELL واقعی اجرا می‌شوند."
                     )
                 else:
                     text = "🔴 **اجازه کپی واقعی Wallet خاموش شد.**\n\n✅ رصد و آمار می‌توانند مستقل ادامه داشته باشند."
@@ -9166,7 +9151,7 @@ def start_telegram_bot():
                 if not PRO_WALLET_RADAR_ENABLED:
                     await q.answer("رصد خاموش است.", show_alert=True)
                     return
-                ok, message = await _tg_bg(_pro_wallet_refresh)
+                ok, message = _pro_wallet_refresh()
                 await q.edit_message_text(
                     f"{'✅' if ok else '⚠️'} **Professional Wallet Radar**\n\n{message}\n\n{_pro_wallet_panel_text()}",
                     reply_markup=InlineKeyboardMarkup([
