@@ -5049,9 +5049,12 @@ def _send_fused_signal_impl(token_addr, fusion):
         if learning_is_in_circuit_breaker():
             _audit_signal_decision("LEARNING_CIRCUIT_BREAKER")
             return False, "LEARNING_CIRCUIT_BREAKER"
-        if not fusion_quality_gate(fusion):
-            _audit_signal_decision("QUALITY_GATE_REJECTED")
-            return False, "QUALITY_GATE_REJECTED"
+        # The scanner already validated marked candidates. Avoid a second mutable
+        # learning/quality decision at emission time.
+        if not fusion.get("signal_prevalidated"):
+            if not fusion_quality_gate(fusion):
+                _audit_signal_decision("QUALITY_GATE_REJECTED")
+                return False, "QUALITY_GATE_REJECTED"
 
         # Entry filter only. Exit management is completely independent.
         live_change_5m = float(fusion.get("chg", fusion.get("change_5m", 0.0)) or 0.0)
@@ -5774,6 +5777,8 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                     candidate["hunter_group"] = "ANALYSIS"
                     candidate["engines"] = ["Analysis"]
                     candidate["votes"] = ["Analysis"]
+                    # Already validated by the independent Analysis entry gates.
+                    candidate["signal_prevalidated"] = True
                     candidate = _meta_attach(candidate)
                     candidate["meta_rank_bonus"] = float(candidate.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
                     # Ranking is selection-only and can never invalidate the candidate.
@@ -5807,6 +5812,8 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                         continue
                     fusion = _independent_engine_candidate(token_addr, pair, engine_name)
                     if fusion and fusion_quality_gate(fusion):
+                        # Already validated by the authoritative Fusion quality gate.
+                        fusion["signal_prevalidated"] = True
                         fusion = _meta_attach(fusion)
                         fusion["meta_rank_bonus"] = float(fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
                         fusion["rank_score"] = float(_candidate_rank_tuple((token_addr, fusion))[0])
