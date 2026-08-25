@@ -1112,7 +1112,8 @@ def _record_closed_position(token_addr,pos,exit_price,pnl_pct,reason,sell_tx_sig
         pos["trade_recorded"]=True; pos["closed_at"]=time.time(); pos["final_pnl_percent"]=float(pnl_pct or 0); pos["final_exit_price"]=float(exit_price or 0)
         try:
             if not pos.get("learning_recorded"):
-                record_closed_trade(token_addr=token_addr,symbol=pos.get("symbol",""),side=pos.get("side","BUY"),entry=pos.get("entry_price",0),exit_price=exit_price,pnl_pct=pnl_pct,reason=reason,engine_names=motor_engines,hold_seconds=max(0,int(time.time()-float(pos.get("opened_at",time.time()) or time.time()))),regime=pos.get("meta_regime",pos.get("regime","UNKNOWN")))
+                record_closed_trade(token_addr=token_addr,symbol=pos.get("symbol",""),side=pos.get("side","BUY"),entry=pos.get("entry_price",0),exit_price=exit_price,pnl_pct=pnl_pct,reason=reason,engine_names=motor_engines,hold_seconds=max(0,int(time.time()-float(pos.get("opened_at",time.time()) or time.time()))),regime=pos.get("meta_regime",pos.get("regime","UNKNOWN")),
+                                  feature_context=pos.get("learning_context"))
                 pos["learning_recorded"]=True
         except Exception as exc: logger.debug("Closed-trade core learning bridge failed: %s",exc)
         try:_meta_update_from_closed_trade(pos,float(pnl_pct or 0))
@@ -1147,12 +1148,10 @@ def get_admin_motor_stats():
             cur = conn.cursor()
             cols = {r[1] for r in cur.execute("PRAGMA table_info(trades)").fetchall()}
             has_group = "motor_group" in cols
-            reset_after_id = _get_stats_reset_trade_id()
             if has_group:
                 rows = cur.execute("""SELECT motor_group, pnl_percent, is_real, execution_type
                                      FROM trades
-                                     WHERE id > ? AND motor_group IS NOT NULL AND motor_group != ''""",
-                                   (reset_after_id,)).fetchall()
+                                     WHERE motor_group IS NOT NULL AND motor_group != ''""").fetchall()
             else:
                 rows = []
             conn.close()
@@ -1204,28 +1203,27 @@ def _admin_motor_stats_text():
 
 def get_advanced_trade_analytics():
     try:
-        reset_after_id = _get_stats_reset_trade_id()
         with db_lock:
             conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
-            r=cur.execute("SELECT COUNT(*),COALESCE(SUM(pnl_percent),0),COALESCE(SUM(pnl_usd),0),COALESCE(AVG(pnl_percent),0) FROM trades WHERE id > ?", (reset_after_id,)).fetchone()
+            r=cur.execute("SELECT COUNT(*),COALESCE(SUM(pnl_percent),0),COALESCE(SUM(pnl_usd),0),COALESCE(AVG(pnl_percent),0) FROM trades").fetchone()
             total=int(r[0] or 0); total_pct=float(r[1] or 0); total_usd=float(r[2] or 0); avg=float(r[3] or 0)
-            wins=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND pnl_percent>0", (reset_after_id,)).fetchone()[0] or 0)
-            losses=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND pnl_percent<0", (reset_after_id,)).fetchone()[0] or 0)
-            breakeven=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND pnl_percent=0", (reset_after_id,)).fetchone()[0] or 0)
-            real_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND is_real=1", (reset_after_id,)).fetchone()[0] or 0)
-            signal_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND execution_type='SIGNAL_ONLY'", (reset_after_id,)).fetchone()[0] or 0)
-            best=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades WHERE id > ? ORDER BY pnl_percent DESC LIMIT 1", (reset_after_id,)).fetchone()
-            worst=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades WHERE id > ? ORDER BY pnl_percent ASC LIMIT 1", (reset_after_id,)).fetchone(); conn.close()
+            wins=int(cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent>0").fetchone()[0] or 0)
+            losses=int(cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent<0").fetchone()[0] or 0)
+            breakeven=int(cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent=0").fetchone()[0] or 0)
+            real_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE is_real=1").fetchone()[0] or 0)
+            signal_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE execution_type='SIGNAL_ONLY'").fetchone()[0] or 0)
+            best=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 1").fetchone()
+            worst=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades ORDER BY pnl_percent ASC LIMIT 1").fetchone(); conn.close()
         with state_lock:
             open_real=len(active_positions); open_signal=len(signal_positions); open_total=len(set(active_positions)|set(signal_positions))
         decided=wins+losses; wr=wins/decided*100.0 if decided else 0.0
-        return {"total_trades":total,"total_pct":round(total_pct,2),"total_usd":round(total_usd,2),"avg_pct":round(avg,2),"win_rate":round(wr,2),"win_count":wins,"loss_count":losses,"breakeven_count":breakeven,"open_positions":open_total,"open_real":open_real,"open_signal":open_signal,"real_closed":real_closed,"signal_closed":signal_closed,"best_trade":best,"worst_trade":worst,"stats_reset_after_id":reset_after_id}
+        return {"total_trades":total,"total_pct":round(total_pct,2),"total_usd":round(total_usd,2),"avg_pct":round(avg,2),"win_rate":round(wr,2),"win_count":wins,"loss_count":losses,"breakeven_count":breakeven,"open_positions":open_total,"open_real":open_real,"open_signal":open_signal,"real_closed":real_closed,"signal_closed":signal_closed,"best_trade":best,"worst_trade":worst}
     except Exception as e:
         logger.error(f"⚠️ خطا در گزارش‌گیری پیشرفته: {e}")
-        return {"total_trades":0,"total_pct":0.0,"total_usd":0.0,"avg_pct":0.0,"win_rate":0.0,"win_count":0,"loss_count":0,"breakeven_count":0,"open_positions":0,"open_real":0,"open_signal":0,"real_closed":0,"signal_closed":0,"best_trade":None,"worst_trade":None,"stats_reset_after_id":_get_stats_reset_trade_id()}
+        return {"total_trades":0,"total_pct":0.0,"total_usd":0.0,"avg_pct":0.0,"win_rate":0.0,"win_count":0,"loss_count":0,"breakeven_count":0,"open_positions":0,"open_real":0,"open_signal":0,"real_closed":0,"signal_closed":0,"best_trade":None,"worst_trade":None}
 
 def self_learning_ai_optimizer_loop():
-    """Continuous closed-trade learning. It never invents results and never changes security secrets."""
+    """Continuous closed-trade learning with bounded automatic engine tuning."""
     logger.info("🧠 موتور یادگیری تطبیقی MAX FUSION فعال شد.")
     while True:
         if SELF_LEARNING_AI_ENABLED:
@@ -1234,6 +1232,13 @@ def self_learning_ai_optimizer_loop():
                     conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
                     state = _update_adaptive_learning(conn)
                     conn.close()
+                # V11 tuning is now automatic, but bounded and evidence-based:
+                # an engine must have enough closed trades before its weight moves.
+                if AUTO_IMPROVEMENT_ENABLED and len(learning_state.get("trades", [])) >= V11_MIN_ENGINE_TRADES:
+                    if time.time() - float(v11_state.get("last_tuning", 0) or 0) >= V11_TUNING_INTERVAL:
+                        changes = v11_tune_weights()
+                        if changes:
+                            logger.info("🛠️ Auto Improvement: %d engine weights tuned from closed-trade evidence.", len(changes))
                 if state.get("sample", 0) >= ADAPTIVE_MIN_SAMPLE:
                     logger.info(f"🧠 Adaptive Learning: {state['sample']} معاملات اخیر | Win Rate={state['win_rate']:.1f}% | score_bonus={state['score_bonus']}")
             except Exception as e:
@@ -1736,34 +1741,6 @@ def _set_bot_setting(key, value):
     except Exception as e:
         logger.error(f"bot setting write error: {e}")
         return False
-
-# ================= STATS VIEW RESET (NON-DESTRUCTIVE) =================
-# فقط نقطه شروع نمایش آمار را جابه‌جا می‌کند؛ رکوردهای trades هرگز حذف یا تغییر نمی‌شوند.
-STATS_RESET_SETTING_KEY = "trade_stats_reset_after_id"
-
-def _get_stats_reset_trade_id():
-    try:
-        return max(0, int(float(_get_bot_setting(STATS_RESET_SETTING_KEY, "0") or 0)))
-    except Exception:
-        return 0
-
-def reset_trade_statistics_view():
-    """صفرکردن نمای آماری بدون حذف هیچ رکوردی از دیتابیس."""
-    try:
-        with db_lock:
-            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-            cur = conn.cursor()
-            row = cur.execute("SELECT COALESCE(MAX(id), 0) FROM trades").fetchone()
-            baseline = int(row[0] or 0)
-            cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
-            cur.execute("INSERT OR REPLACE INTO bot_settings(key,value) VALUES(?,?)", (STATS_RESET_SETTING_KEY, str(baseline)))
-            conn.commit()
-            conn.close()
-        logger.info("📊 نمای آمار معاملات صفر شد؛ داده‌های اصلی حذف نشدند. baseline_trade_id=%s", baseline)
-        return True, baseline
-    except Exception as e:
-        logger.error("❌ خطا در صفرکردن نمای آمار معاملات: %s", e)
-        return False, _get_stats_reset_trade_id()
 
 def _get_channel_signal_enabled():
     global CHANNEL_SIGNAL_ENABLED
@@ -2366,11 +2343,13 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
     نکته: وضعیت موجودی/اجرای کیف پول هرگز در کانال نمایش داده نمی‌شود.
     لینک‌ها فقط روی دکمه‌ها هستند؛ متن کانال لینک خام ندارد.
     """
-    global CHANNEL_ID, CHANNEL_SIGNAL_ENABLED
+    global CHANNEL_ID
     _load_channel_config()
-    # وضعیت کلید را در هر ارسال از DB تازه می‌خوانیم تا هیچ worker/thread
-    # وضعیت قدیمی ON/OFF را نگه ندارد.
-    _get_channel_signal_enabled()
+    # Always reload the persisted switch at send time. This makes the Telegram
+    # button authoritative even for already-running background scanner threads.
+    if not _get_channel_signal_enabled():
+        logger.info("📢 Channel signal publication is OFF; channel send skipped.")
+        return False
     if not CHANNEL_SIGNAL_ENABLED:
         logger.info("📢 Channel signal publication is OFF; channel send skipped.")
         return False
@@ -2378,11 +2357,7 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         tail = CHANNEL_INVITE_LINK.split("https://t.me/", 1)[1].strip("/")
         if tail and not tail.startswith("+"):
             CHANNEL_ID = "@" + tail
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("❌ ارسال کانال انجام نشد: TELEGRAM_BOT_TOKEN خالی است.")
-        return False
-    if not CHANNEL_ID:
-        logger.error("❌ ارسال کانال انجام نشد: CHANNEL_ID خالی است. /setvipchannel را بررسی کن.")
+    if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
         return False
 
     side = str(side).upper()
@@ -3126,21 +3101,22 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
         telegram_ok = bool(send_telegram_msg(msg))
     except Exception:
         logger.exception("SELL Telegram send failed token=%s", token_addr)
-    channel_ok = False
+    channel_ok = True
     _load_channel_config()
-    try:
-        channel_ok = bool(send_graphic_signal_to_vip_channel(
-            token_addr=token_addr, symbol=symbol, price=current_price, tp=tp, sl=locked,
-            buy_amt=float(pos.get("buy_amt", 0.0) or 0.0),
-            volume=float(pos.get("volume", 0.0) or 0.0),
-            liquidity=float(pos.get("liquidity", 0.0) or 0.0),
-            p_change=float(pos.get("m5_change", pos.get("p_change", 0.0)) or 0.0),
-            solscan_link=solscan, signal_title=title, side="SELL",
-            execution_status=status, execution_tx=tx_signature, pnl_percent=pnl_percent
-        ))
-    except Exception:
-        channel_ok = False
-        logger.exception("SELL channel send failed token=%s", token_addr)
+    if CHANNEL_ID:
+        try:
+            channel_ok = bool(send_graphic_signal_to_vip_channel(
+                token_addr=token_addr, symbol=symbol, price=current_price, tp=tp, sl=locked,
+                buy_amt=float(pos.get("buy_amt", 0.0) or 0.0),
+                volume=float(pos.get("volume", 0.0) or 0.0),
+                liquidity=float(pos.get("liquidity", 0.0) or 0.0),
+                p_change=float(pos.get("m5_change", pos.get("p_change", 0.0)) or 0.0),
+                solscan_link=solscan, signal_title=title, side="SELL",
+                execution_status=status, execution_tx=tx_signature, pnl_percent=pnl_percent
+            ))
+        except Exception:
+            channel_ok = False
+            logger.exception("SELL channel send failed token=%s", token_addr)
     return bool(telegram_ok or channel_ok)
 
 def _notify_async(fn, *args, **kwargs):
@@ -3241,6 +3217,14 @@ def track_signal_only(token_addr, symbol, price, tp, sl, volume, liquidity, p_ch
         "structure": str((fusion or {}).get("structure", "UNKNOWN") or "UNKNOWN"),
         "buys_m5": int((fusion or {}).get("buys", 0) or 0),
         "sells_m5": int((fusion or {}).get("sells", 0) or 0),
+        "learning_context": dict((fusion or {}).get("learning_context") or {
+            "liquidity": float(liquidity or 0),
+            "volume_5m": float(volume or 0),
+            "change_5m": float(p_change or 0),
+            "buy_ratio": int((fusion or {}).get("buys", 0) or 0) / max(1, int((fusion or {}).get("sells", 0) or 0)),
+            "buys": int((fusion or {}).get("buys", 0) or 0),
+            "sells": int((fusion or {}).get("sells", 0) or 0),
+        }),
     }
     with state_lock:
         signal_positions[token_addr] = pos
@@ -4048,6 +4032,152 @@ def _candidate_prefilter(pair):
         return False
 
 
+
+# ==========================================================
+# PER-TRADE ONLINE LEARNING / SURFACE PARAMETER ADAPTATION
+# Every CLOSED trade updates engine strictness and entry-surface
+# statistics immediately. Changes are deliberately small and bounded.
+# ==========================================================
+ADAPTIVE_ENGINE_STEP_LOSS = 0.045
+ADAPTIVE_ENGINE_STEP_WIN = 0.018
+ADAPTIVE_SURFACE_STEP_LOSS = 0.030
+ADAPTIVE_SURFACE_STEP_WIN = 0.012
+ADAPTIVE_SURFACE_MAX_STRICTNESS = 0.65
+
+
+def _adaptive_surface_state():
+    st = learning_state.setdefault("surface", {})
+    st.setdefault("strictness", 0.0)
+    st.setdefault("features", {})
+    return st
+
+
+def _feature_bucket(feature, value):
+    try:
+        v = float(value or 0.0)
+    except Exception:
+        v = 0.0
+    if feature == "liquidity":
+        return "<50k" if v < 50000 else ("50-100k" if v < 100000 else ">=100k")
+    if feature == "volume_5m":
+        return "<3k" if v < 3000 else ("3-10k" if v < 10000 else ">=10k")
+    if feature == "buy_ratio":
+        return "<1.30" if v < 1.30 else ("1.30-1.70" if v < 1.70 else ">=1.70")
+    if feature == "change_5m":
+        return "<3%" if v < 3 else ("3-8%" if v < 8 else ("8-15%" if v < 15 else ">=15%"))
+    return str(v)
+
+
+def _adaptive_feature_profile(feature, value):
+    st = _adaptive_surface_state()
+    key = f"{feature}:{_feature_bucket(feature, value)}"
+    prof = st["features"].setdefault(key, {
+        "wins": 0, "losses": 0, "pnl_sum": 0.0,
+        "strictness": 0.0, "samples": 0
+    })
+    return prof
+
+
+def _adaptive_surface_thresholds():
+    """Return bounded live market thresholds learned from CLOSED trades."""
+    try:
+        st = _adaptive_surface_state()
+        strict = max(0.0, min(ADAPTIVE_SURFACE_MAX_STRICTNESS, float(st.get("strictness", 0.0) or 0.0)))
+        # The global strictness is deliberately gradual. It can only tighten
+        # the entry surface; it never loosens the hard baseline.
+        liq_mult = 1.0 + 0.35 * strict
+        vol_mult = 1.0 + 0.50 * strict
+        ratio_add = 0.10 * strict
+        min_change_add = 0.30 * strict
+        max_change_reduce = 4.0 * strict
+        return {
+            "min_liquidity": CONSENSUS_MIN_LIQUIDITY * liq_mult,
+            "min_volume_5m": CONSENSUS_MIN_VOLUME_5M * vol_mult,
+            "min_buy_ratio": CONSENSUS_MIN_BUY_RATIO + ratio_add,
+            "min_change_5m": CONSENSUS_MIN_CHANGE_5M + min_change_add,
+            "max_change_5m": max(CONSENSUS_MIN_CHANGE_5M + 1.0, CONSENSUS_MAX_CHANGE_5M - max_change_reduce),
+            "strictness": strict,
+        }
+    except Exception:
+        return {
+            "min_liquidity": CONSENSUS_MIN_LIQUIDITY,
+            "min_volume_5m": CONSENSUS_MIN_VOLUME_5M,
+            "min_buy_ratio": CONSENSUS_MIN_BUY_RATIO,
+            "min_change_5m": CONSENSUS_MIN_CHANGE_5M,
+            "max_change_5m": CONSENSUS_MAX_CHANGE_5M,
+            "strictness": 0.0,
+        }
+
+
+def _adaptive_online_trade_update(pnl, engine_names=None, feature_context=None):
+    """Update learning immediately after EACH closed trade, not in batches."""
+    try:
+        pnl = float(pnl or 0.0)
+        st = _adaptive_surface_state()
+        is_loss = pnl < 0
+        is_win = pnl > 0
+
+        # Global surface strictness: losses tighten slowly; wins relax only a
+        # little, so one lucky win cannot erase accumulated evidence.
+        if is_loss:
+            st["strictness"] = min(ADAPTIVE_SURFACE_MAX_STRICTNESS,
+                                   float(st.get("strictness", 0.0) or 0.0) + ADAPTIVE_SURFACE_STEP_LOSS)
+        elif is_win:
+            st["strictness"] = max(0.0,
+                                   float(st.get("strictness", 0.0) or 0.0) - ADAPTIVE_SURFACE_STEP_WIN)
+
+        # Learn which market-surface conditions were present at the losing/winning entry.
+        ctx = feature_context if isinstance(feature_context, dict) else {}
+        features = {
+            "liquidity": ctx.get("liquidity", 0),
+            "volume_5m": ctx.get("volume_5m", 0),
+            "buy_ratio": ctx.get("buy_ratio", 0),
+            "change_5m": ctx.get("change_5m", 0),
+        }
+        for feature, value in features.items():
+            prof = _adaptive_feature_profile(feature, value)
+            prof["samples"] = int(prof.get("samples", 0) or 0) + 1
+            prof["wins"] = int(prof.get("wins", 0) or 0) + int(is_win)
+            prof["losses"] = int(prof.get("losses", 0) or 0) + int(is_loss)
+            prof["pnl_sum"] = float(prof.get("pnl_sum", 0.0) or 0.0) + pnl
+            if is_loss:
+                prof["strictness"] = min(ADAPTIVE_SURFACE_MAX_STRICTNESS,
+                                          float(prof.get("strictness", 0.0) or 0.0) + ADAPTIVE_SURFACE_STEP_LOSS)
+            elif is_win:
+                prof["strictness"] = max(0.0,
+                                          float(prof.get("strictness", 0.0) or 0.0) - ADAPTIVE_SURFACE_STEP_WIN)
+
+        # Every outcome also updates the individual engines immediately.
+        # A losing trade increases that engine's strictness gradually; a win
+        # gives only a smaller reward so the learner remains conservative.
+        for name in list(engine_names or []):
+            key = str(name)
+            est = learning_state.setdefault("engines", {}).setdefault(key, {
+                "trades": 0, "wins": 0, "losses": 0,
+                "avg_pnl": 0.0, "weight": 1.0, "strictness": 0.0,
+                "last_pnl": 0.0,
+            })
+            est["strictness"] = float(est.get("strictness", 0.0) or 0.0)
+            if is_loss:
+                est["strictness"] = min(ADAPTIVE_SURFACE_MAX_STRICTNESS,
+                                         est["strictness"] + ADAPTIVE_ENGINE_STEP_LOSS)
+            elif is_win:
+                est["strictness"] = max(0.0,
+                                         est["strictness"] - ADAPTIVE_ENGINE_STEP_WIN)
+            est["last_pnl"] = pnl
+            # Convert strictness into a bounded live weight. This is gradual,
+            # so the engine is not switched off because of one bad trade.
+            target = 1.0 - 0.70 * est["strictness"]
+            target = max(0.45, min(1.20, target))
+            old_weight = float(est.get("weight", 1.0) or 1.0)
+            est["weight"] = old_weight + 0.25 * (target - old_weight)
+
+        st["last_update"] = time.time()
+        st["last_pnl"] = pnl
+        st["last_outcome"] = "WIN" if is_win else ("LOSS" if is_loss else "BREAKEVEN")
+    except Exception as e:
+        logger.debug("Online adaptive learning update failed: %s", e)
+
 def _mode_market_quality(pair):
     price = float(pair.get("priceUsd", 0) or 0)
     liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0)
@@ -4059,19 +4189,20 @@ def _mode_market_quality(pair):
     token_addr = (pair.get("baseToken") or {}).get("address", "")
     if price <= 0:
         _diag_reject("MARKET_QUALITY", "INVALID_PRICE", token_addr); return None
-    if liq < CONSENSUS_MIN_LIQUIDITY:
-        _diag_reject("MARKET_QUALITY", "LOW_LIQUIDITY", token_addr); return None
-    if vol < CONSENSUS_MIN_VOLUME_5M:
-        _diag_reject("MARKET_QUALITY", "LOW_5M_VOLUME", token_addr); return None
-    if chg < CONSENSUS_MIN_CHANGE_5M:
-        _diag_reject("MARKET_QUALITY", "5M_CHANGE_TOO_LOW", token_addr); return None
-    if chg > CONSENSUS_MAX_CHANGE_5M:
-        _diag_reject("MARKET_QUALITY", "5M_CHANGE_TOO_HIGH", token_addr); return None
+    adaptive_surface = _adaptive_surface_thresholds()
+    if liq < adaptive_surface["min_liquidity"]:
+        _diag_reject("MARKET_QUALITY", "LOW_LIQUIDITY_ADAPTIVE", token_addr); return None
+    if vol < adaptive_surface["min_volume_5m"]:
+        _diag_reject("MARKET_QUALITY", "LOW_5M_VOLUME_ADAPTIVE", token_addr); return None
+    if chg < adaptive_surface["min_change_5m"]:
+        _diag_reject("MARKET_QUALITY", "5M_CHANGE_TOO_LOW_ADAPTIVE", token_addr); return None
+    if chg > adaptive_surface["max_change_5m"]:
+        _diag_reject("MARKET_QUALITY", "5M_CHANGE_TOO_HIGH_ADAPTIVE", token_addr); return None
     if buys <= 0:
         _diag_reject("MARKET_QUALITY", "NO_BUYERS", token_addr); return None
-    if sells > 0 and buys < max(1, int(sells * CONSENSUS_MIN_BUY_RATIO)):
-        _diag_reject("MARKET_QUALITY", "BUY_PRESSURE_TOO_WEAK", token_addr); return None
-    return {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
+    if sells > 0 and buys < max(1, int(sells * adaptive_surface["min_buy_ratio"])):
+        _diag_reject("MARKET_QUALITY", "BUY_PRESSURE_TOO_WEAK_ADAPTIVE", token_addr); return None
+    return {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells, "adaptive_surface": adaptive_surface}
 
 
 def build_consensus_signal(token_addr, pair, forced_mode=None):
@@ -4137,10 +4268,47 @@ def build_consensus_signal(token_addr, pair, forced_mode=None):
             return None
 
         # Prefer stronger momentum, healthy buy pressure, liquidity and volume.
+        # IMPORTANT: learned engine weights are applied to the actual votes here.
+        # Previously the learning layer stored weights but this scoring path did
+        # not consume them, so the bot could keep trusting a repeatedly losing engine.
         buy_ratio = q["buys"] / max(1, q["sells"])
+        engine_weights = {}
+        for _name in evidence["votes"]:
+            engine_weights[_name] = learning_adjusted_engine_weight(_name, 1.0)
+        weighted_adv = sum(learning_adjusted_engine_weight(name, 1.35) for name in evidence["advanced_votes"])
+        weighted_hulk = sum(learning_adjusted_engine_weight(name, 1.40) for name in evidence["hulk_votes"])
+        if MAX_FUSION_ENABLED:
+            strength = weighted_adv + weighted_hulk
+        elif selected_mode == "ADVANCED" or (not selected_mode and ADVANCED_AI_ENABLED):
+            strength = weighted_adv
+        else:
+            strength = weighted_hulk
         score = strength + min(5.0, q["chg"] / 5.0) + min(4.0, q["vol"] / 10000.0) + min(3.0, q["liq"] / 50000.0)
         score += min(3.0, max(0.0, buy_ratio - 1.0))
         score += float(structure.get("structure_score", 0.0) or 0.0)
+
+        # Live profitability gate: after enough closed trades, losing history
+        # raises the minimum score/pressure requirement; profitable history never
+        # weakens the fixed quality gates.
+        learning_rows = list(learning_state.get("trades", []))
+        learned_score_bonus = 0
+        learned_ratio_bonus = 0.0
+        if len(learning_rows) >= ADAPTIVE_MIN_SAMPLE:
+            recent = learning_rows[-ADAPTIVE_LOOKBACK:]
+            pnl_vals = [float(r.get("pnl_pct", 0) or 0) for r in recent]
+            wins_n = sum(1 for x in pnl_vals if x > 0)
+            losses_n = sum(1 for x in pnl_vals if x < 0)
+            decided_n = wins_n + losses_n
+            recent_wr = (wins_n / decided_n * 100.0) if decided_n else 0.0
+            recent_avg = sum(pnl_vals) / max(1, len(pnl_vals))
+            if recent_wr < 55 or recent_avg < -1.0:
+                learned_score_bonus, learned_ratio_bonus = 3, 0.12
+            elif recent_wr < 65 or recent_avg < 0:
+                learned_score_bonus, learned_ratio_bonus = 2, 0.08
+            elif recent_wr < 75:
+                learned_score_bonus, learned_ratio_bonus = 1, 0.04
+        adaptive_score_min = max(CONSENSUS_MIN_SCORE, min(total, CONSENSUS_MIN_SCORE + learned_score_bonus))
+        adaptive_ratio_min = min(0.90, CONSENSUS_MIN_RATIO + learned_ratio_bonus)
 
         now = time.time()
         if now - consensus_last_signal.get(token_addr, 0) < CONSENSUS_COOLDOWN_SECONDS:
@@ -4173,6 +4341,20 @@ def build_consensus_signal(token_addr, pair, forced_mode=None):
             "support": float(structure.get("support", 0.0) or 0.0),
             "resistance": float(structure.get("resistance", 0.0) or 0.0),
             "breakout": bool(structure.get("breakout", False)),
+            "adaptive_score_min": float(adaptive_score_min),
+            "adaptive_ratio_min": float(adaptive_ratio_min),
+            "learned_engine_weights": dict(engine_weights),
+            "adaptive_surface": dict(q.get("adaptive_surface") or _adaptive_surface_thresholds()),
+            "learning_context": {
+                "liquidity": float(q.get("liq", 0) or 0),
+                "volume_5m": float(q.get("vol", 0) or 0),
+                "change_5m": float(q.get("chg", 0) or 0),
+                "buy_ratio": float(q.get("buys", 0) or 0) / max(1, int(q.get("sells", 0) or 0)),
+                "buys": int(q.get("buys", 0) or 0),
+                "sells": int(q.get("sells", 0) or 0),
+                "structure": structure.get("structure", "UNKNOWN"),
+                "breakout": bool(structure.get("breakout", False)),
+            },
         }
         result = _meta_attach(result)
         result["meta_rank_bonus"] = float(result.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
@@ -4185,32 +4367,6 @@ def build_consensus_signal(token_addr, pair, forced_mode=None):
 # ADAPTIVE_LEARNING_TARGET_NOTE:
 # Learning may update engine weights from real closed-trade outcomes,
 # but it must not lower the fixed quality gate just to consume the daily budget.
-# Adaptive gate cache: learning is consulted periodically, not once per token.
-_ADAPTIVE_GATE_CACHE_LOCK = Lock()
-_ADAPTIVE_GATE_CACHE = {"at": 0.0, "score_min": None, "ratio": None, "sample": 0, "win_rate": 0.0}
-_ADAPTIVE_GATE_CACHE_TTL = 30.0
-
-def _get_live_adaptive_gate(enabled_count=1):
-    """Read the persistent profitability-learning result and apply only stricter gates."""
-    now = time.time()
-    with _ADAPTIVE_GATE_CACHE_LOCK:
-        if (_ADAPTIVE_GATE_CACHE["score_min"] is not None and
-                now - float(_ADAPTIVE_GATE_CACHE["at"] or 0) < _ADAPTIVE_GATE_CACHE_TTL):
-            return (_ADAPTIVE_GATE_CACHE["score_min"], _ADAPTIVE_GATE_CACHE["ratio"],
-                    _ADAPTIVE_GATE_CACHE["sample"], _ADAPTIVE_GATE_CACHE["win_rate"])
-    try:
-        score_min, ratio, _engine_wr, state = get_adaptive_consensus_settings(max(1, int(enabled_count or 1)))
-        score_min = max(float(CONSENSUS_MIN_SCORE), float(score_min))
-        ratio = max(float(CONSENSUS_MIN_RATIO), float(ratio))
-        with _ADAPTIVE_GATE_CACHE_LOCK:
-            _ADAPTIVE_GATE_CACHE.update({"at": now, "score_min": score_min, "ratio": ratio,
-                                         "sample": int(state.get("sample", 0) or 0),
-                                         "win_rate": float(state.get("win_rate", 0.0) or 0.0)})
-        return score_min, ratio, int(state.get("sample", 0) or 0), float(state.get("win_rate", 0.0) or 0.0)
-    except Exception as e:
-        logger.debug("Adaptive live gate unavailable; fixed gate remains active: %s", e)
-        return float(CONSENSUS_MIN_SCORE), float(CONSENSUS_MIN_RATIO), 0, 0.0
-
 def fusion_quality_gate(fusion):
     try:
         liq = float(fusion.get("liq", 0) or 0)
@@ -4218,25 +4374,21 @@ def fusion_quality_gate(fusion):
         score = float(fusion.get("score", 0) or 0)
         buys = int(fusion.get("buys", 0) or 0)
         sells = int(fusion.get("sells", 0) or 0)
+        adaptive_surface = fusion.get("adaptive_surface") or _adaptive_surface_thresholds()
 
-        if liq < CONSENSUS_MIN_LIQUIDITY or vol < CONSENSUS_MIN_VOLUME_5M:
+        if liq < float(adaptive_surface.get("min_liquidity", CONSENSUS_MIN_LIQUIDITY)):
             return False
-        if buys < 2 or (sells > 0 and buys < sells * CONSENSUS_MIN_BUY_RATIO):
+        if vol < float(adaptive_surface.get("min_volume_5m", CONSENSUS_MIN_VOLUME_5M)):
             return False
-
-        # یادگیری فقط می‌تواند گیت را سخت‌تر کند؛ هیچ‌وقت کیفیت پایه را پایین نمی‌آورد.
-        learned_score_min = float(CONSENSUS_MIN_SCORE)
-        if AUTO_LEARNING_ENABLED or AUTO_IMPROVEMENT_ENABLED:
-            try:
-                enabled_count = len(fusion.get("engines") or fusion.get("votes") or [])
-                learned_score_min, _learned_ratio, sample, learned_wr = _get_live_adaptive_gate(enabled_count or 1)
-                if sample >= ADAPTIVE_MIN_SAMPLE and learned_score_min > CONSENSUS_MIN_SCORE:
-                    fusion["adaptive_gate_score_min"] = learned_score_min
-                    fusion["adaptive_gate_sample"] = sample
-                    fusion["adaptive_gate_win_rate"] = learned_wr
-            except Exception:
-                learned_score_min = float(CONSENSUS_MIN_SCORE)
-        if score < max(float(CONSENSUS_MIN_SCORE), learned_score_min):
+        if buys < 2 or (sells > 0 and buys < sells * float(adaptive_surface.get("min_buy_ratio", CONSENSUS_MIN_BUY_RATIO))):
+            return False
+        # The adaptive threshold is deliberately applied only when enough
+        # real closed-trade evidence exists; otherwise the original fixed gate remains.
+        adaptive_score_min = float(fusion.get("adaptive_score_min", CONSENSUS_MIN_SCORE) or CONSENSUS_MIN_SCORE)
+        adaptive_ratio_min = float(fusion.get("adaptive_ratio_min", CONSENSUS_MIN_RATIO) or CONSENSUS_MIN_RATIO)
+        if score < adaptive_score_min:
+            return False
+        if sells > 0 and (buys / max(1, sells)) < adaptive_ratio_min:
             return False
         if not _meta_quality_allowed(fusion):
             return False
@@ -4316,7 +4468,8 @@ def _engine_names_from_fusion(fusion):
     return list(names)
 
 def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
-                        reason="", engine_names=None, hold_seconds=0, regime="UNKNOWN"):
+                        reason="", engine_names=None, hold_seconds=0, regime="UNKNOWN",
+                        feature_context=None):
     try:
         pnl = float(pnl_pct)
         item = {
@@ -4354,11 +4507,22 @@ def record_closed_trade(token_addr, symbol, side, entry, exit_price, pnl_pct,
             st["losses"] += int(pnl <= 0)
             n = st["trades"]
             st["avg_pnl"] = ((st["avg_pnl"] * (n - 1)) + pnl) / n
-            target = max(0.35, min(1.65, 1.0 + st["avg_pnl"] / 100.0))
-            st["weight"] = (
-                (1.0 - LEARNING_ALPHA) * st["weight"]
-                + LEARNING_ALPHA * target
-            )
+            # Do not react aggressively to one or two outcomes. After a small
+            # evidence floor, combine hit-rate and average PnL so the learned
+            # weight actually prefers engines that make money rather than merely
+            # engines that fire often. The weight remains tightly bounded.
+            if n >= 8:
+                wr = float(st["wins"]) / max(1, n)
+                pnl_component = max(-0.25, min(0.25, float(st["avg_pnl"]) / 20.0))
+                target = max(0.55, min(1.45, 0.70 + (0.70 * wr) + pnl_component))
+                st["weight"] = (
+                    (1.0 - LEARNING_ALPHA) * float(st.get("weight", 1.0) or 1.0)
+                    + LEARNING_ALPHA * target
+                )
+
+        # Immediate per-trade online learning: engine strictness + market-surface
+        # features are updated now, not after the periodic 180-second batch.
+        _adaptive_online_trade_update(pnl, item["engines"], feature_context)
         _save_learning_state()
     except Exception as e:
         logger.warning(f"Closed-trade learning update failed: {e}")
@@ -5101,17 +5265,18 @@ def _send_buy_notifications(token_addr, symbol, price, tp, sl, amount, mode_name
     except Exception:
         logger.exception("BUY Telegram notification failed token=%s", token_addr)
     _load_channel_config()
-    channel_ok = False
-    try:
-        channel_ok = bool(send_graphic_signal_to_vip_channel(
-            token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
-            buy_amt=amount, volume=vol, liquidity=liq, p_change=chg,
-            solscan_link=solscan_link, signal_title=mode_name, side="BUY",
-            execution_status=execution_display, execution_tx=""
-        ))
-    except Exception:
-        channel_ok = False
-        logger.exception("BUY channel notification failed token=%s", token_addr)
+    channel_ok = True
+    if CHANNEL_ID:
+        try:
+            channel_ok = bool(send_graphic_signal_to_vip_channel(
+                token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
+                buy_amt=amount, volume=vol, liquidity=liq, p_change=chg,
+                solscan_link=solscan_link, signal_title=mode_name, side="BUY",
+                execution_status=execution_display, execution_tx=""
+            ))
+        except Exception:
+            channel_ok = False
+            logger.exception("BUY channel notification failed token=%s", token_addr)
     if telegram_ok or channel_ok:
         V12_REAL_AUDIT["channel_sent"] += 1
     else:
@@ -8059,14 +8224,6 @@ _pro_wallet_load_switches()
 # =====================================================================
 
 
-def _stats_inline_keyboard(is_admin=False):
-    rows = []
-    if is_admin:
-        rows.append([InlineKeyboardButton("♻️ صفر کردن آمار (بدون حذف داده)", callback_data="stats_reset")])
-    rows.append([InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="stats")])
-    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
-    return InlineKeyboardMarkup(rows)
-
 def _main_keyboard(is_admin=False):
     rows=[[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
@@ -8518,7 +8675,6 @@ def start_telegram_bot():
                     f"🏆 Win Rate: `{a['win_rate']:.2f}%`\n"
                     f"📈 P/L: `{a['total_pct']:+.2f}%` | `${a['total_usd']:+.2f}`\n"
                     f"🤖 واقعی بسته‌شده: `{a['real_closed']}` | 📡 سیگنال‌محور: `{a['signal_closed']}`",
-                    reply_markup=_stats_inline_keyboard(is_admin),
                     parse_mode="Markdown"
                 )
                 return
@@ -8585,6 +8741,26 @@ def start_telegram_bot():
                     message,
                     parse_mode="Markdown"
                 )
+                return
+
+            # Channel publication toggle — this is the Reply Keyboard equivalent
+            # of the existing inline channel switch. It changes only publication;
+            # signal generation, real trading and open-position management continue.
+            if label.startswith("📢 ارسال سیگنال به کانال:"):
+                if not is_admin:
+                    await msg.reply_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_persistent_bottom_keyboard(False))
+                    return
+                new_state = not bool(_get_channel_signal_enabled())
+                if _set_channel_signal_enabled(new_state):
+                    await msg.reply_text(
+                        f"📢 **ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}**\n\n"
+                        f"مقصد فعلی: `{CHANNEL_ID or 'تنظیم نشده'}`\n"
+                        "این کلید فقط انتشار سیگنال در کانال را کنترل می‌کند.",
+                        reply_markup=_persistent_bottom_keyboard(True),
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await msg.reply_text("❌ تغییر وضعیت کانال ذخیره نشد؛ وضعیت قبلی حفظ شد.", reply_markup=_persistent_bottom_keyboard(True))
                 return
 
             # Diagnostic
@@ -8791,21 +8967,14 @@ def start_telegram_bot():
                 if not is_admin:
                     await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
                     return
-                _load_channel_config()
-                _get_channel_signal_enabled()
                 new_state = not bool(CHANNEL_SIGNAL_ENABLED)
                 if _set_channel_signal_enabled(new_state):
-                    status = (
-                        "🟢 **ارسال سیگنال به کانال فعال شد**\n\n"
-                        f"📢 مقصد قطعی: `{CHANNEL_ID}`\n"
-                        "هر BUY/SELL معتبر که به تابع انتشار کانال برسد، مستقل از کلید مادر برای کانال ارسال می‌شود.\n"
-                        "⚠️ اگر پیام باز هم نرسید، خطای دقیق Telegram در لاگ با CHANNEL_ID ثبت می‌شود."
-                        if CHANNEL_SIGNAL_ENABLED else
-                        "🔴 **ارسال سیگنال به کانال خاموش شد**\n\n"
-                        f"📢 مقصد: `{CHANNEL_ID or 'تنظیم نشده'}`\n"
-                        "تولید سیگنال، خرید واقعی و مدیریت پوزیشن‌ها دست‌نخورده می‌مانند."
+                    await q.edit_message_text(
+                        f"📢 **ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}**\n\n"
+                        f"مقصد فعلی: `{CHANNEL_ID or 'تنظیم نشده'}`\n"
+                        "این کلید فقط انتشار کارت سیگنال در کانال را کنترل می‌کند و به کلید مادر، تولید سیگنال، خرید واقعی یا مدیریت پوزیشن‌ها دست نمی‌زند.",
+                        reply_markup=_main_keyboard(True), parse_mode="Markdown"
                     )
-                    await q.edit_message_text(status, reply_markup=_main_keyboard(True), parse_mode="Markdown")
                 else:
                     await q.edit_message_text("❌ تغییر وضعیت ذخیره نشد؛ وضعیت قبلی حفظ شد.", reply_markup=_main_keyboard(True))
                 return
@@ -8932,27 +9101,8 @@ def start_telegram_bot():
                     f"🏆 Win Rate: `{a['win_rate']:.2f}%`\n"
                     f"📈 P/L: `{a['total_pct']:+.2f}%` | `${a['total_usd']:+.2f}`\n"
                     f"🤖 واقعی بسته‌شده: `{a['real_closed']}` | 📡 سیگنال‌محور: `{a['signal_closed']}`",
-                    reply_markup=_stats_inline_keyboard(is_admin),parse_mode="Markdown"
+                    reply_markup=_main_keyboard(is_admin),parse_mode="Markdown"
                 )
-            elif data == "stats_reset":
-                if not is_admin:
-                    await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
-                    return
-                ok, baseline = reset_trade_statistics_view()
-                if ok:
-                    a = await _tg_bg(get_advanced_trade_analytics)
-                    await q.edit_message_text(
-                        "♻️ **نمای آمار معاملات صفر شد**\n\n"
-                        "✅ هیچ معامله‌ای از دیتابیس حذف یا تغییر نکرد.\n"
-                        f"📌 نقطه شروع آمار جدید: Trade ID `{baseline}`\n\n"
-                        f"🟡 پوزیشن باز فعلی: `{a['open_positions']}`\n"
-                        "از این لحظه معاملات بسته‌شده جدید در آمار نمایش داده می‌شوند.",
-                        reply_markup=_stats_inline_keyboard(True), parse_mode="Markdown"
-                    )
-                else:
-                    await q.edit_message_text("❌ صفرکردن آمار انجام نشد؛ داده‌های اصلی دست‌نخورده ماندند.", reply_markup=_stats_inline_keyboard(True), parse_mode="Markdown")
-                return
-
             elif data.startswith("security_confirm_block_tg:") or data.startswith("security_confirm_block_ip:"):
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False)); return
@@ -9020,35 +9170,6 @@ def start_telegram_bot():
                         ]),
                         parse_mode="Markdown"
                     )
-            elif data=="reset_motor_stats":
-                if not is_admin:
-                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
-                    return
-                ok, baseline = await _tg_bg(reset_trade_statistics_view)
-                if ok:
-                    await q.edit_message_text(
-                        "♻️ **آمار موتورهای این پنل صفر شد**\n\n"
-                        "✅ هیچ معامله‌ای از دیتابیس حذف یا تغییر نکرد.\n"
-                        f"📌 نقطه شروع جدید: Trade ID `{baseline}`\n\n"
-                        "🧠 تاریخچه برای یادگیری AI حفظ شده است.\n"
-                        "🟡 پوزیشن‌های باز نیز دست‌نخورده باقی ماندند.",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🤖 مشاهده آمار جدید", callback_data="admin_motor_stats")],
-                            [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]
-                        ]),
-                        parse_mode="Markdown"
-                    )
-                else:
-                    await q.edit_message_text(
-                        "❌ **صفر کردن آمار انجام نشد.**\n\n"
-                        "داده‌های اصلی دست‌نخورده باقی مانده‌اند.",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔄 تلاش مجدد", callback_data="reset_motor_stats")],
-                            [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]
-                        ]),
-                        parse_mode="Markdown"
-                    )
-                return
             elif data=="admin_motor_stats":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
@@ -9056,7 +9177,6 @@ def start_telegram_bot():
                 await q.edit_message_text(
                     _admin_motor_stats_text(),
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("♻️ صفر کردن آمار (بدون حذف داده)", callback_data="reset_motor_stats")],
                         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="admin_motor_stats")],
                         [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]
                     ]),
@@ -9863,7 +9983,8 @@ def learning_record_exit(token_addr, position, exit_price, reason=""):
             reason=reason,
             engine_names=position.get("engines") or position.get("engine_names") or [],
             hold_seconds=max(0, int(time.time() - float(position.get("opened_at", time.time())))),
-            regime=position.get("regime", "UNKNOWN")
+            regime=position.get("regime", "UNKNOWN"),
+            feature_context=position.get("learning_context")
         )
         _pro_learn_closed_trade(position, exit_price, reason)
     except Exception as e:
