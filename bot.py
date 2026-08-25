@@ -3581,7 +3581,7 @@ def technical_analysis_scanner_loop(app):
     send_telegram_msg("📊 موتور پرایس اکشن حرفه‌ای (مجهز به AI & Mempool & Hulk Mode) فعال شد.")
 
     while True:
-        if SYNCHRONIZED_MODE or ADVANCED_AI_ENABLED or MAX_FUSION_ENABLED:
+        if MAX_FUSION_ENABLED:
             time.sleep(3)
             continue
         if not TECHNICAL_RUNNING:
