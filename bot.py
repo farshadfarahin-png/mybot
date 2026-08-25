@@ -193,6 +193,8 @@ PRO_WALLET_RADAR_ENABLED = False
 PRO_WALLET_COPY_PERMISSION = False
 PRO_WALLET_RADAR_INTERVAL_SECONDS = 21600.0  # 6 hours؛ برای حفظ سهمیه رایگان Birdeye
 PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 60.0  # 60 seconds for real-copy monitoring
+# 💰 حجم دستی هر خرید در کپی واقعی Professional Wallet — فقط این مقدار را دستی تغییر بده.
+PRO_WALLET_COPY_AMOUNT_SOL = 0.01
 # 🎯 شرایط رسمی شکار Wallet — فقط Walletهایی که همه این شروط را داشته باشند
 # وارد لیست «قابل انتخاب» می‌شوند.
 PRO_WALLET_MIN_TRADES = 12          # حداقل کل معاملات
@@ -7478,29 +7480,28 @@ def _pro_wallet_add_manual_wallet(wallet):
     return wallet
 
 
-PRO_WALLET_MANUAL_SOL_AMOUNT = 0.01  # مستقل از حجم موتورهای سیگنال
-
-def _pro_wallet_get_manual_sol_amount():
-    global PRO_WALLET_MANUAL_SOL_AMOUNT
-    try:
-        saved = float(_get_bot_setting("pro_wallet_manual_sol_amount", "0") or 0)
-        if saved > 0:
-            PRO_WALLET_MANUAL_SOL_AMOUNT = saved
-    except Exception:
-        pass
-    return PRO_WALLET_MANUAL_SOL_AMOUNT
-
-
-def _pro_wallet_set_manual_sol_amount(amount):
-    global PRO_WALLET_MANUAL_SOL_AMOUNT
-    value = float(str(amount or "").strip().replace(",", "."))
-    if value <= 0:
-        raise ValueError("مبلغ SOL باید بیشتر از صفر باشد.")
-    if value > 1000:
-        raise ValueError("مبلغ SOL نمی‌تواند بیشتر از 1000 باشد.")
-    PRO_WALLET_MANUAL_SOL_AMOUNT = value
-    _set_bot_setting("pro_wallet_manual_sol_amount", value)
-    return value
+def _pro_wallet_delete_manual_wallet(wallet):
+    """Delete only a manually added Professional Wallet."""
+    wallet = str(wallet or "").strip()
+    if not wallet or not _pro_wallet_db():
+        return False
+    with db_lock:
+        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+        cur = conn.execute(
+            "DELETE FROM pro_wallet_manual_wallets WHERE wallet_address = ?",
+            (wallet,)
+        )
+        deleted = cur.rowcount > 0
+        if deleted:
+            current = _get_bot_setting("pro_wallet_selected_wallet", "")
+            if str(current or "") == wallet:
+                conn.execute(
+                    "INSERT OR REPLACE INTO bot_settings(key,value) VALUES(?,?)",
+                    ("pro_wallet_selected_wallet", "")
+                )
+        conn.commit()
+        conn.close()
+    return deleted
 
 
 def _pro_wallet_keyboard():
@@ -7553,16 +7554,10 @@ def _pro_wallet_keyboard():
             ),
             InlineKeyboardButton(
                 "🗑 حذف",
-                callback_data=f"pro_wallet_delete_manual:{wallet}"
+                callback_data=f"pro_wallet_delete:{wallet}"
             )
         ])
 
-    keyboard.append([
-        InlineKeyboardButton(
-            f"💰 حجم کپی: {_pro_wallet_get_manual_sol_amount():g} SOL",
-            callback_data="pro_wallet_set_amount"
-        )
-    ])
     keyboard.append([
         InlineKeyboardButton("➕ افزودن Wallet دستی", callback_data="pro_wallet_add_manual")
     ])
@@ -7855,7 +7850,7 @@ def _pro_wallet_copy_poll():
                 continue
             try:
                 if ev["side"] == "BUY":
-                    amount = _pro_wallet_get_manual_sol_amount()
+                    amount = float(PRO_WALLET_COPY_AMOUNT_SOL) if float(PRO_WALLET_COPY_AMOUNT_SOL) > 0 else 0.0
                     if amount <= 0:
                         result="COPY_BUY_BLOCKED_AMOUNT"
                         status="BLOCKED"
@@ -8175,23 +8170,6 @@ def start_telegram_bot():
             global MAX_TRADE_SOL
             cid = str(update.effective_user.id)
             if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
-                return
-
-            if context.user_data.get("awaiting_pro_wallet_amount"):
-                try:
-                    value = _pro_wallet_set_manual_sol_amount(update.message.text or "")
-                    context.user_data.pop("awaiting_pro_wallet_amount", None)
-                    await update.message.reply_text(
-                        f"✅ حجم Professional Wallet تنظیم شد: **{value:g} SOL**\n"
-                        "این مبلغ فقط برای Professional Wallet است و با موتورهای سیگنال جداست.",
-                        parse_mode="Markdown",
-                        reply_markup=_pro_wallet_keyboard()
-                    )
-                except Exception as exc:
-                    await update.message.reply_text(
-                        f"❌ مبلغ نامعتبر است: {exc}",
-                        reply_markup=_pro_wallet_keyboard()
-                    )
                 return
 
             if context.user_data.get("awaiting_pro_wallet_manual_add"):
@@ -8612,9 +8590,7 @@ def start_telegram_bot():
             return
 
         async def button_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
-
-            global PRO_WALLET_SELECTED_WALLET, PRO_WALLET_LAST_COPY_SCAN_AT
-            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT,PRO_WALLET_SELECTED_WALLET
+            global IS_RUNNING,TREND_ALERT_RUNNING,COMBO_RUNNING,GOLDEN_OPTION,TECHNICAL_RUNNING,MEMPOOL_SMART_MONEY_ENABLED,BOTTOM_WHALE_RUNNING,COPY_TRADING_ENABLED,ULTIMATE_21_ENGINE_ENABLED,SOCIAL_SENTIMENT_ENABLED,ANTI_WASH_TRADING_ENABLED,SMART_FILTER_ENABLED,SYNCHRONIZED_MODE,ADVANCED_AI_ENABLED,MAX_FUSION_ENABLED,EMERGENCY_STOP,MASTER_SIGNAL_ENABLED,MASTER_SIGNAL_FIRE_NOW,MASTER_DIAGNOSTIC_ENABLED,CHANNEL_SIGNAL_ENABLED,_MAX_FUSION_PREV,MAX_TRADE_SOL,WALLET_TRADE_PERMISSION,PRO_WALLET_RADAR_ENABLED,PRO_WALLET_COPY_PERMISSION,PRO_WALLET_LAST_COPY_SCAN_AT
             _security_audit_telegram_update(update)
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 سیگنال اصلی: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
@@ -9263,23 +9239,6 @@ def start_telegram_bot():
                     )
                 return
 
-            elif data == "pro_wallet_set_amount":
-                if not is_admin:
-                    await q.answer("⛔ فقط ادمین.", show_alert=True)
-                    return
-                context.user_data["awaiting_pro_wallet_amount"] = True
-                await q.answer()
-                await q.edit_message_text(
-                    "💰 **تعیین حجم Professional Wallet**\n\n"
-                    "مبلغ SOL برای هر BUY کپی‌شده را بفرست.\n"
-                    "این مبلغ کاملاً مستقل از مبلغ موتورهای سیگنال است.\n\n"
-                    "مثال: `0.05`\n"
-                    "❌ برای لغو: `/cancel`",
-                    reply_markup=_pro_wallet_keyboard(),
-                    parse_mode="Markdown"
-                )
-                return
-
             elif data == "pro_wallet_add_manual":
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
@@ -9296,41 +9255,27 @@ def start_telegram_bot():
                 )
                 return
 
-            elif data.startswith("pro_wallet_delete_manual:"):
+            elif data.startswith("pro_wallet_delete:"):
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
                     return
                 wallet = str(data.split(":", 1)[1]).strip()
-                if not _pro_wallet_is_valid_address(wallet):
-                    await q.answer("Wallet نامعتبر است.", show_alert=True)
-                    return
-                try:
-                    with db_lock:
-                        conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
-                        conn.execute(
-                            "DELETE FROM pro_wallet_manual_wallets WHERE wallet_address=?",
-                            (wallet,)
-                        )
-                        conn.commit()
-                        conn.close()
-
-                    selected_now = PRO_WALLET_SELECTED_WALLET or _get_bot_setting("pro_wallet_selected_wallet", "")
-                    if selected_now == wallet:
-                        PRO_WALLET_SELECTED_WALLET = ""
-                        PRO_WALLET_LAST_COPY_SCAN_AT = 0
-                        _set_bot_setting("pro_wallet_selected_wallet", "")
-                        _set_bot_setting("pro_wallet_last_copy_scan_at", 0)
+                deleted = _pro_wallet_delete_manual_wallet(wallet)
+                if deleted:
+                    if str(globals().get("PRO_WALLET_SELECTED_WALLET", "") or "") == wallet:
+                        globals()["PRO_WALLET_SELECTED_WALLET"] = ""
+                        globals()["PRO_WALLET_LAST_COPY_SCAN_AT"] = int(time.time())
                         _set_bot_setting("pro_wallet_last_copy_wallet", "")
-
-                    await q.answer("Wallet دستی حذف شد.", show_alert=True)
+                        _set_bot_setting("pro_wallet_last_copy_scan_at", int(time.time()))
                     await q.edit_message_text(
-                        _pro_wallet_panel_text(),
+                        "🗑 **Wallet دستی حذف شد**\n\n"
+                        f"`{wallet}`\n\n"
+                        "این Wallet دیگر در لیست Walletهای دستی نیست.",
                         reply_markup=_pro_wallet_keyboard(),
                         parse_mode="Markdown"
                     )
-                except Exception as exc:
-                    logger.exception("Professional Wallet manual wallet delete error: %s", exc)
-                    await q.answer("حذف Wallet انجام نشد.", show_alert=True)
+                else:
+                    await q.answer("این Wallet دستی پیدا نشد.", show_alert=True)
                 return
 
             elif data.startswith("pro_wallet_select:"):
@@ -9343,6 +9288,7 @@ def start_telegram_bot():
                     return
                 # Selection is manual and persistent. Establish a fresh baseline
                 # so historical transactions are never replayed after selection.
+                global PRO_WALLET_SELECTED_WALLET, PRO_WALLET_LAST_COPY_SCAN_AT
                 PRO_WALLET_SELECTED_WALLET = wallet
                 now = int(time.time())
                 PRO_WALLET_LAST_COPY_SCAN_AT = now
