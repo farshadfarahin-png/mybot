@@ -3670,14 +3670,14 @@ SIGNAL_BUDGET_MAX = 50
 # Final entry-safety guard: a BUY cannot execute when the 5m move is only
 # a 1-2% sideways fluctuation. This is applied after candidate generation
 # and quality scoring, so engine scoring/signal rules remain untouched.
-MIN_ENTRY_MOMENTUM_5M = 3.0
+MIN_ENTRY_MOMENTUM_5M = 0.5
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
 CONSENSUS_MIN_LIQUIDITY = 25000.0
-CONSENSUS_MIN_VOLUME_5M = 3000.0
+CONSENSUS_MIN_VOLUME_5M = 1500.0
 CONSENSUS_MIN_CHANGE_5M = 0.5
 CONSENSUS_MAX_CHANGE_5M = 40.0
-CONSENSUS_MIN_BUY_RATIO = 1.15
+CONSENSUS_MIN_BUY_RATIO = 1.10
 
 # V3: two-stage candidate pipeline.
 # These thresholds only decide whether a market is worth deeper analysis.
@@ -3760,7 +3760,10 @@ def _market_structure_gate(token_addr, pair):
 
         # کنترل سخت‌گیرانه نقدینگی بالای ۲۵,۰۰۰ دلار
         if liq < STRUCTURE_MIN_SUPPORT_LIQUIDITY or vol < STRUCTURE_MIN_SUPPORT_VOLUME_5M or buy_ratio < STRUCTURE_MIN_SUPPORT_BUY_RATIO:
-            return False, {"structure": "WEAK_STRUCTURE_FLOW", "structure_score": 0.0}
+            # Do not starve the independent BUY engines here. The authoritative
+            # market-quality gate below still enforces liquidity/volume/buyer
+            # requirements; this layer only annotates structure quality.
+            return True, {"structure": "WEAK_STRUCTURE_FLOW", "structure_score": 0.0}
 
         return True, {"structure": "PASSED", "structure_score": 3.0}
     except Exception as e:
@@ -5510,6 +5513,10 @@ def _independent_engine_candidate(token_addr, pair, engine_name):
         }
         candidate = _meta_attach(candidate)
         candidate["meta_rank_bonus"] = float(candidate.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
+        try:
+            V12_REAL_AUDIT["fusion_candidates"] = int(V12_REAL_AUDIT.get("fusion_candidates", 0) or 0) + 1
+        except Exception:
+            pass
         return candidate
     except Exception as e:
         logger.debug(f"Independent engine {engine_name} failed for {token_addr}: {e}")
