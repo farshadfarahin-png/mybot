@@ -62,6 +62,8 @@ SIGNAL_EXECUTOR_SLOTS = threading.BoundedSemaphore(SIGNAL_EXECUTOR_MAX_INFLIGHT)
 ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="AnalysisExec")
 NOTIFY_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="NotifyExec")
 SIGNAL_EMIT_LOCK = Lock()
+# مستقل از Master: قفل همزمانی کلید انتشار کانال
+CHANNEL_SIGNAL_STATE_LOCK = RLock()
 POSITION_MONITOR_HEARTBEAT = 0.0
 POSITION_MONITOR_LAST_OK = 0.0
 POSITION_MONITOR_ERRORS = 0
@@ -274,22 +276,22 @@ SECTION_TRADING_OPEN = True
 
 # تنظیمات و پارامترهای بهینه‌شده برای فعال‌سازی کامل سیگنال‌ها
 FIRE_BUY_AMOUNT_SOL = 0.01
-FIRE_TAKE_PROFIT = 18.0
-FIRE_STOP_LOSS = -10.0
+FIRE_TAKE_PROFIT = 22.0
+FIRE_STOP_LOSS = -7.0
 FIRE_MIN_LIQUIDITY = 15000       
 FIRE_MIN_VOLUME_5M = 4000       
 FIRE_MIN_PRICE_CHANGE_5M = 4.0  
 
 COMBO_BUY_AMOUNT_SOL = 0.01
-COMBO_TAKE_PROFIT = 18.0
-COMBO_STOP_LOSS = -10.0
+COMBO_TAKE_PROFIT = 25.0
+COMBO_STOP_LOSS = -7.0
 COMBO_MIN_LIQUIDITY = 20000
 COMBO_MIN_VOLUME_5M = 10000  
 COMBO_MIN_CHANGE_5M = 15.0   
 
 GOLDEN_BUY_AMOUNT_SOL = 0.01
-GOLDEN_TAKE_PROFIT = 16.0
-GOLDEN_STOP_LOSS = -8.0
+GOLDEN_TAKE_PROFIT = 22.0
+GOLDEN_STOP_LOSS = -6.0
 GOLDEN_MIN_LIQUIDITY = 25000
 GOLDEN_MIN_VOLUME_5M = 12000
 GOLDEN_MIN_CHANGE_5M = 12.0
@@ -297,8 +299,8 @@ GOLDEN_MIN_CHANGE_5M = 12.0
 # سقف حجم SOL برای هر معامله واقعی؛ از پنل ادمین قابل تغییر است.
 MAX_TRADE_SOL = float(os.environ.get("MAX_TRADE_SOL", "0.01"))
 TECH_BUY_AMOUNT_SOL = 0.01
-TECH_TAKE_PROFIT = 20.0
-TECH_STOP_LOSS = -8.0
+TECH_TAKE_PROFIT = 25.0
+TECH_STOP_LOSS = -6.0
 TECH_MIN_LIQUIDITY = 18000
 TECH_MIN_VOLUME_5M = 8000
 
@@ -920,16 +922,16 @@ def _update_adaptive_learning(conn=None):
         bonus = 0
         ratio_bonus = 0.0
         if len(rows) >= ADAPTIVE_MIN_SAMPLE:
-            if wr < 55 or avg_pnl < -1.0:
+            if wr < 60 or avg_pnl < -0.5:
                 bonus += 3
                 ratio_bonus += 0.12
-            elif wr < 65 or avg_pnl < 0:
+            elif wr < 70 or avg_pnl < 0:
                 bonus += 2
                 ratio_bonus += 0.08
-            elif wr < 75 or profit_factor < 1.10:
+            elif wr < 78 or profit_factor < 1.15:
                 bonus += 1
                 ratio_bonus += 0.04
-            if profit_factor < 0.90:
+            if profit_factor < 1.00:
                 bonus += 1
                 ratio_bonus += 0.05
             # Strong profitability does not relax the original hard gates.
@@ -1774,26 +1776,56 @@ def reset_trade_statistics_view():
         return False, _get_stats_reset_trade_id()
 
 def _get_channel_signal_enabled():
+    """Read only the persisted channel-publication switch; never consult MASTER_SIGNAL_ENABLED."""
     global CHANNEL_SIGNAL_ENABLED
-    raw = _get_bot_setting("channel_signal_enabled", "1")
-    CHANNEL_SIGNAL_ENABLED = str(raw).strip().lower() not in ("0", "false", "off", "")
-    return CHANNEL_SIGNAL_ENABLED
+    with CHANNEL_SIGNAL_STATE_LOCK:
+        raw = _get_bot_setting("channel_signal_enabled", "1")
+        CHANNEL_SIGNAL_ENABLED = str(raw).strip().lower() not in ("0", "false", "off", "")
+        return CHANNEL_SIGNAL_ENABLED
 
 def _set_channel_signal_enabled(value):
-    """Persist channel publication state and verify the DB value before reporting success."""
+    """Persist and verify the independent channel-publication switch."""
     global CHANNEL_SIGNAL_ENABLED
     new_value = bool(value)
-    encoded = "1" if new_value else "0"
-    if not _set_bot_setting("channel_signal_enabled", encoded):
-        logger.error("❌ channel_signal_enabled write failed; keeping previous state.")
-        return False
-    persisted = str(_get_bot_setting("channel_signal_enabled", "")).strip().lower()
-    verified = persisted not in ("0", "false", "off", "")
-    if verified != new_value:
-        logger.error("❌ channel_signal_enabled verification failed: wanted=%s persisted=%r", new_value, persisted)
-        return False
-    CHANNEL_SIGNAL_ENABLED = verified
-    return True
+    with CHANNEL_SIGNAL_STATE_LOCK:
+        encoded = "1" if new_value else "0"
+        if not _set_bot_setting("channel_signal_enabled", encoded):
+            return False
+        persisted = str(_get_bot_setting("channel_signal_enabled", "")).strip().lower()
+        if persisted != encoded:
+            logger.error("❌ channel signal state verification failed: wanted=%s persisted=%r", encoded, persisted)
+            return False
+        CHANNEL_SIGNAL_ENABLED = new_value
+        return True
+
+def _toggle_channel_signal_enabled():
+    """Atomic OFF<->ON toggle using only the persisted channel switch."""
+    global CHANNEL_SIGNAL_ENABLED
+    with CHANNEL_SIGNAL_STATE_LOCK:
+        try:
+            with db_lock:
+                conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+                cur = conn.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+                row = cur.execute("SELECT value FROM bot_settings WHERE key=?", ("channel_signal_enabled",)).fetchone()
+                raw = row[0] if row else "1"
+                current = str(raw).strip().lower() not in ("0", "false", "off", "")
+                target = not current
+                encoded = "1" if target else "0"
+                cur.execute("INSERT OR REPLACE INTO bot_settings(key,value) VALUES(?,?)", ("channel_signal_enabled", encoded))
+                conn.commit()
+                check = cur.execute("SELECT value FROM bot_settings WHERE key=?", ("channel_signal_enabled",)).fetchone()
+                conn.close()
+            persisted = str(check[0] if check else "").strip().lower()
+            if persisted != encoded:
+                logger.error("❌ channel toggle verification failed: wanted=%s persisted=%r", encoded, persisted)
+                return False, current
+            CHANNEL_SIGNAL_ENABLED = target
+            logger.info("📢 Independent channel signal switch: %s", "ON" if target else "OFF")
+            return True, target
+        except Exception as e:
+            logger.exception("❌ channel toggle failed: %s", e)
+            return False, bool(CHANNEL_SIGNAL_ENABLED)
 
 _SECURITY_RATE_LOCK = Lock()
 _SECURITY_RATE_BUCKETS = {}
@@ -2384,10 +2416,8 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
     """
     global CHANNEL_ID, CHANNEL_SIGNAL_ENABLED
     _load_channel_config()
-    # وضعیت کلید را در هر ارسال از DB تازه می‌خوانیم تا هیچ worker/thread
-    # وضعیت قدیمی ON/OFF را نگه ندارد.
-    _get_channel_signal_enabled()
-    if not CHANNEL_SIGNAL_ENABLED:
+    # کانال کاملاً مستقل از Master است: فقط وضعیت persist شده خودش تعیین‌کننده است.
+    if not _get_channel_signal_enabled():
         logger.info("📢 Channel signal publication is OFF; channel send skipped.")
         return False
     if not CHANNEL_ID and CHANNEL_INVITE_LINK.startswith("https://t.me/"):
@@ -3733,8 +3763,8 @@ def advanced_filter_enabled():
 # حالت کیفیت‌محور: جریان سیگنال حفظ می‌شود؛ فقط کیفیت و کنترل‌های صریح ورود تصمیم‌گیر هستند.
 # این اعداد «تلاش برای win-rate بالا» هستند و تضمین ۹۰٪ سود نیستند.
 # MAX FUSION adaptive thresholds: quality-first without starving the scanner.
-CONSENSUS_MIN_SCORE = 4.0
-CONSENSUS_MIN_RATIO = 0.55
+CONSENSUS_MIN_SCORE = 5.0
+CONSENSUS_MIN_RATIO = 0.65
 CONSENSUS_COOLDOWN_SECONDS = 8
 
 # Daily signal cap: OFF by default. Set manually from the management panel (1..50) to enable.
@@ -3751,7 +3781,7 @@ SIGNAL_BUDGET_MAX = 50
 # Final entry-safety guard: a BUY cannot execute when the 5m move is only
 # a 1-2% sideways fluctuation. This is applied after candidate generation
 # and quality scoring, so engine scoring/signal rules remain untouched.
-MIN_ENTRY_MOMENTUM_5M = 0.5
+MIN_ENTRY_MOMENTUM_5M = 1.5
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
 # هر lane مستقل cooldown خودش را دارد؛ سیگنال Analysis نباید موتورهای Advanced/Hulk را خفه کند.
@@ -8668,6 +8698,28 @@ def start_telegram_bot():
                 )
                 return
 
+            # Channel publication switch — fully independent from MASTER_SIGNAL_ENABLED.
+            if label.startswith("📢 ارسال سیگنال به کانال:"):
+                if not is_admin:
+                    await msg.reply_text("⛔ این کلید فقط برای ادمین است.")
+                    return
+                _load_channel_config()
+                ok_toggle, new_state = _toggle_channel_signal_enabled()
+                if ok_toggle:
+                    message = (
+                        "🟢 **ارسال سیگنال به کانال روشن شد**\n\n"
+                        f"📢 مقصد: `{CHANNEL_ID or 'تنظیم نشده'}`\n"
+                        "✅ این کلید کاملاً مستقل از سیگنال مادر است."
+                        if new_state else
+                        "🔴 **ارسال سیگنال به کانال خاموش شد**\n\n"
+                        f"📢 مقصد: `{CHANNEL_ID or 'تنظیم نشده'}`\n"
+                        "✅ فقط انتشار کانال متوقف شد؛ Master و پوزیشن‌های باز دست‌نخورده‌اند."
+                    )
+                else:
+                    message = "❌ تغییر وضعیت ارسال کانال ذخیره نشد؛ وضعیت قبلی حفظ شد."
+                await msg.reply_text(message, parse_mode="Markdown")
+                return
+
             # Diagnostic
             if label.startswith("🩺 عیب‌یابی سیگنال:"):
                 if not is_admin:
@@ -8873,9 +8925,8 @@ def start_telegram_bot():
                     await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
                     return
                 _load_channel_config()
-                current_state = bool(_get_channel_signal_enabled())
-                new_state = not current_state
-                if _set_channel_signal_enabled(new_state) and bool(_get_channel_signal_enabled()) == new_state:
+                ok_toggle, new_state = _toggle_channel_signal_enabled()
+                if ok_toggle:
                     status = (
                         "🟢 **ارسال سیگنال به کانال فعال شد**\n\n"
                         f"📢 مقصد قطعی: `{CHANNEL_ID}`\n"
