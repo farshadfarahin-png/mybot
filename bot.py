@@ -1202,24 +1202,25 @@ def _admin_motor_stats_text():
 
 def get_advanced_trade_analytics():
     try:
+        reset_after_id = _get_stats_reset_trade_id()
         with db_lock:
             conn=sqlite3.connect("bot_analytics.db",timeout=30.0,check_same_thread=False); cur=conn.cursor()
-            r=cur.execute("SELECT COUNT(*),COALESCE(SUM(pnl_percent),0),COALESCE(SUM(pnl_usd),0),COALESCE(AVG(pnl_percent),0) FROM trades").fetchone()
+            r=cur.execute("SELECT COUNT(*),COALESCE(SUM(pnl_percent),0),COALESCE(SUM(pnl_usd),0),COALESCE(AVG(pnl_percent),0) FROM trades WHERE id > ?", (reset_after_id,)).fetchone()
             total=int(r[0] or 0); total_pct=float(r[1] or 0); total_usd=float(r[2] or 0); avg=float(r[3] or 0)
-            wins=int(cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent>0").fetchone()[0] or 0)
-            losses=int(cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent<0").fetchone()[0] or 0)
-            breakeven=int(cur.execute("SELECT COUNT(*) FROM trades WHERE pnl_percent=0").fetchone()[0] or 0)
-            real_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE is_real=1").fetchone()[0] or 0)
-            signal_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE execution_type='SIGNAL_ONLY'").fetchone()[0] or 0)
-            best=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades ORDER BY pnl_percent DESC LIMIT 1").fetchone()
-            worst=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades ORDER BY pnl_percent ASC LIMIT 1").fetchone(); conn.close()
+            wins=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND pnl_percent>0", (reset_after_id,)).fetchone()[0] or 0)
+            losses=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND pnl_percent<0", (reset_after_id,)).fetchone()[0] or 0)
+            breakeven=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND pnl_percent=0", (reset_after_id,)).fetchone()[0] or 0)
+            real_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND is_real=1", (reset_after_id,)).fetchone()[0] or 0)
+            signal_closed=int(cur.execute("SELECT COUNT(*) FROM trades WHERE id > ? AND execution_type='SIGNAL_ONLY'", (reset_after_id,)).fetchone()[0] or 0)
+            best=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades WHERE id > ? ORDER BY pnl_percent DESC LIMIT 1", (reset_after_id,)).fetchone()
+            worst=cur.execute("SELECT symbol,pnl_percent,timestamp FROM trades WHERE id > ? ORDER BY pnl_percent ASC LIMIT 1", (reset_after_id,)).fetchone(); conn.close()
         with state_lock:
             open_real=len(active_positions); open_signal=len(signal_positions); open_total=len(set(active_positions)|set(signal_positions))
         decided=wins+losses; wr=wins/decided*100.0 if decided else 0.0
-        return {"total_trades":total,"total_pct":round(total_pct,2),"total_usd":round(total_usd,2),"avg_pct":round(avg,2),"win_rate":round(wr,2),"win_count":wins,"loss_count":losses,"breakeven_count":breakeven,"open_positions":open_total,"open_real":open_real,"open_signal":open_signal,"real_closed":real_closed,"signal_closed":signal_closed,"best_trade":best,"worst_trade":worst}
+        return {"total_trades":total,"total_pct":round(total_pct,2),"total_usd":round(total_usd,2),"avg_pct":round(avg,2),"win_rate":round(wr,2),"win_count":wins,"loss_count":losses,"breakeven_count":breakeven,"open_positions":open_total,"open_real":open_real,"open_signal":open_signal,"real_closed":real_closed,"signal_closed":signal_closed,"best_trade":best,"worst_trade":worst,"stats_reset_after_id":reset_after_id}
     except Exception as e:
         logger.error(f"⚠️ خطا در گزارش‌گیری پیشرفته: {e}")
-        return {"total_trades":0,"total_pct":0.0,"total_usd":0.0,"avg_pct":0.0,"win_rate":0.0,"win_count":0,"loss_count":0,"breakeven_count":0,"open_positions":0,"open_real":0,"open_signal":0,"real_closed":0,"signal_closed":0,"best_trade":None,"worst_trade":None}
+        return {"total_trades":0,"total_pct":0.0,"total_usd":0.0,"avg_pct":0.0,"win_rate":0.0,"win_count":0,"loss_count":0,"breakeven_count":0,"open_positions":0,"open_real":0,"open_signal":0,"real_closed":0,"signal_closed":0,"best_trade":None,"worst_trade":None,"stats_reset_after_id":_get_stats_reset_trade_id()}
 
 def self_learning_ai_optimizer_loop():
     """Continuous closed-trade learning. It never invents results and never changes security secrets."""
@@ -1733,6 +1734,34 @@ def _set_bot_setting(key, value):
     except Exception as e:
         logger.error(f"bot setting write error: {e}")
         return False
+
+# ================= STATS VIEW RESET (NON-DESTRUCTIVE) =================
+# فقط نقطه شروع نمایش آمار را جابه‌جا می‌کند؛ رکوردهای trades هرگز حذف یا تغییر نمی‌شوند.
+STATS_RESET_SETTING_KEY = "trade_stats_reset_after_id"
+
+def _get_stats_reset_trade_id():
+    try:
+        return max(0, int(float(_get_bot_setting(STATS_RESET_SETTING_KEY, "0") or 0)))
+    except Exception:
+        return 0
+
+def reset_trade_statistics_view():
+    """صفرکردن نمای آماری بدون حذف هیچ رکوردی از دیتابیس."""
+    try:
+        with db_lock:
+            conn = sqlite3.connect("bot_analytics.db", timeout=30.0, check_same_thread=False)
+            cur = conn.cursor()
+            row = cur.execute("SELECT COALESCE(MAX(id), 0) FROM trades").fetchone()
+            baseline = int(row[0] or 0)
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+            cur.execute("INSERT OR REPLACE INTO bot_settings(key,value) VALUES(?,?)", (STATS_RESET_SETTING_KEY, str(baseline)))
+            conn.commit()
+            conn.close()
+        logger.info("📊 نمای آمار معاملات صفر شد؛ داده‌های اصلی حذف نشدند. baseline_trade_id=%s", baseline)
+        return True, baseline
+    except Exception as e:
+        logger.error("❌ خطا در صفرکردن نمای آمار معاملات: %s", e)
+        return False, _get_stats_reset_trade_id()
 
 def _get_channel_signal_enabled():
     global CHANNEL_SIGNAL_ENABLED
@@ -2335,8 +2364,13 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
     نکته: وضعیت موجودی/اجرای کیف پول هرگز در کانال نمایش داده نمی‌شود.
     لینک‌ها فقط روی دکمه‌ها هستند؛ متن کانال لینک خام ندارد.
     """
-    global CHANNEL_ID
+    global CHANNEL_ID, CHANNEL_SIGNAL_ENABLED
     _load_channel_config()
+    # وضعیت انتشار را از DB در هر ارسال تازه می‌خوانیم تا کلید پنل بلافاصله اعمال شود.
+    try:
+        _get_channel_signal_enabled()
+    except Exception:
+        pass
     if not CHANNEL_SIGNAL_ENABLED:
         logger.info("📢 Channel signal publication is OFF; channel send skipped.")
         return False
@@ -4148,6 +4182,32 @@ def build_consensus_signal(token_addr, pair, forced_mode=None):
 # ADAPTIVE_LEARNING_TARGET_NOTE:
 # Learning may update engine weights from real closed-trade outcomes,
 # but it must not lower the fixed quality gate just to consume the daily budget.
+# Adaptive gate cache: learning is consulted periodically, not once per token.
+_ADAPTIVE_GATE_CACHE_LOCK = Lock()
+_ADAPTIVE_GATE_CACHE = {"at": 0.0, "score_min": None, "ratio": None, "sample": 0, "win_rate": 0.0}
+_ADAPTIVE_GATE_CACHE_TTL = 30.0
+
+def _get_live_adaptive_gate(enabled_count=1):
+    """Read the persistent profitability-learning result and apply only stricter gates."""
+    now = time.time()
+    with _ADAPTIVE_GATE_CACHE_LOCK:
+        if (_ADAPTIVE_GATE_CACHE["score_min"] is not None and
+                now - float(_ADAPTIVE_GATE_CACHE["at"] or 0) < _ADAPTIVE_GATE_CACHE_TTL):
+            return (_ADAPTIVE_GATE_CACHE["score_min"], _ADAPTIVE_GATE_CACHE["ratio"],
+                    _ADAPTIVE_GATE_CACHE["sample"], _ADAPTIVE_GATE_CACHE["win_rate"])
+    try:
+        score_min, ratio, _engine_wr, state = get_adaptive_consensus_settings(max(1, int(enabled_count or 1)))
+        score_min = max(float(CONSENSUS_MIN_SCORE), float(score_min))
+        ratio = max(float(CONSENSUS_MIN_RATIO), float(ratio))
+        with _ADAPTIVE_GATE_CACHE_LOCK:
+            _ADAPTIVE_GATE_CACHE.update({"at": now, "score_min": score_min, "ratio": ratio,
+                                         "sample": int(state.get("sample", 0) or 0),
+                                         "win_rate": float(state.get("win_rate", 0.0) or 0.0)})
+        return score_min, ratio, int(state.get("sample", 0) or 0), float(state.get("win_rate", 0.0) or 0.0)
+    except Exception as e:
+        logger.debug("Adaptive live gate unavailable; fixed gate remains active: %s", e)
+        return float(CONSENSUS_MIN_SCORE), float(CONSENSUS_MIN_RATIO), 0, 0.0
+
 def fusion_quality_gate(fusion):
     try:
         liq = float(fusion.get("liq", 0) or 0)
@@ -4160,7 +4220,20 @@ def fusion_quality_gate(fusion):
             return False
         if buys < 2 or (sells > 0 and buys < sells * CONSENSUS_MIN_BUY_RATIO):
             return False
-        if score < CONSENSUS_MIN_SCORE:
+
+        # یادگیری فقط می‌تواند گیت را سخت‌تر کند؛ هیچ‌وقت کیفیت پایه را پایین نمی‌آورد.
+        learned_score_min = float(CONSENSUS_MIN_SCORE)
+        if AUTO_LEARNING_ENABLED or AUTO_IMPROVEMENT_ENABLED:
+            try:
+                enabled_count = len(fusion.get("engines") or fusion.get("votes") or [])
+                learned_score_min, _learned_ratio, sample, learned_wr = _get_live_adaptive_gate(enabled_count or 1)
+                if sample >= ADAPTIVE_MIN_SAMPLE and learned_score_min > CONSENSUS_MIN_SCORE:
+                    fusion["adaptive_gate_score_min"] = learned_score_min
+                    fusion["adaptive_gate_sample"] = sample
+                    fusion["adaptive_gate_win_rate"] = learned_wr
+            except Exception:
+                learned_score_min = float(CONSENSUS_MIN_SCORE)
+        if score < max(float(CONSENSUS_MIN_SCORE), learned_score_min):
             return False
         if not _meta_quality_allowed(fusion):
             return False
@@ -7984,6 +8057,14 @@ _pro_wallet_load_switches()
 # =====================================================================
 
 
+def _stats_inline_keyboard(is_admin=False):
+    rows = []
+    if is_admin:
+        rows.append([InlineKeyboardButton("♻️ صفر کردن آمار (بدون حذف داده)", callback_data="stats_reset")])
+    rows.append([InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="stats")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
 def _main_keyboard(is_admin=False):
     rows=[[InlineKeyboardButton("📊 وضعیت موتورها",callback_data="engines"),InlineKeyboardButton("💼 وضعیت ولت",callback_data="wallet")],[InlineKeyboardButton("📈 آمار معاملات",callback_data="stats"),InlineKeyboardButton("🎛 کنترل موتورها",callback_data="controls")]]
     if WEBAPP_URL: rows.append([InlineKeyboardButton("📱 Mini App VIP",web_app=WebAppInfo(url=WEBAPP_URL))])
@@ -8435,6 +8516,7 @@ def start_telegram_bot():
                     f"🏆 Win Rate: `{a['win_rate']:.2f}%`\n"
                     f"📈 P/L: `{a['total_pct']:+.2f}%` | `${a['total_usd']:+.2f}`\n"
                     f"🤖 واقعی بسته‌شده: `{a['real_closed']}` | 📡 سیگنال‌محور: `{a['signal_closed']}`",
+                    reply_markup=_stats_inline_keyboard(is_admin),
                     parse_mode="Markdown"
                 )
                 return
@@ -8707,14 +8789,28 @@ def start_telegram_bot():
                 if not is_admin:
                     await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
                     return
+                _load_channel_config()
                 new_state = not bool(CHANNEL_SIGNAL_ENABLED)
-                if _set_channel_signal_enabled(new_state):
+                if new_state and (not TELEGRAM_BOT_TOKEN or not CHANNEL_ID):
                     await q.edit_message_text(
-                        f"📢 **ارسال سیگنال به کانال: {'🟢 ON' if CHANNEL_SIGNAL_ENABLED else '🔴 OFF'}**\n\n"
-                        f"مقصد فعلی: `{CHANNEL_ID or 'تنظیم نشده'}`\n"
-                        "این کلید فقط انتشار کارت سیگنال در کانال را کنترل می‌کند و به کلید مادر، تولید سیگنال، خرید واقعی یا مدیریت پوزیشن‌ها دست نمی‌زند.",
+                        "❌ **ارسال کانال فعال نشد**\n\n"
+                        "ابتدا `TELEGRAM_BOT_TOKEN` و `CHANNEL_ID` را تنظیم کن.\n"
+                        "موتورهای سیگنال و معاملات در این بررسی هیچ تغییری نمی‌کنند.",
                         reply_markup=_main_keyboard(True), parse_mode="Markdown"
                     )
+                    return
+                if _set_channel_signal_enabled(new_state):
+                    status = (
+                        "🟢 **ارسال سیگنال به کانال فعال شد**\n\n"
+                        f"📢 مقصد قطعی: `{CHANNEL_ID}`\n"
+                        "هر BUY/SELL معتبر که به تابع انتشار کانال برسد، مستقل از کلید مادر برای کانال ارسال می‌شود.\n"
+                        "⚠️ اگر پیام باز هم نرسید، خطای دقیق Telegram در لاگ با CHANNEL_ID ثبت می‌شود."
+                        if CHANNEL_SIGNAL_ENABLED else
+                        "🔴 **ارسال سیگنال به کانال خاموش شد**\n\n"
+                        f"📢 مقصد: `{CHANNEL_ID or 'تنظیم نشده'}`\n"
+                        "تولید سیگنال، خرید واقعی و مدیریت پوزیشن‌ها دست‌نخورده می‌مانند."
+                    )
+                    await q.edit_message_text(status, reply_markup=_main_keyboard(True), parse_mode="Markdown")
                 else:
                     await q.edit_message_text("❌ تغییر وضعیت ذخیره نشد؛ وضعیت قبلی حفظ شد.", reply_markup=_main_keyboard(True))
                 return
@@ -8841,8 +8937,27 @@ def start_telegram_bot():
                     f"🏆 Win Rate: `{a['win_rate']:.2f}%`\n"
                     f"📈 P/L: `{a['total_pct']:+.2f}%` | `${a['total_usd']:+.2f}`\n"
                     f"🤖 واقعی بسته‌شده: `{a['real_closed']}` | 📡 سیگنال‌محور: `{a['signal_closed']}`",
-                    reply_markup=_main_keyboard(is_admin),parse_mode="Markdown"
+                    reply_markup=_stats_inline_keyboard(is_admin),parse_mode="Markdown"
                 )
+            elif data == "stats_reset":
+                if not is_admin:
+                    await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    return
+                ok, baseline = reset_trade_statistics_view()
+                if ok:
+                    a = await _tg_bg(get_advanced_trade_analytics)
+                    await q.edit_message_text(
+                        "♻️ **نمای آمار معاملات صفر شد**\n\n"
+                        "✅ هیچ معامله‌ای از دیتابیس حذف یا تغییر نکرد.\n"
+                        f"📌 نقطه شروع آمار جدید: Trade ID `{baseline}`\n\n"
+                        f"🟡 پوزیشن باز فعلی: `{a['open_positions']}`\n"
+                        "از این لحظه معاملات بسته‌شده جدید در آمار نمایش داده می‌شوند.",
+                        reply_markup=_stats_inline_keyboard(True), parse_mode="Markdown"
+                    )
+                else:
+                    await q.edit_message_text("❌ صفرکردن آمار انجام نشد؛ داده‌های اصلی دست‌نخورده ماندند.", reply_markup=_stats_inline_keyboard(True), parse_mode="Markdown")
+                return
+
             elif data.startswith("security_confirm_block_tg:") or data.startswith("security_confirm_block_ip:"):
                 if not is_admin:
                     await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False)); return
