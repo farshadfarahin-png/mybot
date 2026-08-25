@@ -4037,7 +4037,7 @@ def _mode_market_quality(pair):
     return {"price": price, "liq": liq, "vol": vol, "chg": chg, "buys": buys, "sells": sells}
 
 
-def build_consensus_signal(token_addr, pair):
+def build_consensus_signal(token_addr, pair, forced_mode=None):
     """Top-level mode selector while preserving the original Fusion pipeline name.
 
     IMPORTANT: one best candidate is selected by the market scanner; this function
@@ -4059,7 +4059,10 @@ def build_consensus_signal(token_addr, pair):
         hulk = evidence["hulk_count"]
         total = evidence["all_count"]
 
-        # Top-level mode.  MAX owns the market scanner whenever it is ON.
+        # Top-level mode. MAX is the only mode that intentionally combines both
+        # families. When MAX is OFF, Advanced and Alliance are evaluated as two
+        # independent lanes from the same market snapshot.
+        selected_mode = str(forced_mode or "").upper()
         if MAX_FUSION_ENABLED:
             mode = "👑 MAX — اتحاد + پیشرفته"
             # MAX requires BOTH families to participate, but does not require
@@ -4072,10 +4075,8 @@ def build_consensus_signal(token_addr, pair):
             # third/fourth vote. The market-quality and structure gates remain
             # responsible for rejecting weak setups.
             strength = adv * 1.25 + hulk * 1.35
-        elif ADVANCED_AI_ENABLED:
+        elif selected_mode == "ADVANCED" or (not selected_mode and ADVANCED_AI_ENABLED):
             mode = "🧠 موتور پیشرفته"
-            # Advanced can operate completely by itself and searches the market
-            # using its own AI/quality sub-engines.
             if adv < 1:
                 _diag_reject("FUSION", "ADVANCED_NO_VOTE", token_addr)
                 return None
@@ -4083,8 +4084,8 @@ def build_consensus_signal(token_addr, pair):
             if adv < required:
                 _diag_reject("FUSION", f"ADVANCED_VOTE_COUNT_{adv}_NEED_{required}", token_addr)
                 return None
-            strength = adv * 1.35 + (hulk * 0.15)
-        elif SYNCHRONIZED_MODE:
+            strength = adv * 1.35
+        elif selected_mode in ("ALLIANCE", "HULK", "UNIFIED") or (not selected_mode and SYNCHRONIZED_MODE):
             mode = "🤖 موتور اتحاد"
             if hulk < 1:
                 _diag_reject("FUSION", "HULK_NO_VOTE", token_addr)
@@ -4093,7 +4094,7 @@ def build_consensus_signal(token_addr, pair):
             if hulk < required:
                 _diag_reject("FUSION", f"HULK_VOTE_COUNT_{hulk}_NEED_{required}", token_addr)
                 return None
-            strength = hulk * 1.40 + (adv * 0.15)
+            strength = hulk * 1.40
         else:
             _diag_reject("FUSION", "NO_ACTIVE_TOP_LEVEL_MODE", token_addr)
             return None
@@ -4109,13 +4110,23 @@ def build_consensus_signal(token_addr, pair):
             _diag_reject("FUSION", "ENGINE_COOLDOWN", token_addr)
             return None
 
+        if selected_mode == "ADVANCED" or (not selected_mode and ADVANCED_AI_ENABLED and not SYNCHRONIZED_MODE):
+            lane_votes = list(evidence["advanced_votes"])
+            hunter_group = "ADVANCED"
+        elif selected_mode in ("ALLIANCE", "HULK", "UNIFIED") or (not selected_mode and SYNCHRONIZED_MODE):
+            lane_votes = list(evidence["hulk_votes"])
+            hunter_group = "HULK"
+        else:
+            lane_votes = list(evidence["votes"])
+            hunter_group = "MAX"
         result = {
             "score": float(score),
             "strength": float(strength),
-            "votes": evidence["votes"],
-            "advanced_votes": evidence["advanced_votes"],
-            "hulk_votes": evidence["hulk_votes"],
-            "engines": evidence["votes"],
+            "votes": lane_votes,
+            "advanced_votes": list(evidence["advanced_votes"]),
+            "hulk_votes": list(evidence["hulk_votes"]),
+            "engines": lane_votes,
+            "hunter_group": hunter_group,
             "mode": mode,
             **q,
             "symbol": (pair.get("baseToken") or {}).get("symbol", "TOKEN"),
@@ -5623,6 +5634,8 @@ def _analysis_engine_candidate(token_addr, pair):
             # can emit while its own structure history is still warming up.
             if buy_ratio < FINAL_ANALYSIS_MIN_BUY_RATIO:
                 _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_BUY_RATIO", token_addr); return None
+            if chg < MIN_ENTRY_MOMENTUM_5M:
+                _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_MOMENTUM_WEAK", token_addr); return None
             if liq < FINAL_ANALYSIS_MIN_LIQUIDITY:
                 _diag_reject("ANALYSIS", "ANALYSIS_WARMUP_LIQUIDITY", token_addr); return None
             if vol < FINAL_ANALYSIS_MIN_VOLUME_5M:
@@ -5825,35 +5838,22 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                 _diag_reject("ANALYSIS", f"EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
                 logger.exception("Analysis evaluator failed for %s", token_addr)
 
-        # ۲. سایر موتورها یا حالت MAX Fusion
+        # ۲. موتورهای پیشرفته و اتحاد کاملاً مستقل‌اند. MAX تنها حالتی است که
+        # عمداً آن دو خانواده را در یک خروجی ترکیب می‌کند.
         if not _candidate_prefilter(pair):
             continue
         try:
-            if MAX_FUSION_ENABLED:
-                fusion = build_consensus_signal(token_addr, pair)
-                if fusion:
-                    fusion = _meta_attach(fusion)
-                    fusion["meta_rank_bonus"] = float(fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
-                    fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
-                    fusion["rank_score"] = float(_candidate_rank_tuple((token_addr, fusion))[0])
-                    result["fusion"].append((token_addr, fusion))
-            else:
-                for engine_name in active:
-                    if engine_name == "Analysis":
-                        continue
-                    is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
-                    if is_adv and not (ADVANCED_AI_ENABLED or SYNCHRONIZED_MODE):
-                        continue
-                    if (not is_adv) and not SYNCHRONIZED_MODE:
-                        continue
-                    fusion = _independent_engine_candidate(token_addr, pair, engine_name)
-                    if fusion and fusion_quality_gate(fusion):
-                        # Already validated by the authoritative Fusion quality gate.
-                        fusion["signal_prevalidated"] = True
-                        fusion = _meta_attach(fusion)
-                        fusion["meta_rank_bonus"] = float(fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
-                        fusion["rank_score"] = float(_candidate_rank_tuple((token_addr, fusion))[0])
-                        result["fusion"].append((token_addr, fusion))
+            modes = ["MAX"] if MAX_FUSION_ENABLED else (["ADVANCED"] if ADVANCED_AI_ENABLED else []) + (["ALLIANCE"] if SYNCHRONIZED_MODE else [])
+            for mode_name in modes:
+                fusion = build_consensus_signal(token_addr, pair, forced_mode=None if mode_name == "MAX" else mode_name)
+                if not fusion:
+                    continue
+                fusion["signal_prevalidated"] = True
+                fusion = _meta_attach(fusion)
+                fusion["meta_rank_bonus"] = float(fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
+                fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
+                fusion["rank_score"] = float(_candidate_rank_tuple((token_addr, fusion))[0])
+                result["fusion"].append((token_addr, fusion))
         except Exception as exc:
             _diag_reject("FUSION", f"EVALUATOR_EXCEPTION:{type(exc).__name__}", token_addr)
 
