@@ -1147,10 +1147,12 @@ def get_admin_motor_stats():
             cur = conn.cursor()
             cols = {r[1] for r in cur.execute("PRAGMA table_info(trades)").fetchall()}
             has_group = "motor_group" in cols
+            reset_after_id = _get_stats_reset_trade_id()
             if has_group:
                 rows = cur.execute("""SELECT motor_group, pnl_percent, is_real, execution_type
                                      FROM trades
-                                     WHERE motor_group IS NOT NULL AND motor_group != ''""").fetchall()
+                                     WHERE id > ? AND motor_group IS NOT NULL AND motor_group != ''""",
+                                   (reset_after_id,)).fetchall()
             else:
                 rows = []
             conn.close()
@@ -2366,11 +2368,9 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
     """
     global CHANNEL_ID, CHANNEL_SIGNAL_ENABLED
     _load_channel_config()
-    # وضعیت انتشار را از DB در هر ارسال تازه می‌خوانیم تا کلید پنل بلافاصله اعمال شود.
-    try:
-        _get_channel_signal_enabled()
-    except Exception:
-        pass
+    # وضعیت کلید را در هر ارسال از DB تازه می‌خوانیم تا هیچ worker/thread
+    # وضعیت قدیمی ON/OFF را نگه ندارد.
+    _get_channel_signal_enabled()
     if not CHANNEL_SIGNAL_ENABLED:
         logger.info("📢 Channel signal publication is OFF; channel send skipped.")
         return False
@@ -2378,7 +2378,11 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
         tail = CHANNEL_INVITE_LINK.split("https://t.me/", 1)[1].strip("/")
         if tail and not tail.startswith("+"):
             CHANNEL_ID = "@" + tail
-    if not CHANNEL_ID or not TELEGRAM_BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("❌ ارسال کانال انجام نشد: TELEGRAM_BOT_TOKEN خالی است.")
+        return False
+    if not CHANNEL_ID:
+        logger.error("❌ ارسال کانال انجام نشد: CHANNEL_ID خالی است. /setvipchannel را بررسی کن.")
         return False
 
     side = str(side).upper()
@@ -3122,22 +3126,21 @@ def send_signal_outcome(token_addr, pos, current_price, outcome, pnl_percent, tx
         telegram_ok = bool(send_telegram_msg(msg))
     except Exception:
         logger.exception("SELL Telegram send failed token=%s", token_addr)
-    channel_ok = True
+    channel_ok = False
     _load_channel_config()
-    if CHANNEL_ID:
-        try:
-            channel_ok = bool(send_graphic_signal_to_vip_channel(
-                token_addr=token_addr, symbol=symbol, price=current_price, tp=tp, sl=locked,
-                buy_amt=float(pos.get("buy_amt", 0.0) or 0.0),
-                volume=float(pos.get("volume", 0.0) or 0.0),
-                liquidity=float(pos.get("liquidity", 0.0) or 0.0),
-                p_change=float(pos.get("m5_change", pos.get("p_change", 0.0)) or 0.0),
-                solscan_link=solscan, signal_title=title, side="SELL",
-                execution_status=status, execution_tx=tx_signature, pnl_percent=pnl_percent
-            ))
-        except Exception:
-            channel_ok = False
-            logger.exception("SELL channel send failed token=%s", token_addr)
+    try:
+        channel_ok = bool(send_graphic_signal_to_vip_channel(
+            token_addr=token_addr, symbol=symbol, price=current_price, tp=tp, sl=locked,
+            buy_amt=float(pos.get("buy_amt", 0.0) or 0.0),
+            volume=float(pos.get("volume", 0.0) or 0.0),
+            liquidity=float(pos.get("liquidity", 0.0) or 0.0),
+            p_change=float(pos.get("m5_change", pos.get("p_change", 0.0)) or 0.0),
+            solscan_link=solscan, signal_title=title, side="SELL",
+            execution_status=status, execution_tx=tx_signature, pnl_percent=pnl_percent
+        ))
+    except Exception:
+        channel_ok = False
+        logger.exception("SELL channel send failed token=%s", token_addr)
     return bool(telegram_ok or channel_ok)
 
 def _notify_async(fn, *args, **kwargs):
@@ -5098,18 +5101,17 @@ def _send_buy_notifications(token_addr, symbol, price, tp, sl, amount, mode_name
     except Exception:
         logger.exception("BUY Telegram notification failed token=%s", token_addr)
     _load_channel_config()
-    channel_ok = True
-    if CHANNEL_ID:
-        try:
-            channel_ok = bool(send_graphic_signal_to_vip_channel(
-                token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
-                buy_amt=amount, volume=vol, liquidity=liq, p_change=chg,
-                solscan_link=solscan_link, signal_title=mode_name, side="BUY",
-                execution_status=execution_display, execution_tx=""
-            ))
-        except Exception:
-            channel_ok = False
-            logger.exception("BUY channel notification failed token=%s", token_addr)
+    channel_ok = False
+    try:
+        channel_ok = bool(send_graphic_signal_to_vip_channel(
+            token_addr=token_addr, symbol=symbol, price=price, tp=tp, sl=sl,
+            buy_amt=amount, volume=vol, liquidity=liq, p_change=chg,
+            solscan_link=solscan_link, signal_title=mode_name, side="BUY",
+            execution_status=execution_display, execution_tx=""
+        ))
+    except Exception:
+        channel_ok = False
+        logger.exception("BUY channel notification failed token=%s", token_addr)
     if telegram_ok or channel_ok:
         V12_REAL_AUDIT["channel_sent"] += 1
     else:
@@ -8790,15 +8792,8 @@ def start_telegram_bot():
                     await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
                     return
                 _load_channel_config()
+                _get_channel_signal_enabled()
                 new_state = not bool(CHANNEL_SIGNAL_ENABLED)
-                if new_state and (not TELEGRAM_BOT_TOKEN or not CHANNEL_ID):
-                    await q.edit_message_text(
-                        "❌ **ارسال کانال فعال نشد**\n\n"
-                        "ابتدا `TELEGRAM_BOT_TOKEN` و `CHANNEL_ID` را تنظیم کن.\n"
-                        "موتورهای سیگنال و معاملات در این بررسی هیچ تغییری نمی‌کنند.",
-                        reply_markup=_main_keyboard(True), parse_mode="Markdown"
-                    )
-                    return
                 if _set_channel_signal_enabled(new_state):
                     status = (
                         "🟢 **ارسال سیگنال به کانال فعال شد**\n\n"
@@ -9025,6 +9020,35 @@ def start_telegram_bot():
                         ]),
                         parse_mode="Markdown"
                     )
+            elif data=="reset_motor_stats":
+                if not is_admin:
+                    await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
+                    return
+                ok, baseline = await _tg_bg(reset_trade_statistics_view)
+                if ok:
+                    await q.edit_message_text(
+                        "♻️ **آمار موتورهای این پنل صفر شد**\n\n"
+                        "✅ هیچ معامله‌ای از دیتابیس حذف یا تغییر نکرد.\n"
+                        f"📌 نقطه شروع جدید: Trade ID `{baseline}`\n\n"
+                        "🧠 تاریخچه برای یادگیری AI حفظ شده است.\n"
+                        "🟡 پوزیشن‌های باز نیز دست‌نخورده باقی ماندند.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🤖 مشاهده آمار جدید", callback_data="admin_motor_stats")],
+                            [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]
+                        ]),
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await q.edit_message_text(
+                        "❌ **صفر کردن آمار انجام نشد.**\n\n"
+                        "داده‌های اصلی دست‌نخورده باقی مانده‌اند.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 تلاش مجدد", callback_data="reset_motor_stats")],
+                            [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]
+                        ]),
+                        parse_mode="Markdown"
+                    )
+                return
             elif data=="admin_motor_stats":
                 if not is_admin:
                     await q.edit_message_text("⛔ دسترسی غیرمجاز.", reply_markup=_main_keyboard(False))
@@ -9032,6 +9056,7 @@ def start_telegram_bot():
                 await q.edit_message_text(
                     _admin_motor_stats_text(),
                     reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("♻️ صفر کردن آمار (بدون حذف داده)", callback_data="reset_motor_stats")],
                         [InlineKeyboardButton("🔄 بروزرسانی", callback_data="admin_motor_stats")],
                         [InlineKeyboardButton("🔙 پنل مدیریت", callback_data="admin")]
                     ]),
