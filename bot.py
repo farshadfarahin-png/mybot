@@ -167,7 +167,7 @@ SMART_FILTER_ENABLED = True
 DYNAMIC_RISK_ENABLED = True   
 MANUAL_SETTINGS_ENABLED = False 
 SYNCHRONIZED_MODE = True
-ADVANCED_AI_ENABLED = False
+ADVANCED_AI_ENABLED = True
 MAX_FUSION_ENABLED = False
 EMERGENCY_STOP = False
 # کلید مادر سیگنال: ON = مسیر تولید سیگنال BUY/SELL فعال، OFF = هیچ سیگنال جدیدی تولید/منتشر نمی‌شود.
@@ -2432,7 +2432,35 @@ def send_graphic_signal_to_vip_channel(token_addr, symbol, price, tp, sl, buy_am
             reply_markup=keyboard, parse_mode=None
         )
         if not ok:
-            logger.error(f"❌ کارت کانال ارسال نشد | CHANNEL_ID={CHANNEL_ID!r}")
+            # اگر مشکل از keyboard/markup یا محدودیت خاص مقصد باشد، خودِ اعلان
+            # بدون keyboard را یک بار مستقیم امتحان می‌کنیم؛ این fallback فقط
+            # برای انتشار کانال است و به تولید/اجرای سیگنال دست نمی‌زند.
+            fallback_text = (
+                f"🤖⚡ {signal_title}\n"
+                f"{side_icon}\n"
+                f"🪙 {symbol}\n"
+                f"📍 {token_addr}\n"
+                f"{price_label}: ${float(price):.8f}\n"
+                f"💰 حجم معامله: {float(buy_amt):g} SOL\n"
+                f"💧 نقدینگی: ${float(liquidity):,.0f}\n"
+                f"📊 حجم ۵ دقیقه: ${float(volume):,.0f}\n"
+                f"📈 تغییر ۵ دقیقه: {float(p_change):+.2f}%\n"
+                f"🎯 TP: +{float(tp):.1f}% | 🛑 SL: {float(sl):.1f}%\n"
+                f"{result_line}"
+            )
+            ok = bool(send_telegram_msg(
+                fallback_text, target_chat=CHANNEL_ID,
+                reply_markup=None, parse_mode=None
+            ))
+            if ok:
+                logger.warning(
+                    f"⚠️ کارت کامل کانال رد شد ولی fallback متنی ارسال شد | CHANNEL_ID={CHANNEL_ID!r}"
+                )
+            else:
+                logger.error(
+                    f"❌ ارسال کانال هم کارت و هم fallback شکست خورد | CHANNEL_ID={CHANNEL_ID!r} | "
+                    f"bot_token={'SET' if TELEGRAM_BOT_TOKEN else 'EMPTY'}"
+                )
         else:
             logger.info(f"📢 کارت سیگنال کانال ارسال شد | CHANNEL_ID={CHANNEL_ID!r} | {symbol} | {side}")
         return ok
@@ -3673,6 +3701,8 @@ SIGNAL_BUDGET_MAX = 50
 MIN_ENTRY_MOMENTUM_5M = 0.5
 last_global_signal_time = 0.0
 UNIFIED_LAST_EMIT_TIME = 0.0
+# هر lane مستقل cooldown خودش را دارد؛ سیگنال Analysis نباید موتورهای Advanced/Hulk را خفه کند.
+lane_last_signal_time = {}
 CONSENSUS_MIN_LIQUIDITY = 25000.0
 CONSENSUS_MIN_VOLUME_5M = 1500.0
 CONSENSUS_MIN_CHANGE_5M = 0.5
@@ -5063,14 +5093,20 @@ def _send_fused_signal_impl(token_addr, fusion):
             return False, "LOW_ENTRY_MOMENTUM"
 
         now=time.time()
-        if _global_signal_cooldown_remaining(now)>0:
-            _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN"); return False, "GLOBAL_SIGNAL_COOLDOWN"
+        # Cooldown محافظتی برای هر lane مستقل است؛ Analysis نباید Advanced/Hulk
+        # را متوقف کند. قفل توکن و سقف روزانه همچنان سراسری و معتبرند.
+        lane_last = float(lane_last_signal_time.get(emit_lane, 0.0) or 0.0)
+        if now - lane_last < GLOBAL_SIGNAL_COOLDOWN_SECONDS:
+            _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN")
+            _diag_reject("EXECUTION", "LANE_SIGNAL_COOLDOWN", token_addr)
+            return False, "LANE_SIGNAL_COOLDOWN"
         if now-consensus_last_signal.get(emit_key,0)<CONSENSUS_COOLDOWN_SECONDS:
             _audit_signal_decision("GLOBAL_SIGNAL_COOLDOWN"); return False, "ENGINE_COOLDOWN"
         if EMERGENCY_STOP:
             _audit_signal_decision("EMERGENCY_STOP")
             return False, "EMERGENCY_STOP"
 
+        lane_last_signal_time[emit_lane] = now
         last_global_signal_time=now; UNIFIED_LAST_EMIT_TIME=now
         _set_bot_setting("last_global_buy_signal_at",now)
         consensus_last_signal[emit_key]=now
