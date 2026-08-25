@@ -193,7 +193,7 @@ PRO_WALLET_RADAR_ENABLED = False
 PRO_WALLET_COPY_PERMISSION = False
 PRO_WALLET_RADAR_INTERVAL_SECONDS = 21600.0  # 6 hours؛ برای حفظ سهمیه رایگان Birdeye
 PRO_WALLET_COPY_POLL_INTERVAL_SECONDS = 60.0  # 60 seconds for real-copy monitoring
-# 💰 حجم دستی هر خرید در کپی واقعی Professional Wallet — فقط این مقدار را دستی تغییر بده.
+# 💰 فقط حجم BUY کپی واقعی Professional Wallet؛ مقدار را دستی تغییر بده.
 PRO_WALLET_COPY_AMOUNT_SOL = 0.01
 # 🎯 شرایط رسمی شکار Wallet — فقط Walletهایی که همه این شروط را داشته باشند
 # وارد لیست «قابل انتخاب» می‌شوند.
@@ -6895,9 +6895,15 @@ def _pro_wallet_set_setting_bool(key, value):
 
 
 def _pro_wallet_load_switches():
-    global PRO_WALLET_RADAR_ENABLED, PRO_WALLET_COPY_PERMISSION, PRO_WALLET_SELECTED_WALLET
+    global PRO_WALLET_RADAR_ENABLED, PRO_WALLET_COPY_PERMISSION, PRO_WALLET_SELECTED_WALLET, PRO_WALLET_COPY_AMOUNT_SOL
     PRO_WALLET_RADAR_ENABLED = _pro_wallet_setting_bool("pro_wallet_radar_enabled", False)
     PRO_WALLET_COPY_PERMISSION = _pro_wallet_setting_bool("pro_wallet_copy_permission", False)
+    try:
+        saved_amount = float(_get_bot_setting("pro_wallet_copy_amount_sol", str(PRO_WALLET_COPY_AMOUNT_SOL)) or PRO_WALLET_COPY_AMOUNT_SOL)
+        if saved_amount > 0:
+            PRO_WALLET_COPY_AMOUNT_SOL = saved_amount
+    except Exception:
+        pass
     # Wallet منتخب و Walletهای دستی بعد از Restart هم حفظ می‌شوند.
     saved_selected = str(_get_bot_setting("pro_wallet_selected_wallet", "") or "").strip()
     if saved_selected:
@@ -7527,6 +7533,10 @@ def _pro_wallet_keyboard():
             f"🛒 اجازه کپی واقعی: {'🟢 ON' if PRO_WALLET_COPY_PERMISSION else '🔴 OFF'}",
             callback_data="pro_wallet_toggle_copy"
         )],
+        [InlineKeyboardButton(
+            f"💰 حجم دستی کپی: {float(PRO_WALLET_COPY_AMOUNT_SOL):g} SOL",
+            callback_data="pro_wallet_set_amount"
+        )],
     ]
 
     # 👛 Walletهای پیدا شده را به‌صورت دکمه انتخاب دستی نمایش می‌دهیم.
@@ -7850,7 +7860,7 @@ def _pro_wallet_copy_poll():
                 continue
             try:
                 if ev["side"] == "BUY":
-                    amount = float(PRO_WALLET_COPY_AMOUNT_SOL) if float(PRO_WALLET_COPY_AMOUNT_SOL) > 0 else 0.0
+                    amount = min(float(MAX_TRADE_SOL), float(PRO_WALLET_COPY_AMOUNT_SOL)) if float(MAX_TRADE_SOL) > 0 else 0.0
                     if amount <= 0:
                         result="COPY_BUY_BLOCKED_AMOUNT"
                         status="BLOCKED"
@@ -8161,6 +8171,7 @@ def start_telegram_bot():
             context.user_data.pop("awaiting_trade_limit_sol", None)
             context.user_data.pop("awaiting_signal_glass_setting", None)
             context.user_data.pop("awaiting_pro_wallet_manual_add", None)
+            context.user_data.pop("awaiting_pro_wallet_copy_amount", None)
             await update.message.reply_text(
                 f"↩️ لغو شد. سقف فعلی هر معامله: {MAX_TRADE_SOL:g} SOL",
                 reply_markup=_control_keyboard() if str(update.effective_user.id) == str(TELEGRAM_CHAT_ID) else _main_keyboard(False)
@@ -8170,6 +8181,30 @@ def start_telegram_bot():
             global MAX_TRADE_SOL
             cid = str(update.effective_user.id)
             if not (TELEGRAM_CHAT_ID and cid == str(TELEGRAM_CHAT_ID)):
+                return
+
+            if context.user_data.get("awaiting_pro_wallet_copy_amount"):
+                raw_amount = (update.message.text or "").strip().replace(",", ".")
+                try:
+                    amount = float(raw_amount)
+                    if amount <= 0:
+                        raise ValueError("حجم باید بیشتر از صفر باشد.")
+                    if amount > 1000:
+                        raise ValueError("حجم SOL نمی‌تواند بیشتر از 1000 باشد.")
+                    global PRO_WALLET_COPY_AMOUNT_SOL
+                    PRO_WALLET_COPY_AMOUNT_SOL = amount
+                    _set_bot_setting("pro_wallet_copy_amount_sol", str(amount))
+                    context.user_data.pop("awaiting_pro_wallet_copy_amount", None)
+                    await update.message.reply_text(
+                        "✅ حجم دستی کپی سولانا تنظیم شد\n\n"
+                        f"💰 حجم هر BUY کپی واقعی: {amount:g} SOL\n\n"
+                        "📌 این مقدار فقط برای کپی واقعی Professional Wallet استفاده می‌شود.",
+                        reply_markup=_pro_wallet_keyboard()
+                    )
+                except Exception as e:
+                    await update.message.reply_text(
+                        f"❌ حجم نامعتبر: {e}\nمثال: 0.05 یا 0.1 SOL"
+                    )
                 return
 
             if context.user_data.get("awaiting_pro_wallet_manual_add"):
@@ -9301,6 +9336,21 @@ def start_telegram_bot():
                     _pro_wallet_panel_text(),
                     reply_markup=_pro_wallet_keyboard(),
                     parse_mode="Markdown"
+                )
+                return
+
+            elif data == "pro_wallet_set_amount":
+                if not is_admin:
+                    await q.edit_message_text("⛔ فقط ادمین.", reply_markup=_main_keyboard(False))
+                    return
+                context.user_data["awaiting_pro_wallet_copy_amount"] = True
+                await q.edit_message_text(
+                    "💰 تعیین حجم دستی کپی سولانا\n\n"
+                    f"حجم فعلی: {float(PRO_WALLET_COPY_AMOUNT_SOL):g} SOL\n\n"
+                    "مقدار جدید را فقط به عدد بفرست.\n"
+                    "مثال: 0.05 یا 0.1 SOL\n\n"
+                    "برای لغو: /cancel",
+                    reply_markup=_pro_wallet_keyboard()
                 )
                 return
 
