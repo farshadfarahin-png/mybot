@@ -1236,6 +1236,14 @@ def self_learning_ai_optimizer_loop():
                     conn.close()
                 if state.get("sample", 0) >= ADAPTIVE_MIN_SAMPLE:
                     logger.info(f"🧠 Adaptive Learning: {state['sample']} معاملات اخیر | Win Rate={state['win_rate']:.1f}% | score_bonus={state['score_bonus']}")
+                if AUTO_IMPROVEMENT_ENABLED:
+                    try:
+                        if time.time() - float(v11_state.get("last_tuning", 0) or 0) >= V11_TUNING_INTERVAL:
+                            changes = v11_tune_weights()
+                            if changes:
+                                logger.info("🛠 Auto-Improvement: %d engine weight(s) recalibrated from closed outcomes.", len(changes))
+                    except Exception as tune_exc:
+                        logger.debug("Auto-Improvement tuner unavailable in this cycle: %s", tune_exc)
             except Exception as e:
                 logger.error(f"⚠️ خطای موتور یادگیری تطبیقی: {e}")
         time.sleep(180)
@@ -1772,11 +1780,19 @@ def _get_channel_signal_enabled():
     return CHANNEL_SIGNAL_ENABLED
 
 def _set_channel_signal_enabled(value):
+    """Persist channel publication state and verify the DB value before reporting success."""
     global CHANNEL_SIGNAL_ENABLED
     new_value = bool(value)
-    if not _set_bot_setting("channel_signal_enabled", "1" if new_value else "0"):
+    encoded = "1" if new_value else "0"
+    if not _set_bot_setting("channel_signal_enabled", encoded):
+        logger.error("❌ channel_signal_enabled write failed; keeping previous state.")
         return False
-    CHANNEL_SIGNAL_ENABLED = new_value
+    persisted = str(_get_bot_setting("channel_signal_enabled", "")).strip().lower()
+    verified = persisted not in ("0", "false", "off", "")
+    if verified != new_value:
+        logger.error("❌ channel_signal_enabled verification failed: wanted=%s persisted=%r", new_value, persisted)
+        return False
+    CHANNEL_SIGNAL_ENABLED = verified
     return True
 
 _SECURITY_RATE_LOCK = Lock()
@@ -4211,6 +4227,63 @@ def _get_live_adaptive_gate(enabled_count=1):
         logger.debug("Adaptive live gate unavailable; fixed gate remains active: %s", e)
         return float(CONSENSUS_MIN_SCORE), float(CONSENSUS_MIN_RATIO), 0, 0.0
 
+# ================= STRONG AUTO-IMPROVEMENT QUALITY LAYER =================
+# Uses only real CLOSED trade outcomes already stored by the learning engine.
+# It is intentionally additive: the original hard gates remain authoritative.
+AUTO_IMPROVEMENT_MIN_ENGINE_SAMPLES = 8
+AUTO_IMPROVEMENT_WEAK_ENGINE_WR = 42.0
+AUTO_IMPROVEMENT_HARD_REJECT_WR = 35.0
+AUTO_IMPROVEMENT_GLOBAL_LOOKBACK = 20
+AUTO_IMPROVEMENT_MAX_SCORE_BONUS = 3.5
+
+def _auto_improvement_quality_gate(fusion):
+    """Return (allowed, extra_score_min, reason) from persistent closed outcomes."""
+    if not AUTO_IMPROVEMENT_ENABLED:
+        return True, 0.0, "DISABLED"
+    try:
+        names = fusion.get("engines") or fusion.get("votes") or []
+        if isinstance(names, str):
+            names = [x.strip() for x in names.split(",") if x.strip()]
+        names = list(dict.fromkeys(str(x) for x in names if str(x).strip()))
+        weak = []
+        hard_weak = []
+        with META_MEMORY_LOCK:
+            engine_memory = {k: dict(v) for k, v in META_MEMORY.get("engine", {}).items()}
+        for name in names:
+            st = engine_memory.get(name) or learning_state.get("engines", {}).get(name) or {}
+            n = int(st.get("trades", 0) or 0)
+            if n < AUTO_IMPROVEMENT_MIN_ENGINE_SAMPLES:
+                continue
+            wr = (float(st.get("wins", 0) or 0) / n * 100.0) if n else 0.0
+            avg = float(st.get("avg_pnl", 0.0) or 0.0)
+            if wr < AUTO_IMPROVEMENT_WEAK_ENGINE_WR and avg < 0:
+                weak.append((name, wr, avg, n))
+            if wr < AUTO_IMPROVEMENT_HARD_REJECT_WR and avg < 0:
+                hard_weak.append((name, wr, avg, n))
+        active = max(1, len(names))
+        if hard_weak and len(hard_weak) >= max(1, (active + 1) // 2):
+            return False, 0.0, "WEAK_ENGINE_CLUSTER"
+        extra = 0.0
+        if weak:
+            extra += min(AUTO_IMPROVEMENT_MAX_SCORE_BONUS, 1.0 + 0.75 * min(2, len(weak)))
+        rows = list(learning_state.get("trades", []))[-AUTO_IMPROVEMENT_GLOBAL_LOOKBACK:]
+        if len(rows) >= 10:
+            pnls = [float(r.get("pnl_pct", 0) or 0) for r in rows]
+            wins = sum(1 for x in pnls if x > 0)
+            wr = wins / len(pnls) * 100.0
+            avg = sum(pnls) / len(pnls)
+            if wr < 45.0 and avg < 0:
+                extra = min(AUTO_IMPROVEMENT_MAX_SCORE_BONUS, extra + 1.5)
+            if wr < 35.0 and avg < -1.0:
+                extra = min(AUTO_IMPROVEMENT_MAX_SCORE_BONUS, extra + 1.0)
+        if extra > 0:
+            return True, extra, "STRICTER_FROM_CLOSED_OUTCOMES"
+        return True, 0.0, "HEALTHY_OR_INSUFFICIENT_ENGINE_HISTORY"
+    except Exception as exc:
+        logger.debug("Auto-improvement quality gate failed open: %s", exc)
+        return True, 0.0, "FAIL_SAFE"
+
+
 def fusion_quality_gate(fusion):
     try:
         liq = float(fusion.get("liq", 0) or 0)
@@ -4236,6 +4309,14 @@ def fusion_quality_gate(fusion):
                     fusion["adaptive_gate_win_rate"] = learned_wr
             except Exception:
                 learned_score_min = float(CONSENSUS_MIN_SCORE)
+        auto_allowed, auto_bonus, auto_reason = _auto_improvement_quality_gate(fusion)
+        if not auto_allowed:
+            _diag_reject("AUTO_IMPROVEMENT", auto_reason, str(fusion.get("token", "")))
+            return False
+        if auto_bonus > 0:
+            learned_score_min = max(learned_score_min, float(CONSENSUS_MIN_SCORE) + float(auto_bonus))
+            fusion["auto_improvement_score_min"] = float(learned_score_min)
+            fusion["auto_improvement_reason"] = auto_reason
         if score < max(float(CONSENSUS_MIN_SCORE), learned_score_min):
             return False
         if not _meta_quality_allowed(fusion):
@@ -8792,9 +8873,9 @@ def start_telegram_bot():
                     await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
                     return
                 _load_channel_config()
-                _get_channel_signal_enabled()
-                new_state = not bool(CHANNEL_SIGNAL_ENABLED)
-                if _set_channel_signal_enabled(new_state):
+                current_state = bool(_get_channel_signal_enabled())
+                new_state = not current_state
+                if _set_channel_signal_enabled(new_state) and bool(_get_channel_signal_enabled()) == new_state:
                     status = (
                         "🟢 **ارسال سیگنال به کانال فعال شد**\n\n"
                         f"📢 مقصد قطعی: `{CHANNEL_ID}`\n"
@@ -9879,6 +9960,10 @@ if __name__ == "__main__":
         MASTER_DIAGNOSTIC_ENABLED = str(_get_bot_setting("master_diagnostic_enabled", "0")).strip() not in ("0", "false", "off")
         AUTO_LEARNING_ENABLED = str(_get_bot_setting("auto_learning_enabled", "1")).strip() not in ("0", "false", "off")
         AUTO_IMPROVEMENT_ENABLED = str(_get_bot_setting("auto_improvement_enabled", "1")).strip() not in ("0", "false", "off")
+        # User-requested default: automatic improvement is forced ON at startup.
+        if not AUTO_IMPROVEMENT_ENABLED:
+            AUTO_IMPROVEMENT_ENABLED = True
+            _set_bot_setting("auto_improvement_enabled", "1")
     except Exception:
         MASTER_DIAGNOSTIC_ENABLED = False
         AUTO_LEARNING_ENABLED = True
@@ -9891,9 +9976,10 @@ if __name__ == "__main__":
         MASTER_SIGNAL_ENABLED = False
         MASTER_SIGNAL_FIRE_NOW = False
     try:
+        # Restore the persisted channel switch on every restart; never reset it to the module default.
         _get_channel_signal_enabled()
-    except Exception:
-        CHANNEL_SIGNAL_ENABLED = True
+    except Exception as e:
+        logger.warning("⚠️ channel signal state restore failed; keeping current state: %s", e)
     ensure_channel_invite_link()
     # Recover open positions before any scanner starts. Signal switches do not control this manager.
     _restore_open_positions()
