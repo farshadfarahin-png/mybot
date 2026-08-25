@@ -5794,7 +5794,7 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                     if engine_name == "Analysis":
                         continue
                     is_adv = engine_name in ("Technical", "UltimateAI/21", "Social/Hype", "SmartFilter")
-                    if is_adv and not ADVANCED_AI_ENABLED:
+                    if is_adv and not (ADVANCED_AI_ENABLED or SYNCHRONIZED_MODE):
                         continue
                     if (not is_adv) and not SYNCHRONIZED_MODE:
                         continue
