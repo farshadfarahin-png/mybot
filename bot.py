@@ -1292,7 +1292,7 @@ def get_real_market_trending_tokens():
 
     def fetch_endpoint(url):
         try:
-            res_obj = http_session.get(url, timeout=4)
+            res_obj = _dexscreener_get(url, timeout=4)
             if res_obj.status_code != 200:
                 return []
             res = res_obj.json()
@@ -1341,7 +1341,7 @@ def ultra_accuracy_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in ultra_processed_tokens:
                         continue
 
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
+                pair_res_obj = _dexscreener_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
                 if pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
@@ -1425,7 +1425,7 @@ def mempool_smart_money_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in mempool_processed_tokens:
                         continue
                 
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
+                pair_res_obj = _dexscreener_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
                 if pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
@@ -3678,7 +3678,7 @@ def technical_analysis_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
                         continue
 
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
+                pair_res_obj = _dexscreener_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
                 if pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
@@ -3890,7 +3890,7 @@ PAIR_SCAN_WORKERS = 16
 
 # ELITE RADAR + HULK SENTINEL: فقط معماری رصد/رتبه‌بندی ارتقا یافته؛ هیچ آستانه کیفیت، سقف سیگنال یا کلید کنترلی تغییر نمی‌کند.
 # بازار در پس‌زمینه تازه می‌شود تا رادار منتظر HTTP discovery نماند.
-ELITE_DISCOVERY_REFRESH_SECONDS = 2.50
+ELITE_DISCOVERY_REFRESH_SECONDS = 10.0
 ELITE_DISCOVERY_MAX_AGE_SECONDS = 4.0
 ELITE_PAIR_TIMEOUT_SECONDS = 3.00
 ELITE_VOTE_WORKERS = 12
@@ -3924,13 +3924,29 @@ _sentinel_lock = Lock()
 # the short-lived batch cache during the same radar sweep. This avoids one HTTP
 # request per token and reduces 429 pressure without weakening market gates.
 DEX_BATCH_SIZE = 30
-DEX_BATCH_CACHE_TTL_SECONDS = 4.0
+DEX_BATCH_CACHE_TTL_SECONDS = 8.0
 _dex_batch_cache = {}
 _dex_batch_cache_time = 0.0
 _dex_batch_lock = RLock()
 _dex_rate_lock = Lock()
 _dex_last_request_time = 0.0
-DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.12
+DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.25
+
+def _dexscreener_get(url, timeout=4):
+    """Rate-limit every DexScreener HTTP GET through one shared lock.
+
+    This prevents concurrent discovery/scanner workers from collectively
+    exceeding DexScreener's request rate. It does not change signal gates,
+    thresholds, engine decisions, or trading logic.
+    """
+    global _dex_last_request_time
+    with _dex_rate_lock:
+        wait = DEX_MIN_REQUEST_INTERVAL_SECONDS - (time.time() - _dex_last_request_time)
+        if wait > 0:
+            time.sleep(wait)
+        response = http_session.get(url, timeout=timeout)
+        _dex_last_request_time = time.time()
+        return response
 
 def _sentinel_ratio(buys, sells):
     return float(buys) / max(1.0, float(sells))
@@ -5616,17 +5632,15 @@ def _fetch_best_solana_pairs_batch(token_addrs):
         chunk = missing[i:i + DEX_BATCH_SIZE]
         try:
             # DexScreener accepts comma-separated token addresses on this endpoint.
-            with _dex_rate_lock:
-                wait = DEX_MIN_REQUEST_INTERVAL_SECONDS - (time.time() - _dex_last_request_time)
-                if wait > 0:
-                    time.sleep(wait)
-                url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk)
-                res = http_session.get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
-                _dex_last_request_time = time.time()
+            url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk)
+            res = _dexscreener_get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
             if res.status_code == 429:
                 retry_after = float(res.headers.get("Retry-After", "1") or 1)
-                logger.warning("⚠️ DexScreener HTTP 429؛ batch radar %.1fs مکث می‌کند.", retry_after)
-                time.sleep(min(max(retry_after, 0.5), 5.0))
+                # One controlled retry for the same chunk; no repeated warning spam.
+                time.sleep(min(max(retry_after, 1.0), 10.0))
+                res = _dexscreener_get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
+            if res.status_code == 429:
+                logger.debug("DexScreener batch rate-limited after retry; chunk deferred.")
                 continue
             if res.status_code != 200:
                 logger.debug("DexScreener batch status=%s", res.status_code)
