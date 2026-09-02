@@ -695,6 +695,7 @@ META_LEARNING_VERSION = 1
 META_MIN_PATTERN_SAMPLES = 6
 META_MIN_REGIME_SAMPLES = 8
 META_MIN_ENGINE_SAMPLES = 8
+# رد سخت فقط با سابقه کافی انجام می‌شود؛ یادگیری/رتبه‌بندی زودتر فعال است.
 META_HARD_REJECT_MIN_PATTERN_SAMPLES = 20
 META_MAX_ADJUSTMENT = 2.25
 META_MAX_RANK_BONUS = 2.50
@@ -818,8 +819,6 @@ def _meta_evaluate(fusion):
     if not sources:return {"enabled":True,"pattern_key":pattern_key,"regime":regime_key,"probability":0.5,"expected_pnl":0.0,"confidence":0.0,"adjustment":0.0,"rank_bonus":0.0,"decision":"WARMUP"}
     ws=sum(w for w,_ in sources) or 1.0; probability=sum(w*m["win_prob"] for w,m in sources)/ws; expected_pnl=sum(w*m["avg_pnl"] for w,m in sources)/ws; lower_wr=sum(w*m["lower_wr"] for w,m in sources)/ws; sample_mass=sum(m["trades"] for _,m in sources); confidence=min(1.0,math.log1p(sample_mass)/math.log1p(100.0))
     raw=(probability-0.50)*8.0+_meta_clamp(expected_pnl,-4,4)*0.45; adjustment=_meta_clamp(raw*confidence,-META_MAX_ADJUSTMENT,META_MAX_ADJUSTMENT); rank_bonus=_meta_clamp(adjustment,-META_MAX_RANK_BONUS,META_MAX_RANK_BONUS); decision="LEARNED_PASS" if adjustment>=0 else "LEARNED_PENALTY"
-    # Ranking learns from smaller samples, but hard rejection remains conservative
-    # and requires the original 20-sample pattern depth.
     if sample_mass>=META_HARD_REJECT_MIN_PATTERN_SAMPLES and lower_wr<0.40 and expected_pnl<0:decision="LEARNED_REJECT"
     return {"enabled":True,"pattern_key":pattern_key,"regime":regime_key,"probability":float(probability),"expected_pnl":float(expected_pnl),"confidence":float(confidence),"lower_wr":float(lower_wr),"adjustment":float(adjustment),"rank_bonus":float(rank_bonus),"decision":decision}
 
@@ -1300,21 +1299,18 @@ def get_real_market_trending_tokens():
     def fetch_endpoint(url):
         global DEX_429_COOLDOWN_UNTIL
         try:
-            # Discovery stays at its original cadence. A wait is introduced only
-            # when DexScreener has already returned HTTP 429.
+            # در حالت عادی هیچ مکث اضافه‌ای نداریم؛ فقط اگر DexScreener قبلاً 429 داده باشد.
             with DEX_429_COOLDOWN_LOCK:
-                cooldown_wait = max(0.0, DEX_429_COOLDOWN_UNTIL - time.time())
-            if cooldown_wait > 0:
-                time.sleep(min(cooldown_wait, 10.0))
+                cooldown_left = DEX_429_COOLDOWN_UNTIL - time.time()
+            if cooldown_left > 0:
+                time.sleep(cooldown_left)
             res_obj = http_session.get(url, timeout=4)
             if res_obj.status_code == 429:
-                try:
-                    retry_after = max(1.0, float(res_obj.headers.get("Retry-After", "1") or 1))
-                except (TypeError, ValueError):
-                    retry_after = 1.0
+                retry_after = float(res_obj.headers.get("Retry-After", "1") or 1)
+                retry_after = min(max(retry_after, 0.5), 10.0)
                 with DEX_429_COOLDOWN_LOCK:
-                    DEX_429_COOLDOWN_UNTIL = max(DEX_429_COOLDOWN_UNTIL, time.time() + min(retry_after, 10.0))
-                logger.debug("DexScreener discovery HTTP 429؛ adaptive cooldown %.1fs فعال شد.", min(retry_after, 10.0))
+                    DEX_429_COOLDOWN_UNTIL = max(DEX_429_COOLDOWN_UNTIL, time.time() + retry_after)
+                logger.debug("DexScreener discovery HTTP 429؛ cooldown %.1fs", retry_after)
                 return []
             if res_obj.status_code != 200:
                 return []
@@ -4125,7 +4121,7 @@ _dex_batch_lock = RLock()
 _dex_rate_lock = Lock()
 _dex_last_request_time = 0.0
 DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.12
-# Adaptive 429 protection: normal radar speed is unchanged; cooldown activates only after HTTP 429.
+# فقط بعد از دریافت HTTP 429 فعال می‌شود؛ در حالت عادی سرعت رادار را تغییر نمی‌دهد.
 DEX_429_COOLDOWN_UNTIL = 0.0
 DEX_429_COOLDOWN_LOCK = Lock()
 
@@ -5870,14 +5866,13 @@ def _fetch_best_solana_pairs_batch(token_addrs):
     for i in range(0, len(missing), DEX_BATCH_SIZE):
         chunk = missing[i:i + DEX_BATCH_SIZE]
         try:
+            # فقط cooldown ناشی از 429 اعمال می‌شود؛ فاصله عادی 0.12s دست‌نخورده است.
+            with DEX_429_COOLDOWN_LOCK:
+                cooldown_left = DEX_429_COOLDOWN_UNTIL - time.time()
+            if cooldown_left > 0:
+                time.sleep(cooldown_left)
             # DexScreener accepts comma-separated token addresses on this endpoint.
             with _dex_rate_lock:
-                # Do not slow normal radar traffic. If DexScreener itself has
-                # issued a 429, honor that temporary server-side cooldown before
-                # the next batch request.
-                cooldown_wait = max(0.0, DEX_429_COOLDOWN_UNTIL - time.time())
-                if cooldown_wait > 0:
-                    time.sleep(cooldown_wait)
                 wait = DEX_MIN_REQUEST_INTERVAL_SECONDS - (time.time() - _dex_last_request_time)
                 if wait > 0:
                     time.sleep(wait)
@@ -5885,15 +5880,11 @@ def _fetch_best_solana_pairs_batch(token_addrs):
                 res = http_session.get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
                 _dex_last_request_time = time.time()
             if res.status_code == 429:
-                try:
-                    retry_after = max(1.0, float(res.headers.get("Retry-After", "1") or 1))
-                except (TypeError, ValueError):
-                    retry_after = 1.0
-                # Cool down only because the API explicitly rate-limited us.
+                retry_after = float(res.headers.get("Retry-After", "1") or 1)
+                retry_after = min(max(retry_after, 0.5), 10.0)
                 with DEX_429_COOLDOWN_LOCK:
-                    DEX_429_COOLDOWN_UNTIL = max(DEX_429_COOLDOWN_UNTIL, time.time() + min(retry_after, 10.0))
-                logger.debug("DexScreener HTTP 429؛ adaptive cooldown %.1fs فعال شد.", min(retry_after, 10.0))
-                time.sleep(min(retry_after, 10.0))
+                    DEX_429_COOLDOWN_UNTIL = max(DEX_429_COOLDOWN_UNTIL, time.time() + retry_after)
+                logger.debug("DexScreener batch HTTP 429؛ cooldown %.1fs", retry_after)
                 continue
             if res.status_code != 200:
                 logger.debug("DexScreener batch status=%s", res.status_code)
@@ -6425,20 +6416,17 @@ def unified_market_scanner_loop(app):
     """
     global _TRUE_HUNTER_CURSOR, MASTER_SIGNAL_FIRE_NOW
     logger.info("%s / %s: CLEAN SIGNAL CORE started", UNIFIED_ENGINE_NAME, BOT_BUILD_VERSION)
-    # The process may restart periodically on hosting platforms. Persist only
-    # the notification timestamp so hourly restarts do not spam Telegram.
-    # This does NOT disable/restart the radar and does not affect signal hunting.
+    radar_notice_key = "unified_radar_activation_notice_at"
+    radar_notice_cooldown = 7200.0
     try:
-        radar_notice_key = "unified_radar_activation_notice_at"
-        radar_notice_cooldown = 7200.0  # 2 hours
         last_notice = float(_get_bot_setting(radar_notice_key, "0") or 0)
-        if time.time() - last_notice >= radar_notice_cooldown:
-            if send_telegram_msg(f"🚀 رادار {BOT_BUILD_VERSION} فعال شد"):
-                _set_bot_setting(radar_notice_key, time.time())
-        else:
-            logger.info("ℹ️ اعلان تکراری فعال‌شدن رادار به‌دلیل cooldown ارسال نشد.")
-    except Exception as notice_error:
-        logger.debug("Radar activation notice guard error: %s", notice_error)
+    except Exception:
+        last_notice = 0.0
+    if time.time() - last_notice >= radar_notice_cooldown:
+        if send_telegram_msg(f"🚀 رادار {BOT_BUILD_VERSION} فعال شد"):
+            _set_bot_setting(radar_notice_key, time.time())
+    else:
+        logger.debug("🔕 duplicate radar activation notice suppressed")
 
     def inc_audit(key, amount=1):
         try:
