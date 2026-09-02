@@ -692,11 +692,9 @@ _ensure_production_trade_schema()
 # by the existing Neon snapshot layer, so code changes do not erase learning.
 META_LEARNING_ENABLED = True
 META_LEARNING_VERSION = 1
-META_MIN_PATTERN_SAMPLES = 6
-META_MIN_REGIME_SAMPLES = 8
-META_MIN_ENGINE_SAMPLES = 8
-# رد سخت فقط با سابقه کافی انجام می‌شود؛ یادگیری/رتبه‌بندی زودتر فعال است.
-META_HARD_REJECT_MIN_PATTERN_SAMPLES = 20
+META_MIN_PATTERN_SAMPLES = 20
+META_MIN_REGIME_SAMPLES = 12
+META_MIN_ENGINE_SAMPLES = 12
 META_MAX_ADJUSTMENT = 2.25
 META_MAX_RANK_BONUS = 2.50
 META_MAX_PATTERNS = 8000
@@ -819,7 +817,7 @@ def _meta_evaluate(fusion):
     if not sources:return {"enabled":True,"pattern_key":pattern_key,"regime":regime_key,"probability":0.5,"expected_pnl":0.0,"confidence":0.0,"adjustment":0.0,"rank_bonus":0.0,"decision":"WARMUP"}
     ws=sum(w for w,_ in sources) or 1.0; probability=sum(w*m["win_prob"] for w,m in sources)/ws; expected_pnl=sum(w*m["avg_pnl"] for w,m in sources)/ws; lower_wr=sum(w*m["lower_wr"] for w,m in sources)/ws; sample_mass=sum(m["trades"] for _,m in sources); confidence=min(1.0,math.log1p(sample_mass)/math.log1p(100.0))
     raw=(probability-0.50)*8.0+_meta_clamp(expected_pnl,-4,4)*0.45; adjustment=_meta_clamp(raw*confidence,-META_MAX_ADJUSTMENT,META_MAX_ADJUSTMENT); rank_bonus=_meta_clamp(adjustment,-META_MAX_RANK_BONUS,META_MAX_RANK_BONUS); decision="LEARNED_PASS" if adjustment>=0 else "LEARNED_PENALTY"
-    if sample_mass>=META_HARD_REJECT_MIN_PATTERN_SAMPLES and lower_wr<0.40 and expected_pnl<0:decision="LEARNED_REJECT"
+    if sample_mass>=META_MIN_PATTERN_SAMPLES and lower_wr<0.40 and expected_pnl<0:decision="LEARNED_REJECT"
     return {"enabled":True,"pattern_key":pattern_key,"regime":regime_key,"probability":float(probability),"expected_pnl":float(expected_pnl),"confidence":float(confidence),"lower_wr":float(lower_wr),"adjustment":float(adjustment),"rank_bonus":float(rank_bonus),"decision":decision}
 
 def _meta_attach(fusion):
@@ -1297,20 +1295,14 @@ def get_real_market_trending_tokens():
             logger.info("🧹 حافظه رم از توکن‌های قدیمی پردازش‌شده پاک‌سازی شد.")
 
     def fetch_endpoint(url):
-        global DEX_429_COOLDOWN_UNTIL
         try:
-            # در حالت عادی هیچ مکث اضافه‌ای نداریم؛ فقط اگر DexScreener قبلاً 429 داده باشد.
-            with DEX_429_COOLDOWN_LOCK:
-                cooldown_left = DEX_429_COOLDOWN_UNTIL - time.time()
-            if cooldown_left > 0:
-                time.sleep(cooldown_left)
+            # Do not slow normal discovery. Only pause this endpoint when a
+            # previous DexScreener request explicitly returned HTTP 429.
+            if _dex_429_remaining() > 0:
+                return []
             res_obj = http_session.get(url, timeout=4)
             if res_obj.status_code == 429:
-                retry_after = float(res_obj.headers.get("Retry-After", "1") or 1)
-                retry_after = min(max(retry_after, 0.5), 10.0)
-                with DEX_429_COOLDOWN_LOCK:
-                    DEX_429_COOLDOWN_UNTIL = max(DEX_429_COOLDOWN_UNTIL, time.time() + retry_after)
-                logger.debug("DexScreener discovery HTTP 429؛ cooldown %.1fs", retry_after)
+                _dex_record_429(res_obj, "discovery")
                 return []
             if res_obj.status_code != 200:
                 return []
@@ -4121,9 +4113,30 @@ _dex_batch_lock = RLock()
 _dex_rate_lock = Lock()
 _dex_last_request_time = 0.0
 DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.12
-# فقط بعد از دریافت HTTP 429 فعال می‌شود؛ در حالت عادی سرعت رادار را تغییر نمی‌دهد.
+# Adaptive 429 protection: normal radar cadence is unchanged. A cooldown is
+# activated only after DexScreener explicitly returns HTTP 429.
 DEX_429_COOLDOWN_UNTIL = 0.0
 DEX_429_COOLDOWN_LOCK = Lock()
+DEX_429_COOLDOWN_MAX_SECONDS = 10.0
+
+def _dex_429_remaining():
+    try:
+        with DEX_429_COOLDOWN_LOCK:
+            return max(0.0, float(DEX_429_COOLDOWN_UNTIL) - time.time())
+    except Exception:
+        return 0.0
+
+def _dex_record_429(response, source):
+    global DEX_429_COOLDOWN_UNTIL
+    try:
+        retry_after = float((response.headers or {}).get("Retry-After", "1") or 1)
+    except (TypeError, ValueError):
+        retry_after = 1.0
+    retry_after = min(max(retry_after, 0.5), DEX_429_COOLDOWN_MAX_SECONDS)
+    with DEX_429_COOLDOWN_LOCK:
+        DEX_429_COOLDOWN_UNTIL = max(DEX_429_COOLDOWN_UNTIL, time.time() + retry_after)
+    logger.debug("DexScreener HTTP 429 (%s); adaptive cooldown %.1fs", source, retry_after)
+    return retry_after
 
 def _sentinel_ratio(buys, sells):
     return float(buys) / max(1.0, float(sells))
@@ -5850,7 +5863,7 @@ def _elite_get_market_tokens():
 
 def _fetch_best_solana_pairs_batch(token_addrs):
     """Fetch Solana pairs for up to 30 token addresses per DexScreener call."""
-    global _dex_batch_cache, _dex_batch_cache_time, _dex_last_request_time, DEX_429_COOLDOWN_UNTIL
+    global _dex_batch_cache, _dex_batch_cache_time, _dex_last_request_time
     clean = list(dict.fromkeys(str(x).strip() for x in token_addrs if x))
     if not clean:
         return {}
@@ -5866,12 +5879,10 @@ def _fetch_best_solana_pairs_batch(token_addrs):
     for i in range(0, len(missing), DEX_BATCH_SIZE):
         chunk = missing[i:i + DEX_BATCH_SIZE]
         try:
-            # فقط cooldown ناشی از 429 اعمال می‌شود؛ فاصله عادی 0.12s دست‌نخورده است.
-            with DEX_429_COOLDOWN_LOCK:
-                cooldown_left = DEX_429_COOLDOWN_UNTIL - time.time()
-            if cooldown_left > 0:
-                time.sleep(cooldown_left)
             # DexScreener accepts comma-separated token addresses on this endpoint.
+            # Normal radar spacing remains exactly as configured above.
+            if _dex_429_remaining() > 0:
+                continue
             with _dex_rate_lock:
                 wait = DEX_MIN_REQUEST_INTERVAL_SECONDS - (time.time() - _dex_last_request_time)
                 if wait > 0:
@@ -5880,11 +5891,7 @@ def _fetch_best_solana_pairs_batch(token_addrs):
                 res = http_session.get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
                 _dex_last_request_time = time.time()
             if res.status_code == 429:
-                retry_after = float(res.headers.get("Retry-After", "1") or 1)
-                retry_after = min(max(retry_after, 0.5), 10.0)
-                with DEX_429_COOLDOWN_LOCK:
-                    DEX_429_COOLDOWN_UNTIL = max(DEX_429_COOLDOWN_UNTIL, time.time() + retry_after)
-                logger.debug("DexScreener batch HTTP 429؛ cooldown %.1fs", retry_after)
+                _dex_record_429(res, "batch")
                 continue
             if res.status_code != 200:
                 logger.debug("DexScreener batch status=%s", res.status_code)
@@ -6217,6 +6224,52 @@ def _active_independent_engine_names():
     return active
 
 
+def _signal_quality_assessment(fusion):
+    """Additive signal-quality ranking using the exact learned pattern history.
+
+    Raw signal generation and all hard gates remain unchanged. This function only
+    scores an already-valid candidate for selection, comparing it with prior
+    closed outcomes for the same learned pattern. Low sample sizes never reject.
+    """
+    try:
+        candidate = fusion if isinstance(fusion, dict) else {}
+        meta = candidate.get("meta_learning") or _meta_evaluate(candidate)
+        pattern_key = str(candidate.get("pattern_key") or meta.get("pattern_key") or _meta_pattern_key(candidate))
+        sample = 0
+        wins = 0
+        avg_pnl = 0.0
+        with META_MEMORY_LOCK:
+            stats = META_MEMORY["pattern"].get(pattern_key)
+            if isinstance(stats, dict):
+                sample = max(0, int(stats.get("trades", 0) or 0))
+                wins = max(0, int(stats.get("wins", 0) or 0))
+                avg_pnl = float(stats.get("pnl_sum", 0.0) or 0.0) / sample if sample else 0.0
+        # Bayesian smoothing prevents a single lucky trade from dominating rank.
+        historical_wr = (wins + 2.0) / (sample + 4.0) if sample else 0.50
+        sample_confidence = min(1.0, math.log1p(sample) / math.log1p(30.0)) if sample else 0.0
+        pattern_bonus = _meta_clamp((historical_wr - 0.50) * 5.0 + _meta_clamp(avg_pnl, -5.0, 5.0) * 0.20, -3.0, 3.5)
+        meta_bonus = _meta_clamp(meta.get("rank_bonus", 0.0), -META_MAX_RANK_BONUS, META_MAX_RANK_BONUS)
+        # Exact-pattern history gets priority; broader meta evidence is secondary.
+        quality_bonus = _meta_clamp(pattern_bonus * sample_confidence * 0.80 + meta_bonus * 0.55, -3.5, 4.5)
+        quality_score = _meta_clamp(50.0 + quality_bonus * 10.0, 0.0, 100.0)
+        return {
+            "signal_quality_score": float(quality_score),
+            "signal_quality_bonus": float(quality_bonus),
+            "pattern_sample_size": int(sample),
+            "pattern_historical_win_rate": float(historical_wr),
+            "pattern_avg_pnl": float(avg_pnl),
+            "quality_confidence": float(sample_confidence),
+        }
+    except Exception:
+        return {
+            "signal_quality_score": 50.0,
+            "signal_quality_bonus": 0.0,
+            "pattern_sample_size": 0,
+            "pattern_historical_win_rate": 0.50,
+            "pattern_avg_pnl": 0.0,
+            "quality_confidence": 0.0,
+        }
+
 def _candidate_rank_tuple(item):
     """Selection-only rank; malformed values never kill candidate selection."""
     try:
@@ -6233,7 +6286,13 @@ def _candidate_rank_tuple(item):
                 return float(default)
         score = _rank_num(c.get("score"), 0.0)
         meta_bonus = _rank_num(c.get("meta_rank_bonus"), 0.0) if c.get("meta_rank_bonus") is not None else _meta_rank_bonus(c)
-        rank_score = _rank_num(c.get("rank_score"), score) + meta_bonus
+        sentinel_bonus = _rank_num(c.get("rank_bonus"), 0.0)
+        quality_bonus = _rank_num(c.get("signal_quality_bonus"), 0.0)
+        existing_rank = c.get("rank_score")
+        if existing_rank is None or existing_rank == "":
+            rank_score = score + meta_bonus + sentinel_bonus + quality_bonus
+        else:
+            rank_score = _rank_num(existing_rank, score)
         return (
             rank_score,
             score,
@@ -6274,6 +6333,7 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                     candidate["signal_prevalidated"] = True
                     candidate = _meta_attach(candidate)
                     candidate["meta_rank_bonus"] = float(candidate.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
+                    candidate.update(_signal_quality_assessment(candidate))
                     # Ranking is selection-only and can never invalidate the candidate.
                     candidate["rank_score"] = float(_candidate_rank_tuple((token_addr, candidate))[0])
                     result["analysis"].append((token_addr, candidate))
@@ -6296,6 +6356,7 @@ def _evaluate_token_for_active_modes(token_addr, pair_cache=None):
                 fusion = _meta_attach(fusion)
                 fusion["meta_rank_bonus"] = float(fusion.get("meta_learning", {}).get("rank_bonus", 0.0) or 0.0)
                 fusion["rank_bonus"] = _sentinel_rank_bonus(token_addr, fusion)
+                fusion.update(_signal_quality_assessment(fusion))
                 fusion["rank_score"] = float(_candidate_rank_tuple((token_addr, fusion))[0])
                 result["fusion"].append((token_addr, fusion))
         except Exception as exc:
@@ -6416,17 +6477,19 @@ def unified_market_scanner_loop(app):
     """
     global _TRUE_HUNTER_CURSOR, MASTER_SIGNAL_FIRE_NOW
     logger.info("%s / %s: CLEAN SIGNAL CORE started", UNIFIED_ENGINE_NAME, BOT_BUILD_VERSION)
-    radar_notice_key = "unified_radar_activation_notice_at"
-    radar_notice_cooldown = 7200.0
+    # Hosting platforms may restart the process. Persist only the notification
+    # timestamp so restarts do not spam Telegram; this does not affect the radar.
     try:
+        radar_notice_key = "unified_radar_activation_notice_at"
+        radar_notice_cooldown = 7200.0  # 2 hours
         last_notice = float(_get_bot_setting(radar_notice_key, "0") or 0)
-    except Exception:
-        last_notice = 0.0
-    if time.time() - last_notice >= radar_notice_cooldown:
-        if send_telegram_msg(f"🚀 رادار {BOT_BUILD_VERSION} فعال شد"):
-            _set_bot_setting(radar_notice_key, time.time())
-    else:
-        logger.debug("🔕 duplicate radar activation notice suppressed")
+        if time.time() - last_notice >= radar_notice_cooldown:
+            if send_telegram_msg(f"🚀 رادار {BOT_BUILD_VERSION} فعال شد"):
+                _set_bot_setting(radar_notice_key, time.time())
+        else:
+            logger.debug("Duplicate radar activation notice suppressed.")
+    except Exception as notice_error:
+        logger.debug("Radar activation notice guard error: %s", notice_error)
 
     def inc_audit(key, amount=1):
         try:
