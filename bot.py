@@ -4,14 +4,17 @@
 # تغییرات این نسخه فقط در رادار Wallet، کلیدهای آن، کشف Wallet و کپی واقعی است.
 # ============================================================
 # V17 TRUE HUNTER — verified architecture: independent lanes, MAX unified attack, rotating low-latency radar.
-# PositionGuard is normally supplied as a project module.
-# If Render deploys only this single bot.py, the fallback is installed below
-# after the standard imports are ready. An existing module is always preferred.
+# Optional external safety helper. Missing module must never abort the bot; the built-in Production Position Manager remains authoritative.
 try:
-    from position_guard import PositionGuard, register_position
-except ModuleNotFoundError:
+    from position_guard import PositionGuard
+    from position_guard import register_position as _position_guard_register_position
+    POSITION_GUARD_AVAILABLE = True
+    POSITION_GUARD_IMPORT_ERROR = ""
+except Exception as _position_guard_import_exc:
     PositionGuard = None
-    register_position = None
+    _position_guard_register_position = None
+    POSITION_GUARD_AVAILABLE = False
+    POSITION_GUARD_IMPORT_ERROR = f"{type(_position_guard_import_exc).__name__}: {_position_guard_import_exc}"
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +35,7 @@ VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "").strip()
 import sqlite3
 import threading
 import logging
+from collections import deque
 from datetime import datetime, timedelta
 from threading import Thread, Lock, RLock
 from requests.adapters import HTTPAdapter
@@ -52,297 +56,83 @@ logging.basicConfig(
 )
 logger = logging.getLogger("HulkSolBot")
 
-if PositionGuard is None:
-    # Standalone Render fallback: keeps the same PositionGuard/register_position
-    # interface when only bot.py is deployed.
-    from typing import Any, Callable, Dict, Optional
-
-    _pg_logger = logging.getLogger("PositionGuard")
-
-    BASE_DIR = Path(__file__).resolve().parent
-    STATE_FILE = BASE_DIR / "position_guard_state.json"
-    LOCK = threading.RLock()
-
-    _sell_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
-    _price_callback: Optional[Callable[[Dict[str, Any]], Optional[float]]] = None
-    _positions: Dict[str, Dict[str, Any]] = {}
-    _guard_thread: Optional[threading.Thread] = None
-    _stop_event = threading.Event()
-    _poll_seconds = 2.0
-    _trailing_enabled = True
-    _trailing_trigger = 8.0
-    _trailing_table = ()
-
-
-    def _safe_float(value: Any, default: float = 0.0) -> float:
-        try:
-            value = float(value)
-            return value if value == value else default
-        except (TypeError, ValueError):
-            return default
-
-
-    def _load_state() -> None:
-        global _positions
-        try:
-            if not STATE_FILE.exists():
-                return
-            raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return
-            loaded = raw.get("positions", raw)
-            if not isinstance(loaded, dict):
-                return
-            clean: Dict[str, Dict[str, Any]] = {}
-            for token, pos in loaded.items():
-                if isinstance(pos, dict) and str(token).strip():
-                    item = dict(pos)
-                    item["token"] = str(item.get("token") or token).strip()
-                    item["sell_in_progress"] = False
-                    clean[item["token"]] = item
-            _positions = clean
-        except Exception as exc:
-            _pg_logger.warning("PositionGuard state load failed: %s", exc)
-
-
-    def _save_state() -> None:
-        try:
-            tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
-            payload = {
-                "version": 1,
-                "updated_at": time.time(),
-                "positions": _positions,
-            }
-            tmp.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            tmp.replace(STATE_FILE)
-        except Exception as exc:
-            _pg_logger.warning("PositionGuard state save failed: %s", exc)
-
-
-    def register_position(
-        token: str,
-        side: str = "BUY",
-        entry_price: float = 0.0,
-        target_price: float = 0.0,
-        stop_price: float = -8.0,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        token = str(token or "").strip()
-        if not token:
-            return False
-
-        with LOCK:
-            old = _positions.get(token, {})
-            pos: Dict[str, Any] = dict(old)
-            pos.update({
-                "token": token,
-                "side": str(side or "BUY"),
-                "entry_price": _safe_float(entry_price),
-                # In this bot target_price/stop_price are PNL percentages,
-                # despite their legacy parameter names.
-                "target_pnl": _safe_float(target_price),
-                "stop_pnl": _safe_float(stop_price, -8.0),
-                "registered_at": old.get("registered_at", time.time()),
-                "sell_in_progress": False,
-                "highest_pnl": _safe_float(old.get("highest_pnl", 0.0)),
-                "locked_floor": _safe_float(
-                    old.get("locked_floor", stop_price),
-                    _safe_float(stop_price, -8.0),
-                ),
-            })
-            if metadata:
-                pos["metadata"] = dict(metadata)
-            _positions[token] = pos
-            _save_state()
-        return True
-
-
-    def unregister_position(token: str) -> bool:
-        token = str(token or "").strip()
-        if not token:
-            return False
-        with LOCK:
-            existed = token in _positions
-            _positions.pop(token, None)
-            if existed:
-                _save_state()
-            return existed
-
-
-    def get_positions() -> Dict[str, Dict[str, Any]]:
-        with LOCK:
-            return {k: dict(v) for k, v in _positions.items()}
-
-
-    def _trailing_floor(highest_pnl: float) -> float:
-        floor = 0.0
-        for row in _trailing_table or ():
-            try:
-                trigger, lock_floor = row[0], row[1]
-                if highest_pnl >= float(trigger):
-                    floor = max(floor, float(lock_floor))
-            except (TypeError, ValueError, IndexError):
-                continue
-        if highest_pnl >= 1000.0:
-            steps = int((highest_pnl - 1000.0) // 50.0)
-            floor = max(floor, 995.0 + steps * 50.0)
-        return floor
-
-
-    def _evaluate(token: str, position: Dict[str, Any]) -> None:
-        if not _price_callback:
-            return
-
-        try:
-            price = _price_callback(dict(position))
-            price = _safe_float(price)
-            entry = _safe_float(position.get("entry_price"))
-            if price <= 0 or entry <= 0:
-                return
-
-            pnl = (price - entry) / entry * 100.0
-            with LOCK:
-                current = _positions.get(token)
-                if not current or current.get("sell_in_progress"):
-                    return
-
-                highest = max(_safe_float(current.get("highest_pnl")), pnl)
-                current["highest_pnl"] = highest
-                current["last_price"] = price
-                current["last_pnl"] = pnl
-                current["last_check_at"] = time.time()
-
-                stop_pnl = _safe_float(current.get("stop_pnl"), -8.0)
-                floor = _safe_float(current.get("locked_floor"), stop_pnl)
-
-                # The hard SL remains active until the first trailing trigger.
-                if _trailing_enabled and highest >= _trailing_trigger:
-                    floor = max(floor, _trailing_floor(highest))
-                else:
-                    floor = stop_pnl
-
-                current["locked_floor"] = floor
-                effective_floor = max(stop_pnl, floor)
-                target_pnl = _safe_float(current.get("target_pnl"), 0.0)
-
-                # Exit condition: hard/trailing floor or explicit TP.
-                should_sell = pnl <= effective_floor
-                reason = "POSITION_GUARD_SL"
-                if target_pnl > 0 and pnl >= target_pnl:
-                    should_sell = True
-                    reason = "POSITION_GUARD_TP"
-                elif _trailing_enabled and highest >= _trailing_trigger and pnl <= floor:
-                    should_sell = True
-                    reason = "POSITION_GUARD_TRAILING"
-
-                if not should_sell:
-                    _save_state()
-                    return
-
-                current["sell_in_progress"] = True
-                current["exit_reason"] = reason
-                current["exit_price"] = price
-                current["exit_pnl"] = pnl
-                _save_state()
-
-            # IMPORTANT: this callback is outside the guard lock and is not put
-            # behind any DexScreener/network data limiter by this module.
-            result = _sell_callback(dict(current)) if _sell_callback else False
-
-            success = bool(result)
-            with LOCK:
-                latest = _positions.get(token)
-                if success:
-                    _positions.pop(token, None)
-                    _save_state()
-                    _pg_logger.info("PositionGuard SELL confirmed token=%s reason=%s", token, reason)
-                elif latest:
-                    latest["sell_in_progress"] = False
-                    latest["last_sell_failed_at"] = time.time()
-                    latest["last_sell_result"] = str(result)
-                    _save_state()
-                    _pg_logger.warning("PositionGuard SELL not confirmed token=%s result=%s", token, result)
-
-        except Exception as exc:
-            with LOCK:
-                current = _positions.get(token)
-                if current:
-                    current["sell_in_progress"] = False
-                    current["last_error"] = f"{type(exc).__name__}:{exc}"
-                    current["last_error_at"] = time.time()
-                    _save_state()
-            _pg_logger.exception("PositionGuard evaluation failed token=%s", token)
-
-
-    def _loop() -> None:
-        _pg_logger.info("PositionGuard monitor loop started")
-        while not _stop_event.is_set():
-            try:
-                snapshot = get_positions()
-                for token, position in snapshot.items():
-                    if _stop_event.is_set():
-                        break
-                    _evaluate(token, position)
-            except Exception as exc:
-                _pg_logger.exception("PositionGuard loop error: %s", exc)
-            _stop_event.wait(max(0.25, _poll_seconds))
-        _pg_logger.info("PositionGuard monitor loop stopped")
-
-
-    class PositionGuard:
-        def __init__(
-            self,
-            sell_callback: Callable[[Dict[str, Any]], Any],
-            price_callback: Callable[[Dict[str, Any]], Optional[float]],
-            poll_seconds: float = 2.0,
-            trailing_enabled: bool = True,
-            trailing_trigger: float = 8.0,
-            trailing_table=(),
-        ) -> None:
-            global _sell_callback, _price_callback, _poll_seconds
-            global _trailing_enabled, _trailing_trigger, _trailing_table
-
-            _sell_callback = sell_callback
-            _price_callback = price_callback
-            _poll_seconds = max(0.25, _safe_float(poll_seconds, 2.0))
-            _trailing_enabled = bool(trailing_enabled)
-            _trailing_trigger = _safe_float(trailing_trigger, 8.0)
-            _trailing_table = tuple(trailing_table or ())
-            _load_state()
-            self._started = False
-
-        def start(self) -> "PositionGuard":
-            global _guard_thread
-            with LOCK:
-                if _guard_thread is not None and _guard_thread.is_alive():
-                    self._started = True
-                    return self
-                _stop_event.clear()
-                _guard_thread = threading.Thread(
-                    target=_loop,
-                    name="PositionGuard",
-                    daemon=True,
-                )
-                _guard_thread.start()
-                self._started = True
-            return self
-
-        def stop(self) -> None:
-            _stop_event.set()
-            self._started = False
-
-        @property
-        def is_running(self) -> bool:
-            return bool(_guard_thread and _guard_thread.is_alive())
-
-
 # قفل‌های همزمانی برای ایمنی کامل در ثردها (Thread Safety)
 db_lock = RLock()
 state_lock = Lock()
 rpc_lock = Lock()
+
+# ============================================================
+# RUNTIME ERROR CENTER — additive, warning/error audit only
+# ============================================================
+RUNTIME_ERROR_BUFFER_MAX = 120
+RUNTIME_ERROR_DEDUPE_SECONDS = 60.0
+RUNTIME_ERROR_TEXT_MAX = 700
+RUNTIME_ERROR_DETAILS_MAX = 1200
+_RUNTIME_ERROR_LOCK = threading.RLock()
+_RUNTIME_ERROR_WRITE_LOCK = threading.Lock()
+_RUNTIME_ERROR_BUFFER = deque(maxlen=RUNTIME_ERROR_BUFFER_MAX)
+_RUNTIME_ERROR_LAST_SEEN = {}
+RUNTIME_ERROR_LAST = {}
+
+def _runtime_error_sanitize(value, limit=RUNTIME_ERROR_TEXT_MAX):
+    try:
+        return str(value or "").replace(chr(0), " ").strip()[:limit]
+    except Exception:
+        return ""
+
+def _runtime_error_record(source, level, message, details=""):
+    global RUNTIME_ERROR_LAST
+    try:
+        now = time.time()
+        source = _runtime_error_sanitize(source, 80) or "runtime"
+        level = _runtime_error_sanitize(level, 16).upper() or "ERROR"
+        message = _runtime_error_sanitize(message) or "unknown error"
+        details = _runtime_error_sanitize(details, RUNTIME_ERROR_DETAILS_MAX)
+        key = f"{source}|{level}|{message}"
+        with _RUNTIME_ERROR_LOCK:
+            last = float(_RUNTIME_ERROR_LAST_SEEN.get(key, 0.0) or 0.0)
+            event = {"at": now, "level": level, "source": source, "message": message, "details": details}
+            RUNTIME_ERROR_LAST = event
+            if now - last < RUNTIME_ERROR_DEDUPE_SECONDS:
+                return False
+            _RUNTIME_ERROR_LAST_SEEN[key] = now
+            _RUNTIME_ERROR_BUFFER.appendleft(event)
+        try:
+            with _RUNTIME_ERROR_WRITE_LOCK:
+                conn = sqlite3.connect("bot_analytics.db", timeout=10.0, check_same_thread=False)
+                conn.execute("""CREATE TABLE IF NOT EXISTS runtime_error_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_at REAL NOT NULL,
+                    level TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    details TEXT NOT NULL DEFAULT ''
+                )""")
+                conn.execute("INSERT INTO runtime_error_events(event_at,level,source,message,details) VALUES(?,?,?,?,?)", (now, level, source, message, details))
+                conn.commit(); conn.close()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+class _RuntimeErrorLogHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            if record.levelno < logging.WARNING:
+                return
+            details = ""
+            if record.exc_info:
+                try:
+                    details = f"{record.exc_info[0].__name__}: {record.exc_info[1]}"
+                except Exception:
+                    details = "exception details unavailable"
+            _runtime_error_record(getattr(record, "name", "root"), record.levelname, record.getMessage(), details)
+        except Exception:
+            pass
+
+_RUNTIME_ERROR_HANDLER = _RuntimeErrorLogHandler()
+logging.getLogger().addHandler(_RUNTIME_ERROR_HANDLER)
 
 # ایجاد جلسه ارتباطی پرسرعت با قابلیت Re-use اتصالات و ریتراپ
 http_session = requests.Session()
@@ -350,6 +140,81 @@ retries = Retry(total=2, backoff_factor=0.1, status_forcelist=[500, 502, 503, 50
 adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=retries)
 http_session.mount("https://", adapter)
 http_session.mount("http://", adapter)
+
+# ============================================================
+# DEXSCREENER RATE-LIMIT GATE — shared by every worker
+# ============================================================
+DEX_REQUEST_TIMEOUT_DEFAULT = 5.0
+DEX_429_BACKOFF_MIN_SECONDS = 2.0
+DEX_429_BACKOFF_MAX_SECONDS = 30.0
+DEX_429_LOG_COOLDOWN_SECONDS = 60.0
+_dex_429_count = 0
+_dex_request_count = 0
+_dex_failure_count = 0
+_dex_last_error = ""
+_dex_shared_cooldown_until = 0.0
+_dex_last_429_at = 0.0
+_dex_last_429_log_at = 0.0
+
+def _dex_get(url, timeout=DEX_REQUEST_TIMEOUT_DEFAULT, **kwargs):
+    global _dex_429_count, _dex_request_count, _dex_failure_count
+    global _dex_last_error, _dex_shared_cooldown_until, _dex_last_429_at, _dex_last_429_log_at
+    try:
+        now = time.time()
+        with _dex_rate_lock:
+            cooldown_until = float(_dex_shared_cooldown_until or 0.0)
+            if now < cooldown_until:
+                left = max(0.0, cooldown_until - now)
+                _dex_last_error = f"RATE_COOLDOWN:{left:.1f}s"
+                _diag_runtime_external_error("DexScreener", "RATE_COOLDOWN", _dex_last_error)
+                return None
+            min_interval = max(0.35, float(globals().get("DEX_MIN_REQUEST_INTERVAL_SECONDS", 0.5) or 0.5))
+            wait = min_interval - (time.time() - float(globals().get("_dex_last_request_time", 0.0) or 0.0))
+            if wait > 0:
+                time.sleep(wait)
+            last_response = None
+            for attempt in range(2):
+                _dex_request_count += 1
+                try:
+                    response = http_session.get(url, timeout=timeout, **kwargs)
+                    last_response = response
+                    globals()["_dex_last_request_time"] = time.time()
+                except Exception as exc:
+                    _dex_failure_count += 1
+                    _dex_last_error = f"{type(exc).__name__}: {exc}"
+                    _diag_runtime_external_error("DexScreener", "REQUEST_ERROR", _dex_last_error)
+                    return None
+                if response.status_code != 429:
+                    if response.status_code >= 400:
+                        _dex_failure_count += 1
+                        _dex_last_error = f"HTTP {response.status_code}"
+                        _diag_runtime_external_error("DexScreener", "HTTP_ERROR", _dex_last_error)
+                    return response
+                _dex_429_count += 1
+                _dex_last_429_at = time.time()
+                retry_raw = response.headers.get("Retry-After", "")
+                try:
+                    retry_after = float(retry_raw) if retry_raw else DEX_429_BACKOFF_MIN_SECONDS * (2 ** attempt)
+                except (TypeError, ValueError):
+                    retry_after = DEX_429_BACKOFF_MIN_SECONDS * (2 ** attempt)
+                retry_after = min(DEX_429_BACKOFF_MAX_SECONDS, max(DEX_429_BACKOFF_MIN_SECONDS, retry_after))
+                _dex_shared_cooldown_until = time.time() + retry_after
+                _dex_last_error = f"HTTP 429; cooldown={retry_after:.1f}s"
+                now_429 = time.time()
+                if now_429 - _dex_last_429_log_at >= DEX_429_LOG_COOLDOWN_SECONDS:
+                    _dex_last_429_log_at = now_429
+                    logger.warning("⚠️ DexScreener HTTP 429؛ shared cooldown %.1fs اعمال شد؛ هشدارهای تکراری مهار شدند.", retry_after)
+                _diag_runtime_external_error("DexScreener", "HTTP_429", _dex_last_error)
+                if attempt == 0:
+                    time.sleep(retry_after)
+                    continue
+                return last_response
+            return last_response
+    except Exception as exc:
+        _dex_failure_count += 1
+        _dex_last_error = f"{type(exc).__name__}: {exc}"
+        _diag_runtime_external_error("DexScreener", "HELPER_ERROR", _dex_last_error)
+        return None
 
 # کارهای سنگین بازار از اسکنر جدا می‌شوند تا Telegram سریع بماند.
 SIGNAL_EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="SignalExec")
@@ -809,6 +674,16 @@ def neon_sqlite_snapshot_loop():
 
 # ========================================================================
 
+def _diag_runtime_external_error(source, reason, details=""):
+    try:
+        _runtime_error_record(source, "WARNING", reason, details)
+        diag = globals().get("V13_SIGNAL_DIAGNOSTICS")
+        if isinstance(diag, dict):
+            diag["last_error"] = _runtime_error_sanitize(f"{source}: {reason}: {details}", 500)
+    except Exception:
+        pass
+
+
 def init_db():
     with db_lock:
         try:
@@ -851,6 +726,17 @@ def init_db():
                     cursor.execute(f"ALTER TABLE subscribers ADD COLUMN {col} {definition}")
                 except sqlite3.OperationalError:
                     pass
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS runtime_error_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_at REAL NOT NULL,
+                    level TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    details TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_runtime_error_events_at ON runtime_error_events(event_at DESC)")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS ai_learning_params (
                     param_name TEXT PRIMARY KEY,
@@ -1232,9 +1118,16 @@ def _update_adaptive_learning(conn=None):
             if profit_factor < 1.00:
                 bonus += 1
                 ratio_bonus += 0.05
-            # Strong profitability does not relax the original hard gates.
-            bonus = min(3, bonus)
-            ratio_bonus = min(0.15, ratio_bonus)
+            if len(rows) >= PROFIT_PROTECTION_MIN_SAMPLE and (
+                wr < PROFIT_PROTECTION_TARGET_WR or
+                avg_pnl <= 0.0 or
+                profit_factor < PROFIT_PROTECTION_TARGET_PF
+            ):
+                bonus += PROFIT_PROTECTION_EXTRA_SCORE
+                ratio_bonus += PROFIT_PROTECTION_EXTRA_RATIO
+            # Strong profitability never relaxes the original hard gates.
+            bonus = min(4, bonus)
+            ratio_bonus = min(0.20, ratio_bonus)
 
         cur.execute(
             "INSERT OR REPLACE INTO ai_learning_params(param_name,param_value) VALUES('adaptive_win_rate',?)",
@@ -1565,6 +1458,10 @@ def check_social_sentiment_and_hype(pair):
         return True, "گذر از فیلتر سنتیمنت"
 
 def get_real_market_trending_tokens():
+    global _MARKET_DISCOVERY_CACHE, _MARKET_DISCOVERY_CACHE_AT
+    with _MARKET_DISCOVERY_CACHE_LOCK:
+        if time.time() - float(_MARKET_DISCOVERY_CACHE_AT or 0.0) < DEX_MARKET_DISCOVERY_CACHE_TTL_SECONDS:
+            return list(_MARKET_DISCOVERY_CACHE)
     tokens = []
     endpoints = [
         "https://api.dexscreener.com/token-boosts/top/v1",
@@ -1590,7 +1487,7 @@ def get_real_market_trending_tokens():
 
     def fetch_endpoint(url):
         try:
-            res_obj = _dex_http_get(url, timeout=4, priority=False)
+            res_obj = _dex_get(url, timeout=4)
             if res_obj.status_code != 200:
                 return []
             res = res_obj.json()
@@ -1619,7 +1516,10 @@ def get_real_market_trending_tokens():
                 if addr not in tokens:
                     tokens.append(addr)
 
-    return tokens
+    with _MARKET_DISCOVERY_CACHE_LOCK:
+        _MARKET_DISCOVERY_CACHE = list(dict.fromkeys(tokens))
+        _MARKET_DISCOVERY_CACHE_AT = time.time()
+    return list(_MARKET_DISCOVERY_CACHE)
 
 def ultra_accuracy_scanner_loop(app):
     global SMART_MONEY_COPY_ENABLED, SOCIAL_SENTIMENT_ENABLED, DYNAMIC_TRAILING_TP_ENABLED
@@ -1639,8 +1539,8 @@ def ultra_accuracy_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in ultra_processed_tokens:
                         continue
 
-                pair_res_obj = _dex_http_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3, priority=False)
-                if pair_res_obj.status_code != 200:
+                pair_res_obj = _dex_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
+                if pair_res_obj is None or pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
                 if not pair_res.get('pairs'):
@@ -1723,8 +1623,8 @@ def mempool_smart_money_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in mempool_processed_tokens:
                         continue
                 
-                pair_res_obj = _dex_http_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3, priority=False)
-                if pair_res_obj.status_code != 200:
+                pair_res_obj = _dex_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
+                if pair_res_obj is None or pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
                 if not pair_res.get('pairs'):
@@ -3614,7 +3514,7 @@ def _promote_signal_to_real(token_addr, buy_signature=""):
 
     # ثبت مستقل پوزیشن واقعی برای PositionGuard
     try:
-        register_position(
+        _register_position_guard_position(
             token=token_addr,
             side="BUY",
             entry_price=float(pos.get("entry_price", 0) or 0),
@@ -4146,8 +4046,8 @@ def technical_analysis_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
                         continue
 
-                pair_res_obj = _dex_http_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3, priority=False)
-                if pair_res_obj.status_code != 200:
+                pair_res_obj = _dex_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
+                if pair_res_obj is None or pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
                 if not pair_res.get('pairs'):
@@ -4279,6 +4179,14 @@ ADAPTIVE_LOOKBACK = 20
 ADAPTIVE_MIN_SAMPLE = 10
 ADAPTIVE_MAX_SCORE_BONUS = 2
 ADAPTIVE_MAX_RATIO_BONUS = 0.10
+# Profit-protection targets guide stricter entries from real closed outcomes;
+# they are targets, not guarantees of live performance.
+PROFIT_PROTECTION_TARGET_WR = 80.0
+PROFIT_PROTECTION_TARGET_PF = 1.25
+PROFIT_PROTECTION_MIN_SAMPLE = 30
+PROFIT_PROTECTION_EXTRA_SCORE = 1
+PROFIT_PROTECTION_EXTRA_RATIO = 0.05
+MIN_REWARD_RISK_RATIO = 2.0
 consensus_last_signal = {}
 
 # ==========================================================
@@ -4392,65 +4300,17 @@ _sentinel_lock = Lock()
 # the short-lived batch cache during the same radar sweep. This avoids one HTTP
 # request per token and reduces 429 pressure without weakening market gates.
 DEX_BATCH_SIZE = 30
-DEX_BATCH_CACHE_TTL_SECONDS = 6.0
+DEX_BATCH_CACHE_TTL_SECONDS = 4.0
 _dex_batch_cache = {}
-_dex_batch_cache_time_by_token = {}
+_dex_batch_cache_time = 0.0
 _dex_batch_lock = RLock()
 _dex_rate_lock = Lock()
 _dex_last_request_time = 0.0
-_dex_next_request_at = 0.0
-_dex_global_cooldown_until = 0.0
-_dex_429_streak = 0
 DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.50
-DEX_MAX_GLOBAL_COOLDOWN_SECONDS = 30.0
-
-def _dex_http_get(url, timeout=4, priority=False):
-    """
-    Single gate for every DexScreener HTTP GET.
-
-    priority=True gives the caller the next available slot, but NEVER bypasses
-    a global 429 cooldown. Real BUY/SELL execution does not call this function.
-    """
-    global _dex_last_request_time, _dex_next_request_at
-    global _dex_global_cooldown_until, _dex_429_streak
-
-    while True:
-        with _dex_rate_lock:
-            now = time.time()
-            wait_until = max(_dex_next_request_at, _dex_global_cooldown_until)
-            wait = wait_until - now
-            if wait <= 0:
-                _dex_next_request_at = now + max(0.05, float(DEX_MIN_REQUEST_INTERVAL_SECONDS))
-                break
-        time.sleep(min(max(wait, 0.05), 1.0))
-
-    try:
-        response = http_session.get(url, timeout=timeout)
-    except Exception:
-        with _dex_rate_lock:
-            _dex_next_request_at = max(_dex_next_request_at, time.time() + 0.25)
-        raise
-
-    finished = time.time()
-    with _dex_rate_lock:
-        _dex_last_request_time = finished
-        if response.status_code == 429:
-            _dex_429_streak = min(_dex_429_streak + 1, 6)
-            try:
-                retry_after = float(response.headers.get("Retry-After", "0") or 0)
-            except (TypeError, ValueError):
-                retry_after = 0.0
-            exponential = min(DEX_MAX_GLOBAL_COOLDOWN_SECONDS, 2.0 ** _dex_429_streak)
-            cooldown = min(DEX_MAX_GLOBAL_COOLDOWN_SECONDS, max(2.0, retry_after, exponential))
-            _dex_global_cooldown_until = max(_dex_global_cooldown_until, finished + cooldown)
-            _dex_next_request_at = max(_dex_next_request_at, _dex_global_cooldown_until)
-            logger.warning(
-                "⚠️ DexScreener HTTP 429; global data-fetch cooldown %.1fs (priority=%s)",
-                cooldown, priority
-            )
-        else:
-            _dex_429_streak = 0
-    return response
+DEX_MARKET_DISCOVERY_CACHE_TTL_SECONDS = 8.0
+_MARKET_DISCOVERY_CACHE = []
+_MARKET_DISCOVERY_CACHE_AT = 0.0
+_MARKET_DISCOVERY_CACHE_LOCK = RLock()
 
 def _sentinel_ratio(buys, sells):
     return float(buys) / max(1.0, float(sells))
@@ -4853,6 +4713,8 @@ def fusion_quality_gate(fusion):
             try:
                 enabled_count = len(fusion.get("engines") or fusion.get("votes") or [])
                 learned_score_min, _learned_ratio, sample, learned_wr = _get_live_adaptive_gate(enabled_count or 1)
+                if sample >= ADAPTIVE_MIN_SAMPLE:
+                    fusion["adaptive_gate_ratio_min"] = float(_learned_ratio)
                 if sample >= ADAPTIVE_MIN_SAMPLE and learned_score_min > CONSENSUS_MIN_SCORE:
                     fusion["adaptive_gate_score_min"] = learned_score_min
                     fusion["adaptive_gate_sample"] = sample
@@ -4869,6 +4731,19 @@ def fusion_quality_gate(fusion):
             fusion["auto_improvement_reason"] = auto_reason
         if score < max(float(CONSENSUS_MIN_SCORE), learned_score_min):
             return False
+        learned_ratio_min = float(locals().get("_learned_ratio", CONSENSUS_MIN_RATIO) or CONSENSUS_MIN_RATIO)
+        buy_ratio = buys / max(1, sells)
+        if sells > 0 and buy_ratio < max(float(CONSENSUS_MIN_BUY_RATIO), learned_ratio_min):
+            _diag_reject("QUALITY_GATE", "LEARNED_BUY_RATIO_REJECT", str(fusion.get("token", "")))
+            return False
+        try:
+            tp = float(fusion.get("tp", 0) or 0)
+            sl = abs(float(fusion.get("sl", 0) or 0))
+            if tp > 0 and sl > 0 and (tp / sl) < MIN_REWARD_RISK_RATIO:
+                _diag_reject("QUALITY_GATE", "REWARD_RISK_TOO_LOW", str(fusion.get("token", "")))
+                return False
+        except Exception:
+            pass
         if not _meta_quality_allowed(fusion):
             return False
         return True
@@ -5985,7 +5860,6 @@ def _restore_open_positions():
         # Re-register recovered REAL positions in the independent PositionGuard.
         # This restores protection after process/restart without changing BUY/SELL engines.
         try:
-    
             guard_registered = 0
 
             with state_lock:
@@ -5999,7 +5873,7 @@ def _restore_open_positions():
 
             for token_addr, pos in recovered_real:
                 try:
-                    register_position(
+                    guard_ok = _register_position_guard_position(
                         token=token_addr,
                         side="BUY",
                         entry_price=float(pos.get("entry_price", 0) or 0),
@@ -6014,11 +5888,12 @@ def _restore_open_positions():
                             "recovered_after_restart": True,
                         },
                     )
-                    guard_registered += 1
-                    logger.info(
-                        "POSITION_GUARD RE-REGISTERED RECOVERED REAL token=%s",
-                        token_addr,
-                    )
+                    if guard_ok:
+                        guard_registered += 1
+                        logger.info(
+                            "POSITION_GUARD RE-REGISTERED RECOVERED REAL token=%s",
+                            token_addr,
+                        )
                 except Exception as guard_item_error:
                     logger.exception(
                         "POSITION_GUARD re-registration failed token=%s: %s",
@@ -6176,38 +6051,33 @@ def _elite_get_market_tokens():
 
 def _fetch_best_solana_pairs_batch(token_addrs):
     """Fetch Solana pairs for up to 30 token addresses per DexScreener call."""
+    global _dex_batch_cache, _dex_batch_cache_time, _dex_last_request_time
     clean = list(dict.fromkeys(str(x).strip() for x in token_addrs if x))
     if not clean:
         return {}
-
     result = {}
     now = time.time()
     with _dex_batch_lock:
-        missing = []
-        for addr in clean:
-            cached_at = float(_dex_batch_cache_time_by_token.get(addr, 0.0) or 0.0)
-            if addr in _dex_batch_cache and now - cached_at <= DEX_BATCH_CACHE_TTL_SECONDS:
-                result[addr] = _dex_batch_cache[addr]
-            else:
-                missing.append(addr)
+        if now - _dex_batch_cache_time <= DEX_BATCH_CACHE_TTL_SECONDS:
+            for addr in clean:
+                if addr in _dex_batch_cache:
+                    result[addr] = _dex_batch_cache[addr]
+        missing = [a for a in clean if a not in result]
 
     for i in range(0, len(missing), DEX_BATCH_SIZE):
         chunk = missing[i:i + DEX_BATCH_SIZE]
         try:
-            url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk)
-            res = _dex_http_get(
-                url,
-                timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0,
-                priority=False,
-            )
-            if res.status_code == 429:
-                # The centralized gate has already installed the global cooldown.
-                # Do not create a second independent sleep/retry loop here.
-                continue
-            if res.status_code != 200:
+            # DexScreener accepts comma-separated token addresses on this endpoint.
+            with _dex_rate_lock:
+                wait = DEX_MIN_REQUEST_INTERVAL_SECONDS - (time.time() - _dex_last_request_time)
+                if wait > 0:
+                    time.sleep(wait)
+                url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk)
+                res = _dex_get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
+                _dex_last_request_time = time.time()
+            if res is None or res.status_code != 200:
                 logger.debug("DexScreener batch status=%s", res.status_code)
                 continue
-
             data = res.json() or {}
             grouped = {addr: [] for addr in chunk}
             for pair in data.get("pairs") or []:
@@ -6216,21 +6086,15 @@ def _fetch_best_solana_pairs_batch(token_addrs):
                 base = ((pair.get("baseToken") or {}).get("address") or "").strip()
                 if base in grouped:
                     grouped[base].append(pair)
-
-            fetched_at = time.time()
-            with _dex_batch_lock:
-                for addr, pairs in grouped.items():
-                    pairs.sort(
-                        key=lambda x: float(((x.get("liquidity") or {}).get("usd")) or 0),
-                        reverse=True,
-                    )
-                    trimmed = pairs[:3]
-                    _dex_batch_cache[addr] = trimmed
-                    _dex_batch_cache_time_by_token[addr] = fetched_at
-                    result[addr] = trimmed
+            for addr, pairs in grouped.items():
+                pairs.sort(key=lambda x: float(((x.get("liquidity") or {}).get("usd")) or 0), reverse=True)
+                result[addr] = pairs[:3]
         except Exception as e:
             logger.debug("DexScreener batch fetch error: %s", e)
 
+    with _dex_batch_lock:
+        _dex_batch_cache = dict(result)
+        _dex_batch_cache_time = time.time()
     return result
 
 def _fetch_best_solana_pair(token_addr):
@@ -8753,6 +8617,75 @@ _pro_wallet_load_switches()
 # =====================================================================
 
 
+def _runtime_error_center_text(limit=10):
+    try:
+        now = time.time()
+        rows = []
+        try:
+            with _RUNTIME_ERROR_WRITE_LOCK:
+                conn = sqlite3.connect("bot_analytics.db", timeout=5.0, check_same_thread=False)
+                rows = conn.execute(
+                    "SELECT event_at,level,source,message,details FROM runtime_error_events ORDER BY id DESC LIMIT ?",
+                    (int(max(1, min(20, limit))),),
+                ).fetchall()
+                conn.close()
+        except Exception:
+            rows = []
+        with _RUNTIME_ERROR_LOCK:
+            memory_rows = list(_RUNTIME_ERROR_BUFFER)[:max(1, min(20, limit))]
+        events = ([
+            {"at": float(r[0]), "level": r[1], "source": r[2], "message": r[3], "details": r[4]}
+            for r in rows
+        ] if rows else memory_rows)
+        pg_state = "🟢 ماژول متصل" if POSITION_GUARD_AVAILABLE else "🟡 ماژول اختیاری موجود نیست؛ مدیر پوزیشن داخلی فعال است"
+        dex_cooldown = max(0.0, float(globals().get("_dex_shared_cooldown_until", 0.0) or 0.0) - now)
+        neon_ok = bool(NEON_DATABASE_URL and psycopg2 is not None)
+        hb_age = max(0, int(now - float(POSITION_MONITOR_HEARTBEAT or now)))
+        lines = [
+            "🚨 خطایاب — مرکز خطاهای ربات",
+            "━━━━━━━━━━━━━━━━━━",
+            f"🛡 PositionGuard: {pg_state}",
+            f"📡 DexScreener: درخواست={globals().get('_dex_request_count', 0)} | 429={globals().get('_dex_429_count', 0)} | cooldown={dex_cooldown:.1f}s",
+            f"☁️ Neon: {'🟢 فعال' if neon_ok else '🟡 تنظیم‌نشده/غیرفعال'} | Snapshot={'🟢' if NEON_SNAPSHOT_RUNNING else '⚪'}",
+            f"🛡️ Position Monitor: errors={POSITION_MONITOR_ERRORS} | heartbeat={hb_age}s",
+        ]
+        if POSITION_GUARD_IMPORT_ERROR:
+            lines.append(f"⚠️ خطای PositionGuard: {_runtime_error_sanitize(POSITION_GUARD_IMPORT_ERROR, 220)}")
+        if _dex_last_error:
+            lines.append(f"⚠️ آخرین خطای Dex: {_runtime_error_sanitize(_dex_last_error, 220)}")
+        lines.append("")
+        lines.append("📋 آخرین WARNING/ERROR های داخل برنامه:")
+        if events:
+            for ev in events[:10]:
+                age = max(0, int(now - float(ev.get("at", now) or now)))
+                details = _runtime_error_sanitize(ev.get("details", ""), 170)
+                suffix = f" | {details}" if details else ""
+                lines.append(
+                    f"• [{ev.get('level', '?')}] {ev.get('source', 'runtime')} | {age}s قبل | "
+                    f"{_runtime_error_sanitize(ev.get('message', ''), 250)}{suffix}"
+                )
+        else:
+            lines.append("✅ خطای WARNING/ERROR ثبت‌شده‌ای وجود ندارد.")
+        diag = globals().get("V13_SIGNAL_DIAGNOSTICS") or {}
+        lines += [
+            "",
+            f"🧠 Pipeline: مانع={_runtime_error_sanitize(diag.get('last_blocker', '—'), 180)} | مرحله={_runtime_error_sanitize(diag.get('last_stage', '—'), 80)}",
+            "ℹ️ این مرکز خطاهای داخل process را جمع می‌کند؛ پیام‌های سطح خود Render که وارد برنامه نمی‌شوند فقط از داشبورد Render قابل مشاهده‌اند.",
+        ]
+        return "\n".join(lines)[:3900]
+    except Exception as exc:
+        return f"🚨 خطایاب\n\nساخت گزارش ناموفق بود: {type(exc).__name__}: {exc}"
+
+
+def _runtime_error_center_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 بروزرسانی خطایاب", callback_data="error_center")],
+        [InlineKeyboardButton("🩺 جزئیات Pipeline", callback_data="v12_real_audit")],
+        [InlineKeyboardButton("🪟 شیشه تنظیمات", callback_data="signal_glass")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")],
+    ])
+
+
 def _stats_inline_keyboard(is_admin=False):
     rows = []
     if is_admin:
@@ -8770,6 +8703,7 @@ def _main_keyboard(is_admin=False):
             f"🔘 سیگنال BUY/SELL: {'🟢 ON' if MASTER_SIGNAL_ENABLED else '🔴 OFF'}",
             callback_data="toggle_master_signal"
         )])
+        rows.append([InlineKeyboardButton("🚨 خطایاب", callback_data="error_center")])
         rows.append([InlineKeyboardButton(
             f"🩺 عیب‌یابی سیگنال: {'🟢 ON' if MASTER_DIAGNOSTIC_ENABLED else '🔴 OFF'}",
             callback_data="toggle_master_diagnostic"
@@ -9479,6 +9413,12 @@ def start_telegram_bot():
             _security_audit_telegram_update(update)
             q=update.callback_query; await q.answer(); cid=str(q.from_user.id); is_admin=bool(TELEGRAM_CHAT_ID and cid==str(TELEGRAM_CHAT_ID)); data=q.data
             if data=="home": await q.edit_message_text("🤖⚡ **هالک AI — مرکز ربات هوشمند ترید**\n\n🔘 سیگنال اصلی: %s\n🩺 عیب‌یابی سیگنال: %s\n👑 MAX FUSION: %s\n⚡ اتحاد هالک: %s\n🧠 سیستم پیشرفته: %s\n🛑 توقف اضطراری: %s" % ("🟢 ON" if MASTER_SIGNAL_ENABLED else "🔴 OFF", "🟢 ON" if MASTER_DIAGNOSTIC_ENABLED else "🔴 OFF", "🟢 ON" if MAX_FUSION_ENABLED else "🔴 OFF", "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if SYNCHRONIZED_MODE else "🔴 OFF"), "🔒 🟢 ON" if MAX_FUSION_ENABLED else ("🟢 ON" if ADVANCED_AI_ENABLED else "🔴 OFF"), "🔴 فعال" if EMERGENCY_STOP else "🟢 آماده"),reply_markup=_main_keyboard(is_admin),parse_mode="Markdown")
+            elif data == "error_center":
+                if not is_admin:
+                    await q.edit_message_text("⛔ این بخش فقط برای ادمین است.", reply_markup=_main_keyboard(False))
+                    return
+                await q.edit_message_text(_runtime_error_center_text(), reply_markup=_runtime_error_center_keyboard())
+                return
             elif data == "toggle_master_signal":
                 if not is_admin:
                     await q.edit_message_text("⛔ این کلید فقط برای ادمین است.", reply_markup=_main_keyboard(False))
@@ -10585,6 +10525,119 @@ def learning_record_exit(token_addr, position, exit_price, reason=""):
         logger.warning(f"Learning exit bridge failed: {e}")
 
 
+# ============================================================
+# POSITION GUARD — SAFE RETRY BRIDGE
+# ============================================================
+
+_POSITION_GUARD = None
+
+def _register_position_guard_position(**kwargs):
+    """Best-effort registration; absence of the optional module never breaks trading."""
+    if not POSITION_GUARD_AVAILABLE or _position_guard_register_position is None:
+        _diag_runtime_external_error(
+            "PositionGuard",
+            "OPTIONAL_MODULE_UNAVAILABLE",
+            POSITION_GUARD_IMPORT_ERROR or "position_guard.py not available",
+        )
+        return False
+    try:
+        _position_guard_register_position(**kwargs)
+        return True
+    except Exception as exc:
+        _diag_runtime_external_error("PositionGuard", "REGISTER_ERROR", f"{type(exc).__name__}: {exc}")
+        return False
+
+def _position_guard_sell_callback(position):
+    """
+    پل بین PositionGuard و موتور فروش واقعی ربات.
+    از تابع فروش موجود ربات استفاده می‌کند و منطق فروش فعلی را جایگزین نمی‌کند.
+    """
+    token = str(position.get("token") or "").strip()
+    if not token:
+        return False
+
+    try:
+        # PositionGuard must receive the ACTUAL SELL result.
+        # _submit_real_sell_attempt remains asynchronous for normal callers,
+        # but Guard explicitly waits for blockchain confirmation here.
+        result = _submit_real_sell_attempt(
+            token,
+            wait_for_result=True,
+            wait_timeout=60.0
+        )
+
+        if isinstance(result, tuple):
+            ok = bool(result[0])
+            value = result[1] if len(result) > 1 else ""
+            return value if ok else False
+
+        return bool(result)
+
+    except Exception as exc:
+        logger.exception("Position Guard sell bridge failed token=%s: %s", token, exc)
+        raise
+
+
+def _position_guard_price_callback(position):
+    """
+    منبع قیمت PositionGuard.
+    فقط قیمت همان توکن را از market-fetch موجود ربات می‌گیرد.
+    """
+    token = str(position.get("token") or "").strip()
+    if not token:
+        return None
+
+    try:
+        prices = _get_position_market_pairs([token])
+        pair = prices.get(token) if isinstance(prices, dict) else None
+        if not pair:
+            return None
+
+        price = float(pair.get("priceUsd", 0) or 0)
+        return price if price > 0 else None
+    except Exception as exc:
+        logger.debug(
+            "Position Guard price callback failed token=%s: %s",
+            token,
+            exc
+        )
+        return None
+
+
+def _start_position_guard():
+    global _POSITION_GUARD
+
+    if _POSITION_GUARD is not None:
+        return _POSITION_GUARD
+
+    if PositionGuard is None:
+        _diag_runtime_external_error(
+            "PositionGuard",
+            "OPTIONAL_MODULE_UNAVAILABLE",
+            POSITION_GUARD_IMPORT_ERROR or "position_guard.py not available",
+        )
+        logger.warning("POSITION GUARD external module unavailable; built-in Production Position Manager remains authoritative.")
+        return None
+
+    _POSITION_GUARD = PositionGuard(
+        sell_callback=_position_guard_sell_callback,
+        price_callback=_position_guard_price_callback,
+        poll_seconds=2.0,
+        trailing_enabled=bool(DYNAMIC_TRAILING_TP_ENABLED),
+        trailing_trigger=(
+            float(TRAILING_LOCK_TABLE[-1][0])
+            if TRAILING_LOCK_TABLE else 8.0
+        ),
+        trailing_table=TRAILING_LOCK_TABLE,
+    )
+
+    _POSITION_GUARD.start()
+    logger.info(
+        "POSITION GUARD CONNECTED: PRICE + TRAILING + REAL SELL ENGINE"
+    )
+    return _POSITION_GUARD
+
+
 if __name__ == "__main__":
     logger.info("🚀 در حال راه‌اندازی ربات هوشمند تریدینگ هالکی...")
     _load_channel_config()
@@ -10621,8 +10674,11 @@ if __name__ == "__main__":
     # PositionGuard must start after real positions are restored
     # and before the main worker threads begin.
     try:
-        _start_position_guard()
-        logger.info("POSITION GUARD STARTED AT MAIN STARTUP")
+        guard = _start_position_guard()
+        if guard is not None:
+            logger.info("POSITION GUARD STARTED AT MAIN STARTUP")
+        else:
+            logger.warning("POSITION GUARD external helper unavailable; built-in Production Position Manager remains authoritative.")
     except Exception as exc:
         logger.exception("POSITION GUARD STARTUP FAILED: %s", exc)
 
@@ -10702,91 +10758,3 @@ def render_safe_bottom_control_mirror():
     if changed:
         st.rerun()
 # =============================================================
-
-
-# ============================================================
-# POSITION GUARD — SAFE RETRY BRIDGE
-# ============================================================
-
-_POSITION_GUARD = None
-
-def _position_guard_sell_callback(position):
-    """
-    پل بین PositionGuard و موتور فروش واقعی ربات.
-    از تابع فروش موجود ربات استفاده می‌کند و منطق فروش فعلی را جایگزین نمی‌کند.
-    """
-    token = str(position.get("token") or "").strip()
-    if not token:
-        return False
-
-    try:
-        # PositionGuard must receive the ACTUAL SELL result.
-        # _submit_real_sell_attempt remains asynchronous for normal callers,
-        # but Guard explicitly waits for blockchain confirmation here.
-        result = _submit_real_sell_attempt(
-            token,
-            wait_for_result=True,
-            wait_timeout=60.0
-        )
-
-        if isinstance(result, tuple):
-            ok = bool(result[0])
-            value = result[1] if len(result) > 1 else ""
-            return value if ok else False
-
-        return bool(result)
-
-    except Exception as exc:
-        logger.exception("Position Guard sell bridge failed token=%s: %s", token, exc)
-        raise
-
-
-def _position_guard_price_callback(position):
-    """
-    منبع قیمت PositionGuard.
-    فقط قیمت همان توکن را از market-fetch موجود ربات می‌گیرد.
-    """
-    token = str(position.get("token") or "").strip()
-    if not token:
-        return None
-
-    try:
-        prices = _get_position_market_pairs([token])
-        pair = prices.get(token) if isinstance(prices, dict) else None
-        if not pair:
-            return None
-
-        price = float(pair.get("priceUsd", 0) or 0)
-        return price if price > 0 else None
-    except Exception as exc:
-        logger.debug(
-            "Position Guard price callback failed token=%s: %s",
-            token,
-            exc
-        )
-        return None
-
-
-def _start_position_guard():
-    global _POSITION_GUARD
-
-    if _POSITION_GUARD is not None:
-        return _POSITION_GUARD
-
-    _POSITION_GUARD = PositionGuard(
-        sell_callback=_position_guard_sell_callback,
-        price_callback=_position_guard_price_callback,
-        poll_seconds=2.0,
-        trailing_enabled=bool(DYNAMIC_TRAILING_TP_ENABLED),
-        trailing_trigger=(
-            float(TRAILING_LOCK_TABLE[-1][0])
-            if TRAILING_LOCK_TABLE else 8.0
-        ),
-        trailing_table=TRAILING_LOCK_TABLE,
-    )
-
-    _POSITION_GUARD.start()
-    logger.info(
-        "POSITION GUARD CONNECTED: PRICE + TRAILING + REAL SELL ENGINE"
-    )
-    return _POSITION_GUARD
