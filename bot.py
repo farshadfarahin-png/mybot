@@ -1,7 +1,7 @@
 # ============================================================
-# 📌 فایل ربات — نسخه اصلاح‌شده با DexScreener Global Governor و SELL Bypass
-# هیچ بخش نامرتبطی حذف یا خلاصه نشده است.
-# تغییرات این نسخه فقط در مدیریت درخواست‌های DexScreener و کش آن اعمال شده است؛ مسیر SELL واقعی دست‌نخورده و مستقل است.
+# 📌 فایل اصلی ربات — نسخه اصلاح‌شده فقط برای Professional Wallet Radar
+# این نسخه بخش‌های نامرتبط ربات را حذف یا خلاصه نکرده است.
+# تغییرات این نسخه فقط در رادار Wallet، کلیدهای آن، کشف Wallet و کپی واقعی است.
 # ============================================================
 # V17 TRUE HUNTER — verified architecture: independent lanes, MAX unified attack, rotating low-latency radar.
 from position_guard import PositionGuard
@@ -1296,8 +1296,8 @@ def get_real_market_trending_tokens():
 
     def fetch_endpoint(url):
         try:
-            res_obj = _dex_get(url, timeout=4)
-            if res_obj is None or res_obj.status_code != 200:
+            res_obj = _dex_http_get(url, timeout=4, priority=False)
+            if res_obj.status_code != 200:
                 return []
             res = res_obj.json()
             found = []
@@ -1345,11 +1345,8 @@ def ultra_accuracy_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in ultra_processed_tokens:
                         continue
 
-                pair_res_obj = _dex_get(
-                    f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}",
-                    timeout=3,
-                )
-                if pair_res_obj is None or pair_res_obj.status_code != 200:
+                pair_res_obj = _dex_http_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3, priority=False)
+                if pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
                 if not pair_res.get('pairs'):
@@ -1432,11 +1429,8 @@ def mempool_smart_money_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in mempool_processed_tokens:
                         continue
                 
-                pair_res_obj = _dex_get(
-                    f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}",
-                    timeout=3,
-                )
-                if pair_res_obj is None or pair_res_obj.status_code != 200:
+                pair_res_obj = _dex_http_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3, priority=False)
+                if pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
                 if not pair_res.get('pairs'):
@@ -3859,11 +3853,8 @@ def technical_analysis_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
                         continue
 
-                pair_res_obj = _dex_get(
-                    f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}",
-                    timeout=3,
-                )
-                if pair_res_obj is None or pair_res_obj.status_code != 200:
+                pair_res_obj = _dex_http_get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3, priority=False)
+                if pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
                 if not pair_res.get('pairs'):
@@ -4107,120 +4098,66 @@ _sentinel_lock = Lock()
 # DexScreener protection: fetch up to 30 token addresses per request and reuse
 # the short-lived batch cache during the same radar sweep. This avoids one HTTP
 # request per token and reduces 429 pressure without weakening market gates.
-# ============================================================
-# 🛡️ DEXSCREENER GLOBAL REQUEST GOVERNOR
-# فقط درخواست‌های دریافت داده از DexScreener از این مسیر عبور می‌کنند.
-# مسیر اجرای SELL واقعی (Jupiter/RPC) عمداً به این Governor متصل نیست.
-# ============================================================
 DEX_BATCH_SIZE = 30
-DEX_BATCH_CACHE_TTL_SECONDS = 4.0
-
-# کش به‌صورت per-token نگهداری می‌شود تا Discovery / Unified / PositionsCheck
-# کش یکدیگر را پاک نکنند و باعث درخواست‌های تکراری نشوند.
+DEX_BATCH_CACHE_TTL_SECONDS = 6.0
 _dex_batch_cache = {}
-_dex_batch_cache_times = {}
-_dex_batch_cache_time = 0.0
+_dex_batch_cache_time_by_token = {}
 _dex_batch_lock = RLock()
-
-# Governor مرکزی تمام درخواست‌های GET به DexScreener را هماهنگ می‌کند.
 _dex_rate_lock = Lock()
-_dex_http_lock = Lock()
 _dex_last_request_time = 0.0
-_dex_cooldown_until = 0.0
-_dex_consecutive_429 = 0
+_dex_next_request_at = 0.0
+_dex_global_cooldown_until = 0.0
+_dex_429_streak = 0
+DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.50
+DEX_MAX_GLOBAL_COOLDOWN_SECONDS = 30.0
 
-# فاصله پایه محافظه‌کارانه است؛ 429 یک cooldown سراسری روی تمام مصرف‌کنندگان ایجاد می‌کند.
-DEX_MIN_REQUEST_INTERVAL_SECONDS = 1.0
-DEX_MAX_BACKOFF_SECONDS = 30.0
-DEX_MAX_RETRIES_ON_429 = 2
-
-
-def _dex_acquire_request_slot():
-    """Reserve one global DexScreener request slot.
-    This throttles DATA FETCH only; it never wraps BUY/SELL execution.
+def _dex_http_get(url, timeout=4, priority=False):
     """
-    global _dex_last_request_time
+    Single gate for every DexScreener HTTP GET.
+
+    priority=True gives the caller the next available slot, but NEVER bypasses
+    a global 429 cooldown. Real BUY/SELL execution does not call this function.
+    """
+    global _dex_last_request_time, _dex_next_request_at
+    global _dex_global_cooldown_until, _dex_429_streak
 
     while True:
         with _dex_rate_lock:
             now = time.time()
-            wait_until = max(_dex_last_request_time, _dex_cooldown_until)
+            wait_until = max(_dex_next_request_at, _dex_global_cooldown_until)
             wait = wait_until - now
             if wait <= 0:
-                # Reserve the slot before releasing the lock so multiple
-                # worker threads cannot send at the same time.
-                _dex_last_request_time = now + DEX_MIN_REQUEST_INTERVAL_SECONDS
-                return
-        time.sleep(min(wait, 1.0))
+                _dex_next_request_at = now + max(0.05, float(DEX_MIN_REQUEST_INTERVAL_SECONDS))
+                break
+        time.sleep(min(max(wait, 0.05), 1.0))
 
-
-def _dex_note_response(status_code, headers=None):
-    """Update the global DexScreener cooldown state after a response."""
-    global _dex_cooldown_until, _dex_consecutive_429
-
-    if status_code == 429:
-        headers = headers or {}
-        try:
-            retry_after = float(headers.get("Retry-After", "0") or 0)
-        except (TypeError, ValueError):
-            retry_after = 0.0
-
+    try:
+        response = http_session.get(url, timeout=timeout)
+    except Exception:
         with _dex_rate_lock:
-            _dex_consecutive_429 += 1
-            exponential = min(
-                DEX_MAX_BACKOFF_SECONDS,
-                2.0 ** max(0, _dex_consecutive_429 - 1)
-            )
-            base_backoff = max(1.0, retry_after, exponential)
-            # Small deterministic cap; no extra request is generated.
-            cooldown = min(DEX_MAX_BACKOFF_SECONDS, base_backoff)
-            _dex_cooldown_until = max(_dex_cooldown_until, time.time() + cooldown)
-            current_429 = _dex_consecutive_429
+            _dex_next_request_at = max(_dex_next_request_at, time.time() + 0.25)
+        raise
 
-        logger.warning(
-            "⚠️ DexScreener HTTP 429؛ Governor سراسری %.1fs مکث می‌کند (429 streak=%s).",
-            cooldown,
-            current_429,
-        )
-        return
-
-    if status_code is not None:
-        with _dex_rate_lock:
-            _dex_consecutive_429 = 0
-            # A successful response must not leave a stale cooldown behind.
-            if _dex_cooldown_until < time.time():
-                _dex_cooldown_until = 0.0
-
-
-def _dex_get(url, timeout=4, headers=None):
-    """Centralized DexScreener GET with global pacing and 429 backoff.
-    Returns a requests.Response or None. No SELL/Jupiter/RPC call uses this.
-    """
-    last_response = None
-
-    for attempt in range(DEX_MAX_RETRIES_ON_429):
-        # One physical DexScreener request at a time. This prevents several
-        # worker threads from creating overlapping HTTP bursts.
-        with _dex_http_lock:
-            _dex_acquire_request_slot()
+    finished = time.time()
+    with _dex_rate_lock:
+        _dex_last_request_time = finished
+        if response.status_code == 429:
+            _dex_429_streak = min(_dex_429_streak + 1, 6)
             try:
-                response = http_session.get(url, headers=headers, timeout=timeout)
-                last_response = response
-            except Exception as exc:
-                logger.debug("DexScreener GET error (%s): %s", url, exc)
-                return None
-
-            _dex_note_response(response.status_code, response.headers)
-
-        if response.status_code != 429:
-            return response
-
-        if attempt + 1 < DEX_MAX_RETRIES_ON_429:
-            # The next attempt re-enters the same global queue and therefore
-            # observes the cooldown created by the 429.
-            continue
-
-    return last_response
+                retry_after = float(response.headers.get("Retry-After", "0") or 0)
+            except (TypeError, ValueError):
+                retry_after = 0.0
+            exponential = min(DEX_MAX_GLOBAL_COOLDOWN_SECONDS, 2.0 ** _dex_429_streak)
+            cooldown = min(DEX_MAX_GLOBAL_COOLDOWN_SECONDS, max(2.0, retry_after, exponential))
+            _dex_global_cooldown_until = max(_dex_global_cooldown_until, finished + cooldown)
+            _dex_next_request_at = max(_dex_next_request_at, _dex_global_cooldown_until)
+            logger.warning(
+                "⚠️ DexScreener HTTP 429; global data-fetch cooldown %.1fs (priority=%s)",
+                cooldown, priority
+            )
+        else:
+            _dex_429_streak = 0
+    return response
 
 def _sentinel_ratio(buys, sells):
     return float(buys) / max(1.0, float(sells))
@@ -5947,31 +5884,33 @@ def _elite_get_market_tokens():
 
 def _fetch_best_solana_pairs_batch(token_addrs):
     """Fetch Solana pairs for up to 30 token addresses per DexScreener call."""
-    global _dex_batch_cache_time
     clean = list(dict.fromkeys(str(x).strip() for x in token_addrs if x))
     if not clean:
         return {}
 
     result = {}
     now = time.time()
-
-    # Per-token TTL: one radar consumer cannot invalidate another consumer's cache.
     with _dex_batch_lock:
+        missing = []
         for addr in clean:
-            cached_at = _dex_batch_cache_times.get(addr, 0.0)
+            cached_at = float(_dex_batch_cache_time_by_token.get(addr, 0.0) or 0.0)
             if addr in _dex_batch_cache and now - cached_at <= DEX_BATCH_CACHE_TTL_SECONDS:
                 result[addr] = _dex_batch_cache[addr]
-
-    missing = [a for a in clean if a not in result]
+            else:
+                missing.append(addr)
 
     for i in range(0, len(missing), DEX_BATCH_SIZE):
         chunk = missing[i:i + DEX_BATCH_SIZE]
         try:
-            # DexScreener accepts comma-separated token addresses on this endpoint.
             url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk)
-            res = _dex_get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
-
-            if res is None:
+            res = _dex_http_get(
+                url,
+                timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0,
+                priority=False,
+            )
+            if res.status_code == 429:
+                # The centralized gate has already installed the global cooldown.
+                # Do not create a second independent sleep/retry loop here.
                 continue
             if res.status_code != 200:
                 logger.debug("DexScreener batch status=%s", res.status_code)
@@ -5990,27 +5929,15 @@ def _fetch_best_solana_pairs_batch(token_addrs):
             with _dex_batch_lock:
                 for addr, pairs in grouped.items():
                     pairs.sort(
-                        key=lambda x: float(
-                            ((x.get("liquidity") or {}).get("usd")) or 0
-                        ),
+                        key=lambda x: float(((x.get("liquidity") or {}).get("usd")) or 0),
                         reverse=True,
                     )
                     trimmed = pairs[:3]
                     _dex_batch_cache[addr] = trimmed
-                    _dex_batch_cache_times[addr] = fetched_at
+                    _dex_batch_cache_time_by_token[addr] = fetched_at
                     result[addr] = trimmed
-                _dex_batch_cache_time = fetched_at
-
         except Exception as e:
             logger.debug("DexScreener batch fetch error: %s", e)
-
-    # Bound cache memory without deleting fresh entries needed by other consumers.
-    with _dex_batch_lock:
-        cutoff = time.time() - DEX_BATCH_CACHE_TTL_SECONDS
-        stale = [addr for addr, ts in _dex_batch_cache_times.items() if ts < cutoff]
-        for addr in stale:
-            _dex_batch_cache_times.pop(addr, None)
-            _dex_batch_cache.pop(addr, None)
 
     return result
 
