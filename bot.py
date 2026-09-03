@@ -4,7 +4,14 @@
 # تغییرات این نسخه فقط در رادار Wallet، کلیدهای آن، کشف Wallet و کپی واقعی است.
 # ============================================================
 # V17 TRUE HUNTER — verified architecture: independent lanes, MAX unified attack, rotating low-latency radar.
-from position_guard import PositionGuard
+# PositionGuard is normally supplied as a project module.
+# If Render deploys only this single bot.py, the fallback is installed below
+# after the standard imports are ready. An existing module is always preferred.
+try:
+    from position_guard import PositionGuard, register_position
+except ModuleNotFoundError:
+    PositionGuard = None
+    register_position = None
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +51,293 @@ logging.basicConfig(
     format='%(asctime)s - [%(levelname)s] - %(threadName)s - %(message)s'
 )
 logger = logging.getLogger("HulkSolBot")
+
+if PositionGuard is None:
+    # Standalone Render fallback: keeps the same PositionGuard/register_position
+    # interface when only bot.py is deployed.
+    from typing import Any, Callable, Dict, Optional
+
+    _pg_logger = logging.getLogger("PositionGuard")
+
+    BASE_DIR = Path(__file__).resolve().parent
+    STATE_FILE = BASE_DIR / "position_guard_state.json"
+    LOCK = threading.RLock()
+
+    _sell_callback: Optional[Callable[[Dict[str, Any]], Any]] = None
+    _price_callback: Optional[Callable[[Dict[str, Any]], Optional[float]]] = None
+    _positions: Dict[str, Dict[str, Any]] = {}
+    _guard_thread: Optional[threading.Thread] = None
+    _stop_event = threading.Event()
+    _poll_seconds = 2.0
+    _trailing_enabled = True
+    _trailing_trigger = 8.0
+    _trailing_table = ()
+
+
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            value = float(value)
+            return value if value == value else default
+        except (TypeError, ValueError):
+            return default
+
+
+    def _load_state() -> None:
+        global _positions
+        try:
+            if not STATE_FILE.exists():
+                return
+            raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return
+            loaded = raw.get("positions", raw)
+            if not isinstance(loaded, dict):
+                return
+            clean: Dict[str, Dict[str, Any]] = {}
+            for token, pos in loaded.items():
+                if isinstance(pos, dict) and str(token).strip():
+                    item = dict(pos)
+                    item["token"] = str(item.get("token") or token).strip()
+                    item["sell_in_progress"] = False
+                    clean[item["token"]] = item
+            _positions = clean
+        except Exception as exc:
+            _pg_logger.warning("PositionGuard state load failed: %s", exc)
+
+
+    def _save_state() -> None:
+        try:
+            tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+            payload = {
+                "version": 1,
+                "updated_at": time.time(),
+                "positions": _positions,
+            }
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp.replace(STATE_FILE)
+        except Exception as exc:
+            _pg_logger.warning("PositionGuard state save failed: %s", exc)
+
+
+    def register_position(
+        token: str,
+        side: str = "BUY",
+        entry_price: float = 0.0,
+        target_price: float = 0.0,
+        stop_price: float = -8.0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        token = str(token or "").strip()
+        if not token:
+            return False
+
+        with LOCK:
+            old = _positions.get(token, {})
+            pos: Dict[str, Any] = dict(old)
+            pos.update({
+                "token": token,
+                "side": str(side or "BUY"),
+                "entry_price": _safe_float(entry_price),
+                # In this bot target_price/stop_price are PNL percentages,
+                # despite their legacy parameter names.
+                "target_pnl": _safe_float(target_price),
+                "stop_pnl": _safe_float(stop_price, -8.0),
+                "registered_at": old.get("registered_at", time.time()),
+                "sell_in_progress": False,
+                "highest_pnl": _safe_float(old.get("highest_pnl", 0.0)),
+                "locked_floor": _safe_float(
+                    old.get("locked_floor", stop_price),
+                    _safe_float(stop_price, -8.0),
+                ),
+            })
+            if metadata:
+                pos["metadata"] = dict(metadata)
+            _positions[token] = pos
+            _save_state()
+        return True
+
+
+    def unregister_position(token: str) -> bool:
+        token = str(token or "").strip()
+        if not token:
+            return False
+        with LOCK:
+            existed = token in _positions
+            _positions.pop(token, None)
+            if existed:
+                _save_state()
+            return existed
+
+
+    def get_positions() -> Dict[str, Dict[str, Any]]:
+        with LOCK:
+            return {k: dict(v) for k, v in _positions.items()}
+
+
+    def _trailing_floor(highest_pnl: float) -> float:
+        floor = 0.0
+        for row in _trailing_table or ():
+            try:
+                trigger, lock_floor = row[0], row[1]
+                if highest_pnl >= float(trigger):
+                    floor = max(floor, float(lock_floor))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if highest_pnl >= 1000.0:
+            steps = int((highest_pnl - 1000.0) // 50.0)
+            floor = max(floor, 995.0 + steps * 50.0)
+        return floor
+
+
+    def _evaluate(token: str, position: Dict[str, Any]) -> None:
+        if not _price_callback:
+            return
+
+        try:
+            price = _price_callback(dict(position))
+            price = _safe_float(price)
+            entry = _safe_float(position.get("entry_price"))
+            if price <= 0 or entry <= 0:
+                return
+
+            pnl = (price - entry) / entry * 100.0
+            with LOCK:
+                current = _positions.get(token)
+                if not current or current.get("sell_in_progress"):
+                    return
+
+                highest = max(_safe_float(current.get("highest_pnl")), pnl)
+                current["highest_pnl"] = highest
+                current["last_price"] = price
+                current["last_pnl"] = pnl
+                current["last_check_at"] = time.time()
+
+                stop_pnl = _safe_float(current.get("stop_pnl"), -8.0)
+                floor = _safe_float(current.get("locked_floor"), stop_pnl)
+
+                # The hard SL remains active until the first trailing trigger.
+                if _trailing_enabled and highest >= _trailing_trigger:
+                    floor = max(floor, _trailing_floor(highest))
+                else:
+                    floor = stop_pnl
+
+                current["locked_floor"] = floor
+                effective_floor = max(stop_pnl, floor)
+                target_pnl = _safe_float(current.get("target_pnl"), 0.0)
+
+                # Exit condition: hard/trailing floor or explicit TP.
+                should_sell = pnl <= effective_floor
+                reason = "POSITION_GUARD_SL"
+                if target_pnl > 0 and pnl >= target_pnl:
+                    should_sell = True
+                    reason = "POSITION_GUARD_TP"
+                elif _trailing_enabled and highest >= _trailing_trigger and pnl <= floor:
+                    should_sell = True
+                    reason = "POSITION_GUARD_TRAILING"
+
+                if not should_sell:
+                    _save_state()
+                    return
+
+                current["sell_in_progress"] = True
+                current["exit_reason"] = reason
+                current["exit_price"] = price
+                current["exit_pnl"] = pnl
+                _save_state()
+
+            # IMPORTANT: this callback is outside the guard lock and is not put
+            # behind any DexScreener/network data limiter by this module.
+            result = _sell_callback(dict(current)) if _sell_callback else False
+
+            success = bool(result)
+            with LOCK:
+                latest = _positions.get(token)
+                if success:
+                    _positions.pop(token, None)
+                    _save_state()
+                    _pg_logger.info("PositionGuard SELL confirmed token=%s reason=%s", token, reason)
+                elif latest:
+                    latest["sell_in_progress"] = False
+                    latest["last_sell_failed_at"] = time.time()
+                    latest["last_sell_result"] = str(result)
+                    _save_state()
+                    _pg_logger.warning("PositionGuard SELL not confirmed token=%s result=%s", token, result)
+
+        except Exception as exc:
+            with LOCK:
+                current = _positions.get(token)
+                if current:
+                    current["sell_in_progress"] = False
+                    current["last_error"] = f"{type(exc).__name__}:{exc}"
+                    current["last_error_at"] = time.time()
+                    _save_state()
+            _pg_logger.exception("PositionGuard evaluation failed token=%s", token)
+
+
+    def _loop() -> None:
+        _pg_logger.info("PositionGuard monitor loop started")
+        while not _stop_event.is_set():
+            try:
+                snapshot = get_positions()
+                for token, position in snapshot.items():
+                    if _stop_event.is_set():
+                        break
+                    _evaluate(token, position)
+            except Exception as exc:
+                _pg_logger.exception("PositionGuard loop error: %s", exc)
+            _stop_event.wait(max(0.25, _poll_seconds))
+        _pg_logger.info("PositionGuard monitor loop stopped")
+
+
+    class PositionGuard:
+        def __init__(
+            self,
+            sell_callback: Callable[[Dict[str, Any]], Any],
+            price_callback: Callable[[Dict[str, Any]], Optional[float]],
+            poll_seconds: float = 2.0,
+            trailing_enabled: bool = True,
+            trailing_trigger: float = 8.0,
+            trailing_table=(),
+        ) -> None:
+            global _sell_callback, _price_callback, _poll_seconds
+            global _trailing_enabled, _trailing_trigger, _trailing_table
+
+            _sell_callback = sell_callback
+            _price_callback = price_callback
+            _poll_seconds = max(0.25, _safe_float(poll_seconds, 2.0))
+            _trailing_enabled = bool(trailing_enabled)
+            _trailing_trigger = _safe_float(trailing_trigger, 8.0)
+            _trailing_table = tuple(trailing_table or ())
+            _load_state()
+            self._started = False
+
+        def start(self) -> "PositionGuard":
+            global _guard_thread
+            with LOCK:
+                if _guard_thread is not None and _guard_thread.is_alive():
+                    self._started = True
+                    return self
+                _stop_event.clear()
+                _guard_thread = threading.Thread(
+                    target=_loop,
+                    name="PositionGuard",
+                    daemon=True,
+                )
+                _guard_thread.start()
+                self._started = True
+            return self
+
+        def stop(self) -> None:
+            _stop_event.set()
+            self._started = False
+
+        @property
+        def is_running(self) -> bool:
+            return bool(_guard_thread and _guard_thread.is_alive())
+
 
 # قفل‌های همزمانی برای ایمنی کامل در ثردها (Thread Safety)
 db_lock = RLock()
@@ -3320,7 +3614,6 @@ def _promote_signal_to_real(token_addr, buy_signature=""):
 
     # ثبت مستقل پوزیشن واقعی برای PositionGuard
     try:
-        from position_guard import register_position
         register_position(
             token=token_addr,
             side="BUY",
@@ -5692,8 +5985,7 @@ def _restore_open_positions():
         # Re-register recovered REAL positions in the independent PositionGuard.
         # This restores protection after process/restart without changing BUY/SELL engines.
         try:
-            from position_guard import register_position
-
+    
             guard_registered = 0
 
             with state_lock:
