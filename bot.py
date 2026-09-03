@@ -1,9 +1,10 @@
 # ============================================================
-# 📌 فایل اصلی ربات — نسخه اصلاح‌شده فقط برای Professional Wallet Radar
-# این نسخه بخش‌های نامرتبط ربات را حذف یا خلاصه نکرده است.
-# تغییرات این نسخه فقط در رادار Wallet، کلیدهای آن، کشف Wallet و کپی واقعی است.
+# 📌 فایل ربات — نسخه اصلاح‌شده با DexScreener Global Governor و SELL Bypass
+# هیچ بخش نامرتبطی حذف یا خلاصه نشده است.
+# تغییرات این نسخه فقط در مدیریت درخواست‌های DexScreener و کش آن اعمال شده است؛ مسیر SELL واقعی دست‌نخورده و مستقل است.
 # ============================================================
 # V17 TRUE HUNTER — verified architecture: independent lanes, MAX unified attack, rotating low-latency radar.
+from position_guard import PositionGuard
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,9 @@ import re
 import math
 import secrets
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "").strip()
 import sqlite3
@@ -1292,8 +1296,8 @@ def get_real_market_trending_tokens():
 
     def fetch_endpoint(url):
         try:
-            res_obj = http_session.get(url, timeout=4)
-            if res_obj.status_code != 200:
+            res_obj = _dex_get(url, timeout=4)
+            if res_obj is None or res_obj.status_code != 200:
                 return []
             res = res_obj.json()
             found = []
@@ -1341,8 +1345,11 @@ def ultra_accuracy_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in ultra_processed_tokens:
                         continue
 
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
-                if pair_res_obj.status_code != 200:
+                pair_res_obj = _dex_get(
+                    f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}",
+                    timeout=3,
+                )
+                if pair_res_obj is None or pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
                 if not pair_res.get('pairs'):
@@ -1425,8 +1432,11 @@ def mempool_smart_money_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in mempool_processed_tokens:
                         continue
                 
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
-                if pair_res_obj.status_code != 200:
+                pair_res_obj = _dex_get(
+                    f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}",
+                    timeout=3,
+                )
+                if pair_res_obj is None or pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
                 if not pair_res.get('pairs'):
@@ -3313,6 +3323,34 @@ def _promote_signal_to_real(token_addr, buy_signature=""):
         signal_positions.pop(token_addr, None)
         active_positions[token_addr] = pos
     _persist_open_position(token_addr, pos, "REAL")
+
+    # ثبت مستقل پوزیشن واقعی برای PositionGuard
+    try:
+        from position_guard import register_position
+        register_position(
+            token=token_addr,
+            side="BUY",
+            entry_price=float(pos.get("entry_price", 0) or 0),
+            target_price=float(pos.get("tp", 0) or 0),
+            stop_price=float(pos.get("sl", -8.0) or -8.0),
+            metadata={
+                "symbol": pos.get("symbol", "TOKEN"),
+                "tp_pnl": float(pos.get("tp", 0) or 0),
+                "sl_pnl": float(pos.get("sl", -8.0) or -8.0),
+                "buy_tx_signature": buy_signature,
+                "real_trade": True,
+            },
+        )
+        logger.info(
+            "POSITION_GUARD REGISTERED REAL BUY token=%s tx=%s",
+            token_addr, buy_signature
+        )
+    except Exception as exc:
+        logger.exception(
+            "POSITION_GUARD registration failed token=%s: %s",
+            token_addr, exc
+        )
+
     return True, pos
 
 def _start_real_buy_attempt(token_addr):
@@ -3422,67 +3460,210 @@ def _emit_sell_signal_once(token_addr, pos, current_price, pnl, reason, tx_signa
     _notify_async(send_signal_outcome, token_addr, snapshot, current_price, outcome, pnl, tx_signature, extra)
     return True
 
-def _submit_real_sell_attempt(token_addr):
-    """Retry a real SELL independently from signal delivery."""
+def _submit_real_sell_attempt(token_addr, wait_for_result=False, wait_timeout=60.0):
+    """
+    Submit a real SELL.
+
+    Normal callers keep the original asynchronous behavior.
+    PositionGuard can request wait_for_result=True so it receives the
+    ACTUAL blockchain SELL result instead of the worker-started result.
+    """
     with state_lock:
         pos = active_positions.get(token_addr)
         if not pos or not pos.get("real_trade") or pos.get("closed"):
             return False
+
         if pos.get("sell_pending"):
             return False
+
         pos["sell_pending"] = True
         pos["position_state"] = POSITION_STATE_EXIT_PENDING
         pos_copy = dict(pos)
+
     _persist_open_position(token_addr, pos_copy, "REAL")
+
+    result_holder = {
+        "done": False,
+        "ok": False,
+        "result": "",
+    }
+    result_event = threading.Event() if wait_for_result else None
 
     def _sell_worker():
         try:
             balance = get_token_balance(token_addr)
+
             if balance <= 0:
                 with state_lock:
-                    cur=active_positions.get(token_addr); snapshot=dict(cur) if cur else None
+                    cur = active_positions.get(token_addr)
+                    snapshot = dict(cur) if cur else None
                     if cur:
-                        cur["sell_pending"]=False; cur["external_reconcile"]=True; cur["position_state"]=POSITION_STATE_CLOSED; cur["closed"]=True; active_positions.pop(token_addr,None)
+                        cur["sell_pending"] = False
+                        cur["external_reconcile"] = True
+                        cur["position_state"] = POSITION_STATE_CLOSED
+                        cur["closed"] = True
+                        active_positions.pop(token_addr, None)
+
                 if snapshot:
-                    exit_price=float(snapshot.get("last_market_price",snapshot.get("entry_price",0)) or 0); entry=float(snapshot.get("entry_price",0) or 0); pnl=(exit_price-entry)/max(1e-12,entry)*100.0
-                    _record_closed_position(token_addr,snapshot,exit_price,pnl,"EXTERNAL_RECONCILE")
-                _mark_token_closed(token_addr); return
-            ok,result=execute_real_sell(token_addr,balance)
+                    exit_price = float(
+                        snapshot.get(
+                            "last_market_price",
+                            snapshot.get("entry_price", 0)
+                        ) or 0
+                    )
+                    entry = float(snapshot.get("entry_price", 0) or 0)
+                    pnl = (
+                        (exit_price - entry)
+                        / max(1e-12, entry)
+                        * 100.0
+                    )
+                    _record_closed_position(
+                        token_addr,
+                        snapshot,
+                        exit_price,
+                        pnl,
+                        "EXTERNAL_RECONCILE"
+                    )
+
+                _mark_token_closed(token_addr)
+
+                result_holder["ok"] = True
+                result_holder["result"] = "EXTERNAL_RECONCILE"
+                result_holder["done"] = True
+                if result_event:
+                    result_event.set()
+                return
+
+            ok, result = execute_real_sell(token_addr, balance)
+
+            result_holder["ok"] = bool(ok)
+            result_holder["result"] = result
+            result_holder["done"] = True
+
             if ok:
                 with state_lock:
-                    cur=active_positions.get(token_addr); snapshot=dict(cur) if cur else None
+                    cur = active_positions.get(token_addr)
+                    snapshot = dict(cur) if cur else None
+
                     if cur:
-                        cur["sell_pending"]=False; cur["position_state"]=POSITION_STATE_CLOSED; cur["closed"]=True; active_positions.pop(token_addr,None)
+                        cur["sell_pending"] = False
+                        cur["position_state"] = POSITION_STATE_CLOSED
+                        cur["closed"] = True
+                        active_positions.pop(token_addr, None)
+
                 if snapshot:
-                    exit_price=float(snapshot.get("last_market_price",snapshot.get("entry_price",0)) or 0); entry=float(snapshot.get("entry_price",0) or 0); pnl=(exit_price-entry)/max(1e-12,entry)*100.0
-                    _record_closed_position(token_addr,snapshot,exit_price,pnl,snapshot.get("exit_reason","REAL_SELL_CONFIRMED"),result)
-                _mark_token_closed(token_addr); logger.info("REAL_SELL_CONFIRMED token=%s tx=%s",token_addr,result); return
+                    exit_price = float(
+                        snapshot.get(
+                            "last_market_price",
+                            snapshot.get("entry_price", 0)
+                        ) or 0
+                    )
+                    entry = float(snapshot.get("entry_price", 0) or 0)
+                    pnl = (
+                        (exit_price - entry)
+                        / max(1e-12, entry)
+                        * 100.0
+                    )
+
+                    _record_closed_position(
+                        token_addr,
+                        snapshot,
+                        exit_price,
+                        pnl,
+                        snapshot.get(
+                            "exit_reason",
+                            "REAL_SELL_CONFIRMED"
+                        ),
+                        result
+                    )
+
+                _mark_token_closed(token_addr)
+
+                logger.info(
+                    "REAL_SELL_CONFIRMED token=%s tx=%s",
+                    token_addr,
+                    result
+                )
+
+            else:
+                with state_lock:
+                    cur = active_positions.get(token_addr)
+                    snapshot = None
+
+                    if cur:
+                        cur["sell_pending"] = False
+                        cur["last_sell_error"] = str(result)
+                        cur["last_sell_error_at"] = time.time()
+                        cur["position_state"] = POSITION_STATE_EXIT_PENDING
+                        snapshot = dict(cur)
+
+                if snapshot:
+                    _persist_open_position(
+                        token_addr,
+                        snapshot,
+                        "REAL"
+                    )
+
+                logger.warning(
+                    "REAL_SELL_NOT_CONFIRMED token=%s reason=%s",
+                    token_addr,
+                    result
+                )
+
+        except Exception as exc:
+            result_holder["ok"] = False
+            result_holder["result"] = (
+                f"{type(exc).__name__}:{exc}"
+            )
+            result_holder["done"] = True
+
             with state_lock:
                 cur = active_positions.get(token_addr)
                 snapshot = None
+
                 if cur:
                     cur["sell_pending"] = False
-                    cur["last_sell_error"] = str(result)
+                    cur["last_sell_error"] = result_holder["result"]
                     cur["last_sell_error_at"] = time.time()
                     cur["position_state"] = POSITION_STATE_EXIT_PENDING
                     snapshot = dict(cur)
-            if snapshot:
-                _persist_open_position(token_addr, snapshot, "REAL")
-            logger.warning("REAL_SELL_NOT_CONFIRMED token=%s reason=%s", token_addr, result)
-        except Exception as exc:
-            with state_lock:
-                cur = active_positions.get(token_addr)
-                snapshot = None
-                if cur:
-                    cur["sell_pending"] = False
-                    cur["last_sell_error"] = f"{type(exc).__name__}:{exc}"
-                    snapshot = dict(cur)
-            if snapshot:
-                _persist_open_position(token_addr, snapshot, "REAL")
-            logger.exception("REAL_SELL_WORKER_ERROR token=%s", token_addr)
 
-    threading.Thread(target=_sell_worker, name=f"RealSell-{token_addr[:8]}", daemon=True).start()
-    return True
+            if snapshot:
+                _persist_open_position(
+                    token_addr,
+                    snapshot,
+                    "REAL"
+                )
+
+            logger.exception(
+                "REAL_SELL_WORKER_ERROR token=%s",
+                token_addr
+            )
+
+        finally:
+            result_holder["done"] = True
+            if result_event:
+                result_event.set()
+
+    threading.Thread(
+        target=_sell_worker,
+        name=f"RealSell-{token_addr[:8]}",
+        daemon=True
+    ).start()
+
+    # Legacy behavior: immediately report that the worker was accepted.
+    if not wait_for_result:
+        return True
+
+    # PositionGuard path: do NOT report success until the actual SELL
+    # worker has completed and execute_real_sell() has confirmed it.
+    if not result_event.wait(timeout=max(1.0, float(wait_timeout))):
+        return False
+
+    return (
+        bool(result_holder["ok"]),
+        result_holder["result"]
+    )
 
 def _get_position_market_pairs(token_addrs):
     """Batch-fetch all monitored prices so one slow token cannot starve every position."""
@@ -3678,8 +3859,11 @@ def technical_analysis_scanner_loop(app):
                     if not token_addr or token_addr in active_positions or token_addr in tech_processed_tokens:
                         continue
 
-                pair_res_obj = http_session.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}", timeout=3)
-                if pair_res_obj.status_code != 200:
+                pair_res_obj = _dex_get(
+                    f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}",
+                    timeout=3,
+                )
+                if pair_res_obj is None or pair_res_obj.status_code != 200:
                     continue
                 pair_res = pair_res_obj.json()
                 if not pair_res.get('pairs'):
@@ -3923,14 +4107,120 @@ _sentinel_lock = Lock()
 # DexScreener protection: fetch up to 30 token addresses per request and reuse
 # the short-lived batch cache during the same radar sweep. This avoids one HTTP
 # request per token and reduces 429 pressure without weakening market gates.
+# ============================================================
+# 🛡️ DEXSCREENER GLOBAL REQUEST GOVERNOR
+# فقط درخواست‌های دریافت داده از DexScreener از این مسیر عبور می‌کنند.
+# مسیر اجرای SELL واقعی (Jupiter/RPC) عمداً به این Governor متصل نیست.
+# ============================================================
 DEX_BATCH_SIZE = 30
 DEX_BATCH_CACHE_TTL_SECONDS = 4.0
+
+# کش به‌صورت per-token نگهداری می‌شود تا Discovery / Unified / PositionsCheck
+# کش یکدیگر را پاک نکنند و باعث درخواست‌های تکراری نشوند.
 _dex_batch_cache = {}
+_dex_batch_cache_times = {}
 _dex_batch_cache_time = 0.0
 _dex_batch_lock = RLock()
+
+# Governor مرکزی تمام درخواست‌های GET به DexScreener را هماهنگ می‌کند.
 _dex_rate_lock = Lock()
+_dex_http_lock = Lock()
 _dex_last_request_time = 0.0
-DEX_MIN_REQUEST_INTERVAL_SECONDS = 0.12
+_dex_cooldown_until = 0.0
+_dex_consecutive_429 = 0
+
+# فاصله پایه محافظه‌کارانه است؛ 429 یک cooldown سراسری روی تمام مصرف‌کنندگان ایجاد می‌کند.
+DEX_MIN_REQUEST_INTERVAL_SECONDS = 1.0
+DEX_MAX_BACKOFF_SECONDS = 30.0
+DEX_MAX_RETRIES_ON_429 = 2
+
+
+def _dex_acquire_request_slot():
+    """Reserve one global DexScreener request slot.
+    This throttles DATA FETCH only; it never wraps BUY/SELL execution.
+    """
+    global _dex_last_request_time
+
+    while True:
+        with _dex_rate_lock:
+            now = time.time()
+            wait_until = max(_dex_last_request_time, _dex_cooldown_until)
+            wait = wait_until - now
+            if wait <= 0:
+                # Reserve the slot before releasing the lock so multiple
+                # worker threads cannot send at the same time.
+                _dex_last_request_time = now + DEX_MIN_REQUEST_INTERVAL_SECONDS
+                return
+        time.sleep(min(wait, 1.0))
+
+
+def _dex_note_response(status_code, headers=None):
+    """Update the global DexScreener cooldown state after a response."""
+    global _dex_cooldown_until, _dex_consecutive_429
+
+    if status_code == 429:
+        headers = headers or {}
+        try:
+            retry_after = float(headers.get("Retry-After", "0") or 0)
+        except (TypeError, ValueError):
+            retry_after = 0.0
+
+        with _dex_rate_lock:
+            _dex_consecutive_429 += 1
+            exponential = min(
+                DEX_MAX_BACKOFF_SECONDS,
+                2.0 ** max(0, _dex_consecutive_429 - 1)
+            )
+            base_backoff = max(1.0, retry_after, exponential)
+            # Small deterministic cap; no extra request is generated.
+            cooldown = min(DEX_MAX_BACKOFF_SECONDS, base_backoff)
+            _dex_cooldown_until = max(_dex_cooldown_until, time.time() + cooldown)
+            current_429 = _dex_consecutive_429
+
+        logger.warning(
+            "⚠️ DexScreener HTTP 429؛ Governor سراسری %.1fs مکث می‌کند (429 streak=%s).",
+            cooldown,
+            current_429,
+        )
+        return
+
+    if status_code is not None:
+        with _dex_rate_lock:
+            _dex_consecutive_429 = 0
+            # A successful response must not leave a stale cooldown behind.
+            if _dex_cooldown_until < time.time():
+                _dex_cooldown_until = 0.0
+
+
+def _dex_get(url, timeout=4, headers=None):
+    """Centralized DexScreener GET with global pacing and 429 backoff.
+    Returns a requests.Response or None. No SELL/Jupiter/RPC call uses this.
+    """
+    last_response = None
+
+    for attempt in range(DEX_MAX_RETRIES_ON_429):
+        # One physical DexScreener request at a time. This prevents several
+        # worker threads from creating overlapping HTTP bursts.
+        with _dex_http_lock:
+            _dex_acquire_request_slot()
+            try:
+                response = http_session.get(url, headers=headers, timeout=timeout)
+                last_response = response
+            except Exception as exc:
+                logger.debug("DexScreener GET error (%s): %s", url, exc)
+                return None
+
+            _dex_note_response(response.status_code, response.headers)
+
+        if response.status_code != 429:
+            return response
+
+        if attempt + 1 < DEX_MAX_RETRIES_ON_429:
+            # The next attempt re-enters the same global queue and therefore
+            # observes the cooldown created by the 429.
+            continue
+
+    return last_response
 
 def _sentinel_ratio(buys, sells):
     return float(buys) / max(1.0, float(sells))
@@ -5461,6 +5751,64 @@ def _restore_open_positions():
                     logger.warning(f"Could not restore open position {token_addr}: {item_error}")
         if restored:
             logger.warning(f"♻️ {restored} open position(s) restored; exit management continues after restart.")
+
+        # Re-register recovered REAL positions in the independent PositionGuard.
+        # This restores protection after process/restart without changing BUY/SELL engines.
+        try:
+            from position_guard import register_position
+
+            guard_registered = 0
+
+            with state_lock:
+                recovered_real = [
+                    (token_addr, dict(pos))
+                    for token_addr, pos in active_positions.items()
+                    if isinstance(pos, dict)
+                    and bool(pos.get("real_trade"))
+                    and not pos.get("closed")
+                ]
+
+            for token_addr, pos in recovered_real:
+                try:
+                    register_position(
+                        token=token_addr,
+                        side="BUY",
+                        entry_price=float(pos.get("entry_price", 0) or 0),
+                        target_price=float(pos.get("tp", 0) or 0),
+                        stop_price=float(pos.get("sl", -8.0) or -8.0),
+                        metadata={
+                            "symbol": pos.get("symbol", "TOKEN"),
+                            "tp_pnl": float(pos.get("tp", 0) or 0),
+                            "sl_pnl": float(pos.get("sl", -8.0) or -8.0),
+                            "buy_tx_signature": pos.get("buy_tx_signature", ""),
+                            "real_trade": True,
+                            "recovered_after_restart": True,
+                        },
+                    )
+                    guard_registered += 1
+                    logger.info(
+                        "POSITION_GUARD RE-REGISTERED RECOVERED REAL token=%s",
+                        token_addr,
+                    )
+                except Exception as guard_item_error:
+                    logger.exception(
+                        "POSITION_GUARD re-registration failed token=%s: %s",
+                        token_addr,
+                        guard_item_error,
+                    )
+
+            if guard_registered:
+                logger.warning(
+                    "POSITION GUARD RECOVERY: %s REAL position(s) registered",
+                    guard_registered,
+                )
+
+        except Exception as guard_import_error:
+            logger.exception(
+                "POSITION_GUARD recovery bridge failed: %s",
+                guard_import_error,
+            )
+
         return restored
     except Exception as e:
         logger.warning(f"Open-position recovery failed: {e}")
@@ -5599,38 +5947,36 @@ def _elite_get_market_tokens():
 
 def _fetch_best_solana_pairs_batch(token_addrs):
     """Fetch Solana pairs for up to 30 token addresses per DexScreener call."""
-    global _dex_batch_cache, _dex_batch_cache_time, _dex_last_request_time
+    global _dex_batch_cache_time
     clean = list(dict.fromkeys(str(x).strip() for x in token_addrs if x))
     if not clean:
         return {}
+
     result = {}
     now = time.time()
+
+    # Per-token TTL: one radar consumer cannot invalidate another consumer's cache.
     with _dex_batch_lock:
-        if now - _dex_batch_cache_time <= DEX_BATCH_CACHE_TTL_SECONDS:
-            for addr in clean:
-                if addr in _dex_batch_cache:
-                    result[addr] = _dex_batch_cache[addr]
-        missing = [a for a in clean if a not in result]
+        for addr in clean:
+            cached_at = _dex_batch_cache_times.get(addr, 0.0)
+            if addr in _dex_batch_cache and now - cached_at <= DEX_BATCH_CACHE_TTL_SECONDS:
+                result[addr] = _dex_batch_cache[addr]
+
+    missing = [a for a in clean if a not in result]
 
     for i in range(0, len(missing), DEX_BATCH_SIZE):
         chunk = missing[i:i + DEX_BATCH_SIZE]
         try:
             # DexScreener accepts comma-separated token addresses on this endpoint.
-            with _dex_rate_lock:
-                wait = DEX_MIN_REQUEST_INTERVAL_SECONDS - (time.time() - _dex_last_request_time)
-                if wait > 0:
-                    time.sleep(wait)
-                url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk)
-                res = http_session.get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
-                _dex_last_request_time = time.time()
-            if res.status_code == 429:
-                retry_after = float(res.headers.get("Retry-After", "1") or 1)
-                logger.warning("⚠️ DexScreener HTTP 429؛ batch radar %.1fs مکث می‌کند.", retry_after)
-                time.sleep(min(max(retry_after, 0.5), 5.0))
+            url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk)
+            res = _dex_get(url, timeout=DEX_BATCH_CACHE_TTL_SECONDS + 2.0)
+
+            if res is None:
                 continue
             if res.status_code != 200:
                 logger.debug("DexScreener batch status=%s", res.status_code)
                 continue
+
             data = res.json() or {}
             grouped = {addr: [] for addr in chunk}
             for pair in data.get("pairs") or []:
@@ -5639,15 +5985,33 @@ def _fetch_best_solana_pairs_batch(token_addrs):
                 base = ((pair.get("baseToken") or {}).get("address") or "").strip()
                 if base in grouped:
                     grouped[base].append(pair)
-            for addr, pairs in grouped.items():
-                pairs.sort(key=lambda x: float(((x.get("liquidity") or {}).get("usd")) or 0), reverse=True)
-                result[addr] = pairs[:3]
+
+            fetched_at = time.time()
+            with _dex_batch_lock:
+                for addr, pairs in grouped.items():
+                    pairs.sort(
+                        key=lambda x: float(
+                            ((x.get("liquidity") or {}).get("usd")) or 0
+                        ),
+                        reverse=True,
+                    )
+                    trimmed = pairs[:3]
+                    _dex_batch_cache[addr] = trimmed
+                    _dex_batch_cache_times[addr] = fetched_at
+                    result[addr] = trimmed
+                _dex_batch_cache_time = fetched_at
+
         except Exception as e:
             logger.debug("DexScreener batch fetch error: %s", e)
 
+    # Bound cache memory without deleting fresh entries needed by other consumers.
     with _dex_batch_lock:
-        _dex_batch_cache = dict(result)
-        _dex_batch_cache_time = time.time()
+        cutoff = time.time() - DEX_BATCH_CACHE_TTL_SECONDS
+        stale = [addr for addr, ts in _dex_batch_cache_times.items() if ts < cutoff]
+        for addr in stale:
+            _dex_batch_cache_times.pop(addr, None)
+            _dex_batch_cache.pop(addr, None)
+
     return result
 
 def _fetch_best_solana_pair(token_addr):
@@ -10035,6 +10399,14 @@ if __name__ == "__main__":
     # Recover open positions before any scanner starts. Signal switches do not control this manager.
     _restore_open_positions()
 
+    # PositionGuard must start after real positions are restored
+    # and before the main worker threads begin.
+    try:
+        _start_position_guard()
+        logger.info("POSITION GUARD STARTED AT MAIN STARTUP")
+    except Exception as exc:
+        logger.exception("POSITION GUARD STARTUP FAILED: %s", exc)
+
     threads = [
         Thread(target=professional_wallet_radar_loop, daemon=True, name="ProfessionalWalletRadar"),
         Thread(target=pro_trader_cache_maintenance_loop, daemon=True, name="ProTraderCache"),
@@ -10111,3 +10483,91 @@ def render_safe_bottom_control_mirror():
     if changed:
         st.rerun()
 # =============================================================
+
+
+# ============================================================
+# POSITION GUARD — SAFE RETRY BRIDGE
+# ============================================================
+
+_POSITION_GUARD = None
+
+def _position_guard_sell_callback(position):
+    """
+    پل بین PositionGuard و موتور فروش واقعی ربات.
+    از تابع فروش موجود ربات استفاده می‌کند و منطق فروش فعلی را جایگزین نمی‌کند.
+    """
+    token = str(position.get("token") or "").strip()
+    if not token:
+        return False
+
+    try:
+        # PositionGuard must receive the ACTUAL SELL result.
+        # _submit_real_sell_attempt remains asynchronous for normal callers,
+        # but Guard explicitly waits for blockchain confirmation here.
+        result = _submit_real_sell_attempt(
+            token,
+            wait_for_result=True,
+            wait_timeout=60.0
+        )
+
+        if isinstance(result, tuple):
+            ok = bool(result[0])
+            value = result[1] if len(result) > 1 else ""
+            return value if ok else False
+
+        return bool(result)
+
+    except Exception as exc:
+        logger.exception("Position Guard sell bridge failed token=%s: %s", token, exc)
+        raise
+
+
+def _position_guard_price_callback(position):
+    """
+    منبع قیمت PositionGuard.
+    فقط قیمت همان توکن را از market-fetch موجود ربات می‌گیرد.
+    """
+    token = str(position.get("token") or "").strip()
+    if not token:
+        return None
+
+    try:
+        prices = _get_position_market_pairs([token])
+        pair = prices.get(token) if isinstance(prices, dict) else None
+        if not pair:
+            return None
+
+        price = float(pair.get("priceUsd", 0) or 0)
+        return price if price > 0 else None
+    except Exception as exc:
+        logger.debug(
+            "Position Guard price callback failed token=%s: %s",
+            token,
+            exc
+        )
+        return None
+
+
+def _start_position_guard():
+    global _POSITION_GUARD
+
+    if _POSITION_GUARD is not None:
+        return _POSITION_GUARD
+
+    _POSITION_GUARD = PositionGuard(
+        sell_callback=_position_guard_sell_callback,
+        price_callback=_position_guard_price_callback,
+        poll_seconds=2.0,
+        trailing_enabled=bool(DYNAMIC_TRAILING_TP_ENABLED),
+        trailing_trigger=(
+            float(TRAILING_LOCK_TABLE[-1][0])
+            if TRAILING_LOCK_TABLE else 8.0
+        ),
+        trailing_table=TRAILING_LOCK_TABLE,
+    )
+
+    _POSITION_GUARD.start()
+    logger.info(
+        "POSITION GUARD CONNECTED: PRICE + TRAILING + REAL SELL ENGINE"
+    )
+    return _POSITION_GUARD
